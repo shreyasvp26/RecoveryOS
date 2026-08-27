@@ -1,8 +1,9 @@
 """RecoveryOS SQLite persistence layer.
 
-Phase 2 only: initializes the payment_events table and provides the single
+Phase 2/3: initializes the payment_events table and provides the single
 persistence boundary between the domain model and the application/service layer.
-No raw SQL lives outside this module.
+No raw SQL lives outside this module. Persistence stores facts; it never makes
+business decisions.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import json
 import sqlite3
 from typing import Any
 
+from .config import get_database_path
 from .models import PaymentEvent
 
 _PAYMENT_EVENTS_DDL = """
@@ -38,38 +40,51 @@ def connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+def connect_database() -> sqlite3.Connection:
+    """Open a SQLite connection to the configured database path."""
+    return connect(get_database_path())
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """Create the payment_events table if it does not already exist."""
-    conn.execute(_PAYMENT_EVENTS_DDL)
-    conn.commit()
+    try:
+        conn.execute(_PAYMENT_EVENTS_DDL)
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
 
 
 def insert_payment_event(conn: sqlite3.Connection, event: PaymentEvent) -> None:
-    """Persist a PaymentEvent. Duplicate event_id is rejected."""
-    conn.execute(
-        """
-        INSERT INTO payment_events (
-            event_id, order_id, payment_id, customer_id, amount_paise,
-            currency, payment_method, failure_reason, bank, risk_flag,
-            customer_history, timestamp
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event.event_id,
-            event.order_id,
-            event.payment_id,
-            event.customer_id,
-            event.amount_paise,
-            event.currency,
-            event.payment_method,
-            event.failure_reason,
-            event.bank,
-            event.risk_flag,
-            json.dumps(event.customer_history.to_dict()),
-            event.timestamp,
-        ),
-    )
-    conn.commit()
+    """Persist a PaymentEvent. Duplicate event_id is rejected (IntegrityError)."""
+    try:
+        conn.execute(
+            """
+            INSERT INTO payment_events (
+                event_id, order_id, payment_id, customer_id, amount_paise,
+                currency, payment_method, failure_reason, bank, risk_flag,
+                customer_history, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.order_id,
+                event.payment_id,
+                event.customer_id,
+                event.amount_paise,
+                event.currency,
+                event.payment_method,
+                event.failure_reason,
+                event.bank,
+                event.risk_flag,
+                json.dumps(event.customer_history.to_dict()),
+                event.timestamp,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
 
 
 def get_payment_event(conn: sqlite3.Connection, event_id: str) -> PaymentEvent | None:
