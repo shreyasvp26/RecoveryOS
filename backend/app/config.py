@@ -18,6 +18,12 @@ _DATABASE_URL_PREFIX = "sqlite:///"
 DEFAULT_OMNIROUTE_BASE_URL = "https://api.omniroute.ai/v1"
 DEFAULT_OMNIROUTE_MODEL = "omniroute-v1"
 
+# Phase 6 policy defaults. The engine itself never reads environment
+# variables; configuration is resolved here once and passed in explicitly.
+DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H = 2
+DEFAULT_POLICY_EVENT_COOLDOWN_MINUTES = 30
+DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE = 5_000_000  # ₹50,000.00 in paise
+
 
 def get_database_url() -> str:
     """Return the configured database URL, or the development default."""
@@ -47,3 +53,48 @@ def get_omniroute_model() -> str:
 def get_omniroute_base_url() -> str:
     """Return the configured OmniRoute base URL."""
     return os.environ.get("OMNIROUTE_BASE_URL", DEFAULT_OMNIROUTE_BASE_URL)
+
+
+def _resolve_policy_int(env_name: str, default: int) -> int:
+    """Resolve a positive policy integer from the environment (fail-closed)."""
+    raw = os.environ.get(env_name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{env_name} must be an integer") from None
+    return value
+
+
+def get_policy_max_interventions_per_customer_24h() -> int:
+    """Return the configured per-customer rolling 24h intervention limit."""
+    return _resolve_policy_int(
+        "POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H",
+        DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H,
+    )
+
+
+def get_policy_event_cooldown_minutes() -> int:
+    """Return the configured per-event cooldown in minutes."""
+    return _resolve_policy_int(
+        "POLICY_EVENT_COOLDOWN_MINUTES", DEFAULT_POLICY_EVENT_COOLDOWN_MINUTES
+    )
+
+
+def get_policy_daily_spend_cap_paise() -> int:
+    """Return the configured daily spend cap in paise."""
+    return _resolve_policy_int(
+        "POLICY_DAILY_SPEND_CAP_PAISE", DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE
+    )
+
+
+def build_policy_config() -> "PolicyConfig":
+    """Build the deterministic policy configuration from the environment."""
+    from .policy import PolicyConfig
+
+    return PolicyConfig(
+        max_interventions_per_customer_24h=get_policy_max_interventions_per_customer_24h(),
+        event_cooldown_minutes=get_policy_event_cooldown_minutes(),
+        daily_spend_cap_paise=get_policy_daily_spend_cap_paise(),
+    )
