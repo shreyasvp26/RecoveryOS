@@ -101,11 +101,13 @@ def get_razorpay_key_secret() -> str:
 
 
 def build_razorpay_client() -> Any | None:
-    """Build the Razorpay Test Mode client boundary, or None when unconfigured.
+    """Build the Razorpay client boundary, or None when credentials are unset.
 
     Execution only ever runs in REAL_RAZORPAY mode when Test Mode credentials
     are present in the environment; a missing configuration is explicit and
-    never silently bypassed.
+    never silently bypassed. Present-but-invalid credentials (live ``rzp_live_``
+    keys or unrecognized key ids) raise ``RazorpayConfigurationError`` from the
+    client boundary rather than silently disabling execution.
     """
     from .razorpay_client import RazorpayPaymentLinkClient
 
