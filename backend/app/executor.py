@@ -231,6 +231,18 @@ class BoundedExecutor:
                 detail=str(exc),
                 reported_at=decision.evaluated_at,
             )
+        except Exception as exc:
+            # Defense in depth: even an unexpected provider-boundary failure is
+            # recorded as an explicit FAILED outcome, never a fabricated
+            # success and never a silent pass.
+            return ExecutionOutcome(
+                event_id=event.event_id,
+                intervention=PAYMENT_LINK,
+                execution_mode="REAL_RAZORPAY",
+                status="FAILED",
+                detail=f"razorpay_api_error: {exc}",
+                reported_at=decision.evaluated_at,
+            )
 
         return ExecutionOutcome(
             event_id=event.event_id,

@@ -226,6 +226,19 @@ def test_payment_link_unexpected_response_is_failed_not_success() -> None:
     assert outcome.external_reference is None
 
 
+def test_payment_link_unexpected_client_exception_is_explicit_failure() -> None:
+    event = _event()
+    decision = _decision("payment_link")
+    client = StubPaymentLinkClient(error=RuntimeError("boundary leaked"))
+    outcome = BoundedExecutor().execute(
+        event, "payment_link", decision, razorpay_client=client
+    )
+    assert outcome.status == "FAILED"
+    assert "razorpay_api_error" in outcome.detail
+    assert "boundary leaked" in outcome.detail
+    assert outcome.external_reference is None
+
+
 def test_payment_link_failure_never_fabricates_url() -> None:
     event = _event()
     decision = _decision("payment_link")
