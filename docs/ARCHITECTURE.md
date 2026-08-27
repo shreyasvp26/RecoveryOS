@@ -58,12 +58,16 @@ The two modes are kept clearly distinct so that results are never conflated.
 
 All benchmark **recovery amounts are simulated evaluation results** — they are produced by the deterministic test harness, not by real Razorpay transactions. **RecoveryOS does not claim these as production Razorpay revenue.** They exist only to measure relative effectiveness of RecoveryOS against baselines under identical conditions.
 
-## Current Implementation Status (Phase 1)
+## Current Implementation Status (Phase 4)
 
-**Phase 1 is foundation only.** This repository currently contains:
+**Phase 4 is event generation and ingestion.** This repository currently contains:
 
-- A scaffolded FastAPI backend exposing a single deterministic health endpoint (smoke test).
+- A scaffolded FastAPI backend exposing a deterministic health endpoint smoke test.
+- The locked Phase 2 `PaymentEvent` domain contract and validation.
+- The Phase 3 SQLite persistence layer (`payment_events` table).
+- A deterministic, seedable synthetic `PaymentEvent` generator (`app/generator.py`). The same seed and parameters reproduce the same dataset. Generated events contain decision-time information only; benchmark ground truth is intentionally absent.
+- A thin event ingestion boundary (`app/ingestion.py`) that validates every event through the `PaymentEvent` contract, persists via the Phase 3 layer, rejects duplicates deterministically, and surfaces persistence/ingestion failures explicitly.
+- A minimal `POST /events` HTTP ingestion endpoint wired through the ingestion service.
 - A scaffolded React + Vite frontend rendering a minimal RecoveryOS shell.
-- Engineering documentation and a pytest test harness.
 
-**The V1 pipeline described above is planned, not yet implemented.** None of the following exist yet: event ingestion, AI reasoning, the policy gate, intervention selection, executor, outcome engine, audit trail, benchmark, or dashboard. Future phases will build toward the locked V1 architecture.
+**The V1 pipeline described above is planned, not yet implemented.** None of the following exist yet: AI reasoning, the policy gate, intervention selection, executor, Razorpay integration, outcome engine, audit trail, benchmark, or dashboard. Future phases will build toward the locked V1 architecture.
