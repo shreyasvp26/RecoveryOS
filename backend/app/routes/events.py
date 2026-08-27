@@ -6,9 +6,11 @@ advisory AI classifier, persists the classification, and returns it. Phase 6:
 exposes POST /events/{event_id}/policy, which loads the event and its
 classification, derives historical policy context from persisted state,
 evaluates one proposed intervention through the deterministic policy gate,
-persists the decision, and returns it. Routes hold no business logic and no
-SQL; they only wire HTTP to the services. The policy endpoint never executes
-an intervention and never calls the payment provider.
+persists the decision, and returns it. Phase 7: exposes
+POST /events/{event_id}/execute, which derives authoritative policy decisions,
+selects one intervention deterministically, executes it through the correct
+mode, persists the outcome, and returns it. Routes hold no business logic and
+no SQL; they only wire HTTP to the services.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from ..classifier import (
     build_omniroute_adapter,
     classify_event,
 )
-from ..config import build_policy_config
+from ..config import build_policy_config, build_razorpay_client
 from ..db import (
     connect_database,
     get_classification_result,
@@ -37,6 +39,14 @@ from ..db import (
     init_db,
     insert_classification_result,
     insert_policy_decision,
+)
+from ..execution_service import (
+    STATUS_EXECUTION_FAILED,
+    STATUS_EXECUTION_SUCCESS,
+    STATUS_MISSING_CLASSIFICATION,
+    STATUS_NOT_FOUND,
+    STATUS_NO_ACTION,
+    execute_event,
 )
 from ..ingestion import IngestionStatus, ingest_event
 from ..policy import (
@@ -68,6 +78,24 @@ def get_classifier() -> OmniRouteClassifier:
 def get_policy_config() -> PolicyConfig:
     """FastAPI dependency: provide the configured deterministic policy gate."""
     return build_policy_config()
+
+
+def get_now() -> datetime:
+    """FastAPI dependency: the authoritative current time (server-side).
+
+    The execution flow evaluates policy against this time; a client can never
+    choose an evaluation time that bypasses cooldown or customer limits.
+    """
+    return datetime.now(timezone.utc)
+
+
+def get_razorpay_client() -> object | None:
+    """FastAPI dependency: the configured Razorpay Test Mode client boundary.
+
+    Returns None when credentials are unconfigured; the executor surfaces
+    that as an explicit configuration_missing execution failure.
+    """
+    return build_razorpay_client()
 
 
 @router.post("/events")
@@ -276,3 +304,72 @@ def evaluate_event_policy(
         status_code=status.HTTP_200_OK,
         content={"status": "policy_success", "decision": decision.to_dict()},
     )
+
+
+@router.post("/events/{event_id}/execute")
+def execute_event_endpoint(
+    event_id: str,
+    conn: sqlite3.Connection = Depends(get_db),
+    config: PolicyConfig = Depends(get_policy_config),
+    now: datetime = Depends(get_now),
+    razorpay_client: object | None = Depends(get_razorpay_client),
+) -> JSONResponse:
+    """Select and execute one intervention for an event.
+
+    The client supplies neither an intervention nor an authorization: the
+    authoritative flow (classification -> policy -> selector -> executor)
+    fully determines what, if anything, executes. This endpoint never accepts
+    an arbitrary intervention and never trusts client-supplied authorization.
+    """
+    try:
+        result = execute_event(conn, event_id, now, config, razorpay_client)
+    except PolicyValidationError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={
+                "status": "policy_validation_failure",
+                "event_id": event_id,
+                "detail": str(exc),
+            },
+        )
+    except sqlite3.Error:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "execution_persistence_failure",
+                "event_id": event_id,
+            },
+        )
+
+    if result.status == STATUS_NOT_FOUND:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"status": STATUS_NOT_FOUND, "event_id": event_id},
+        )
+    if result.status == STATUS_MISSING_CLASSIFICATION:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={
+                "status": STATUS_MISSING_CLASSIFICATION,
+                "event_id": event_id,
+                "detail": "no valid ClassificationResult; nothing was executed",
+            },
+        )
+    if result.status == STATUS_NO_ACTION:
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": STATUS_NO_ACTION,
+                "event_id": event_id,
+                "selected_intervention": "no_action",
+            },
+        )
+
+    content: dict[str, Any] = {
+        "status": result.status,
+        "event_id": event_id,
+        "selected_intervention": result.selected_intervention,
+        "policy_decision": result.decision.to_dict() if result.decision is not None else None,
+        "execution": result.outcome.to_dict() if result.outcome is not None else None,
+    }
+    return JSONResponse(status_code=status.HTTP_200_OK, content=content)
