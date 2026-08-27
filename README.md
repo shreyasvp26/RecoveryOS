@@ -8,7 +8,7 @@ An **AI Revenue Recovery Control Plane** for the Razorpay AI Buildathon 2026 (Re
 
 The LLM never has direct authority over a money-moving action. AI output is advisory; a deterministic policy gate is authoritative; an executor performs the action; a benchmark proves value against baselines.
 
-> **Important:** This repository is in **Phase 5 — AI Reasoning & Structured Classification**. RecoveryOS does **not yet perform revenue recovery**. Event generation, ingestion, and advisory AI classification exist; the recovery pipeline (policy, executor, Razorpay, benchmark, dashboard) is planned, not implemented.
+> **Important:** This repository is in **Phase 6 — Deterministic Policy Engine / Safety Gate**. RecoveryOS does **not yet perform revenue recovery**. Event generation, ingestion, advisory AI classification, and the deterministic policy gate exist; the recovery pipeline (intervention selection, executor, Razorpay, benchmark, dashboard) is planned, not implemented.
 
 ## Locked Architecture
 
@@ -33,7 +33,7 @@ See `docs/ARCHITECTURE.md` for the detailed design, including the distinction be
 ```
 recoveryos/
 ├── backend/       FastAPI application + pytest test suite
-│   ├── app/       Application package (models, persistence, generator, ingestion, classifier)
+│   ├── app/       Application package (models, persistence, generator, ingestion, classifier, policy)
 │   ├── tests/     pytest tests
 │   ├── requirements.txt
 │   └── .env.example
@@ -87,7 +87,7 @@ Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
 
 ## Current Development Phase
 
-**Phase 5 — AI Reasoning & Structured Classification.** A payment event can now flow end-to-end through generation → ingestion → SQLite → load → AI classification → SQLite. The AI layer is a single configurable OmniRoute-backed classifier that outputs an advisory structured result (root cause category, confidence, reasoning, candidate interventions) which is validated against the locked classification contract and persisted, correlated with the event by `event_id`.
+**Phase 6 — Deterministic Policy Engine / Safety Gate.** A payment event now flows end-to-end through generation → ingestion → SQLite → load → AI classification → SQLite → **deterministic policy evaluation** → persisted decision. The engine is pure Python, contains zero LLM calls, and answers one question per request: *is this proposed intervention permitted?* It never selects the best intervention, never executes anything, and produces an ALLOW/DENY decision with an explicit reason and the checks applied.
 
 ### Phase 4 — Spinning Up Development Data
 
@@ -119,6 +119,25 @@ curl -X POST http://127.0.0.1:8000/events/<event_id>/classify
 - **AI is advisory** — the classifier (via OmniRoute) diagnoses the likely root cause and recommends candidate interventions only. It cannot authorize, select, or execute an action, and it never calls the payment provider.
 - **Structured classification contract** — every model response is validated against the locked Phase 5 contract: `root_cause_category` must be one of `transient`, `customer_action_needed`, `fraud_suspect`, `terminal`; `confidence` must be between 0 and 1; every `candidate_interventions` entry must be one of `retry_immediate`, `retry_delayed`, `payment_link`, `reminder`, `alternate_method_prompt`, `no_action`. Malformed or invalid output triggers at most one retry, then an explicit failure — never a fabricated classification.
 - **Decision-time information only** — the model receives only the locked PaymentEvent fields. Benchmark ground truth, true outcomes, and recovery probabilities are structurally absent.
-- **Policy remains authoritative** — the deterministic policy gate (future phase) still decides which, if any, intervention proceeds. This phase ends at classification and persistence.
+- **Policy remains authoritative** — the deterministic policy gate (Phase 6) decides whether a proposed intervention is permitted. This phase ends at classification and persistence.
 
-What Phase 5 can and cannot do: it can ingest events, classify them, and persist classifications (`classification_results`, correlated by `event_id`). It cannot yet execute recovery actions. Policy, selection, executor, Razorpay integration, benchmark, and dashboard remain planned for later phases.
+### Phase 6 — Deterministic Policy Safety Gate
+
+```bash
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app
+
+# evaluate one proposed intervention (no execution, no provider calls)
+curl -X POST http://127.0.0.1:8000/events/<event_id>/policy \
+  -H "Content-Type: application/json" \
+  -d '{"proposed_intervention": "retry_delayed", "evaluation_time": "2026-08-27T13:00:00+00:00"}'
+```
+
+- **Authority path** — the LLM only recommends; the deterministic policy engine authorizes (ALLOW/DENY); the future executor acts. There is never an `execute=true` supplied by the LLM.
+- **Six locked rules, evaluated in a fixed order** — (1) fraud protection (`fraud_suspect` events are always denied), (2) max 2 interventions per customer per rolling 24h, (3) 30-minute event cooldown, (4) configurable daily spend cap (rolling 24h, global), (5) terminal failure block, (6) duplicate successful-intervention protection. The first blocker determines the denial reason; the same inputs always produce the same decision.
+- **Fail-closed by construction** — malformed input, unknown interventions, timezone-naive timestamps, and history lookups that cannot be determined safely produce explicit controlled errors; policy never fabricates history, spend, or duplicates and never fails open.
+- **Historical facts come from persisted state** — the customer 24h count, most-recent event intervention, successful-duplicate flag, and daily spend are computed by the persistence boundary (`intervention_attempts`) with actual datetime arithmetic against the explicit evaluation timestamp, never from the LLM and never from shadow in-memory state.
+- **Persistence** — every evaluation is persisted to `policy_decisions` (correlated by `event_id`, preserving the decision contract). No execution exists: nothing in Phase 6 records a successful intervention.
+
+What Phase 6 can and cannot do: it can evaluate and persist advisory policy decisions. It cannot select the best intervention, rank candidates, or execute anything. Selection, executor, Razorpay integration, benchmark, and dashboard remain planned for later phases.
