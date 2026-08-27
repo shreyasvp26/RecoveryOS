@@ -27,7 +27,6 @@ INTERVENTION_ATTEMPT_STATUSES: frozenset[str] = frozenset(
 )
 
 # Blocking denial reasons, in deterministic evaluation order.
-RULE_INVALID_INTERVENTION = "invalid_intervention"
 RULE_FRAUD = "fraud_protection"
 RULE_TERMINAL = "terminal_failure"
 RULE_DUPLICATE = "duplicate_intervention"
@@ -43,10 +42,11 @@ CHECK_RETRY_LIMIT = "retry_limit_passed"
 CHECK_COOLDOWN = "cooldown_check_passed"
 CHECK_SPEND_CAP = "spend_cap_passed"
 
-# Deterministic, documented evaluation order. The first blocker determines
-# the denial reason; the same inputs always produce the same decision.
+# Deterministic, documented evaluation order. Intervention validation is a
+# fail-closed precondition (malformed input raises PolicyValidationError);
+# the first blocker among the six rules determines the denial reason, and the
+# same inputs always produce the same decision.
 DETERMINISTIC_RULE_ORDER: tuple[str, ...] = (
-    RULE_INVALID_INTERVENTION,
     RULE_FRAUD,
     RULE_TERMINAL,
     RULE_DUPLICATE,
@@ -400,10 +400,18 @@ def _validate_input(input: PolicyInput) -> None:
     """Fail-closed validation of the evaluation inputs.
 
     Any input that cannot be evaluated safely raises PolicyValidationError;
-    policy never guesses and never substitutes fabricated context.
+    policy never guesses and never substitutes fabricated context. An
+    intervention outside the locked taxonomy is malformed input and is never
+    evaluated as a candidate.
     """
-    if not isinstance(input.proposed_intervention, str):
-        raise PolicyValidationError("proposed_intervention must be a string")
+    if (
+        not isinstance(input.proposed_intervention, str)
+        or input.proposed_intervention not in CANDIDATE_INTERVENTIONS
+    ):
+        raise PolicyValidationError(
+            f"proposed_intervention must be one of {sorted(CANDIDATE_INTERVENTIONS)}, "
+            f"got {input.proposed_intervention!r}"
+        )
     if input.event.risk_flag not in ("normal", "fraud_suspect"):
         raise PolicyValidationError(
             f"unexpected risk_flag {input.event.risk_flag!r}"
@@ -443,9 +451,6 @@ class PolicyEngine:
                 policy_rules_applied=(reason,),
                 evaluated_at=evaluated_at,
             )
-
-        if input.proposed_intervention not in CANDIDATE_INTERVENTIONS:
-            return denied(RULE_INVALID_INTERVENTION)
 
         passed: list[str] = []
 

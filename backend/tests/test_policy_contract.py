@@ -65,7 +65,6 @@ def decision_dict(**overrides) -> dict:
 
 def test_rule_order_is_deterministic_and_documented() -> None:
     assert DETERMINISTIC_RULE_ORDER == (
-        "invalid_intervention",
         "fraud_protection",
         "terminal_failure",
         "duplicate_intervention",
