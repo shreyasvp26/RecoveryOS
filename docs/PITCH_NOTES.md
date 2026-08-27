@@ -1,6 +1,6 @@
 # RecoveryOS — Five-Minute Pitch Notes
 
-**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation, ingestion, advisory AI classification, the deterministic policy gate, V1 intervention selection, and bounded execution (simulated or Razorpay Test Mode Payment Link) exist. The outcome engine, benchmark harness, and dashboard are not implemented yet.
+**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation, ingestion, advisory AI classification, the deterministic policy gate, V1 intervention selection, and bounded execution (simulated or Razorpay Test Mode Payment Link) exist. The Phase 8 evaluation foundation also exists — a hidden, event-specific outcome model and a deterministic recovery simulation, isolated from the decision path — so recovery can now be *measured* honestly in simulation. The benchmark harness/metrics and the audit dashboard are not implemented yet.
 
 ## The Problem
 
@@ -18,6 +18,7 @@ RecoveryOS is an **AI Revenue Recovery Control Plane** that turns payment failur
 - It reasons about what intervention, if any, is worth attempting.
 - A **deterministic policy gate** decides — the AI never has direct authority over money.
 - An executor performs the action against Razorpay Test Mode, or evaluates it in a controlled simulation.
+- A deterministic, hidden outcome model paired with an event decides, fairly and reproducibly, whether each intervention recovered the payment.
 - Every step lands in an append-only audit trail.
 - A benchmark compares RecoveryOS against **No Action** and **Naive Retry** to prove value.
 

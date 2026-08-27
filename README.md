@@ -8,7 +8,7 @@ An **AI Revenue Recovery Control Plane** for the Razorpay AI Buildathon 2026 (Re
 
 The LLM never has direct authority over a money-moving action. AI output is advisory; a deterministic policy gate is authoritative; an executor performs the action; a benchmark proves value against baselines.
 
-> **Important:** This repository is in **Phase 7 — Intervention Selection + Bounded Execution**. RecoveryOS performs **no production revenue recovery**: it can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link. The recovery pipeline (outcome engine, audit dashboard, benchmark) is planned, not implemented.
+> **Important:** This repository is in **Phase 8 — Deterministic Outcome Simulation + Honest Benchmark Foundation**. RecoveryOS performs **no production revenue recovery**: it can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link, and it now owns the evaluation-layer foundation that makes recovery measurable — a hidden, event-specific outcome model and a deterministic recovery simulation — kept strictly isolated from the decision path. The benchmark harness, strategies, metrics, audit dashboard, and outcome engine remain future work.
 
 ## Locked Architecture
 
@@ -20,13 +20,14 @@ Razorpay Test Mode
   → Deterministic Policy Gate
   → Intervention Selection
   → Real Razorpay Test Action OR Controlled Simulation
+  → Evaluation Boundary (Hidden Outcome Model + Deterministic Simulation)
   → Outcome Engine
   → Append-only Audit Trail
   → Benchmark
   → Dashboard
 ```
 
-See `docs/ARCHITECTURE.md` for the detailed design, including the distinction between `REAL_RAZORPAY` and `SIMULATED`, and the rule that benchmark recovery amounts are simulated evaluation results (not production Razorpay revenue).
+See `docs/ARCHITECTURE.md` for the detailed design, including the distinction between `REAL_RAZORPAY` and `SIMULATED`, and the rule that benchmark recovery amounts are simulated evaluation results (not production Razorpay revenue). The Phase 8 evaluation boundary is described there too: deterministic, order-independent, hidden from the decision path.
 
 ## Repository Structure
 
@@ -87,7 +88,34 @@ Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
 
 ## Current Development Phase
 
-**Phase 7 — Intervention Selection + Bounded Execution.** A payment event now flows end-to-end through generation → ingestion → SQLite → load → AI classification → SQLite → deterministic policy evaluation (every actionable candidate) → selection → **bounded execution** → persisted outcome. The selection is a pure, deterministic priority rule; the executor requires authoritative policy authorization and either simulates the action or creates a real Razorpay Test Mode Payment Link. Execution success is never claimed as revenue recovery.
+**Phase 8 — Deterministic Outcome Simulation + Honest Benchmark Foundation.** A payment event flows end-to-end through generation → ingestion → SQLite → load → AI classification → SQLite → deterministic policy evaluation (every actionable candidate) → selection → **bounded execution** → persisted outcome, exactly as in Phase 7. On top of that, Phase 8 adds the **evaluation-only** layer that makes recovery measurable: a hidden, event-specific outcome model and a deterministic recovery simulation, used to answer *did a executed intervention actually recover the money?* — never to influence what executes. Execution success is never claimed as revenue recovery, and the hidden model can never be seen by the AI, the policy gate, the selector, or the executor.
+
+### Phase 8 — Deterministic Outcome Simulation + Honest Benchmark (Foundation)
+
+```bash
+cd backend
+python -m pytest                            # full suite (Phase 8 integrity tests included)
+
+# The evaluation harness regenerates events and the hidden model from a seed,
+# then simulates each intervention's outcome — fully in memory, no records needed
+python -c "
+from app.generator import generate_events
+from app.outcome_model import generate_hidden_outcome_model
+from app.outcome import OutcomeSimulator
+events = generate_events(seed=42, count=10)
+model = generate_hidden_outcome_model(events, 42)
+for event in events[:2]:
+    print(OutcomeSimulator(model).simulate(event, 'retry_delayed').to_dict())
+"
+```
+
+- **Hidden outcome model (`app/outcome_model.py`)** — each synthetic event gets its own recovery probability for **exactly the locked interventions** (including `no_action`, the natural baseline). The model is evaluation-owned: the classifier, policy gate, selector, executor, and Razorpay boundary never receive or refer to it.
+- **Event-specific and deterministic** — probabilities are drawn from a per-event `random.Random(f"{seed}:{event_id}")`. A probability depends only on (seed, event identity), not on event-set size, evaluation order, or any shared RNG. No `random.seed()`, no module-global mutable RNG, explicit integer seed only.
+- **Explicit bounds, never clamped** — every probability must satisfy `0 <= p <= 1`; anything else (including a missing event/intervention) fails with an explicit error (`InvalidSeedError`, `InvalidOutcomeProbabilityError`, `MissingGroundTruthError`). No guessed defaults, no `except: pass`.
+- **Deterministic recovery simulation (`app/outcome.py`)** — one Bernoulli draw per (event, intervention) from a private `random.Random(f"{seed}:{event_id}:{intervention}")`; the outcome for a triple is identical no matter how many simulations happen before it or in what order. `RecoveryOutcome` is minimal: `event_id`, `intervention`, `recovered`, `recovered_amount_paise` (derived: `event.amount_paise` when recovered, else 0). Hidden probabilities never appear in the record.
+- **Execution success ≠ recovery success** — an executed intervention can have `ExecutionOutcome.status == "SUCCESS"` and yet simulate `recovered == false` (and vice versa). Recovery is decided only at the evaluation boundary, independently of execution.
+- **Hard isolation** — hidden ground truth never reaches the LLM input/prompt, policy decisions, selection, execution, API responses, or normal logs (enforced by source-level, behavioral, and API-level integrity tests). **Possible recovery ≠ authorized recovery**: a `fraud_suspect` event stays denied even when the hidden model says recovery is certain.
+- **No persistence, no new endpoints** — the model and outcomes are harness-side state, regenerated deterministically; nothing is written to the database and no `/benchmark` or `/ground-truth` API exists. Deleting the DB and re-running the pipeline requires no manual benchmark records.
 
 ### Phase 4 — Spinning Up Development Data
 
@@ -159,6 +187,8 @@ curl -X POST http://127.0.0.1:8000/events/<event_id>/execute     # no body, no c
 - **No client bypass** — `POST /events/{event_id}/execute` accepts no intervention and no `allowed` flag; the authoritative chain (classification → policy → selection → executor) fully determines what executes, evaluated against server-side time.
 - **Persistence** — outcomes are appended to `execution_outcomes` (correlated by `event_id`); each execution also records an `intervention_attempts` row so Phase 6 policy facts (customer limits, cooldown, spend, duplicates) stay derived from persisted state. Historical decisions and outcomes are never overwritten.
 - **Execution success ≠ revenue recovery outcome** — `SUCCESS` means only that the operation itself ran. Phase 7 contains no outcome model: whether revenue was recovered is answered by the later benchmark/outcome layer, never by selection or execution.
+
+What Phase 8 can and cannot do: it can deterministically simulate whether an executed intervention recovered an event, and it keeps that ground truth strictly out of the decision path. It cannot run final benchmark strategies/metrics on that simulation (that is the planned Phase 9 harness), cannot rank interventions by expected value, and does not add any dashboard or V2 optimizer.
 
 What Phase 7 can and cannot do: it can select and execute (simulate or create a Test Mode Payment Link) a single authorized intervention per event. It cannot benchmark, cannot estimate recovery, cannot rank by expected value, and there is no audit dashboard or V2 optimizer.
 
