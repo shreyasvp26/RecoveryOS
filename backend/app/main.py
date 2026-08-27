@@ -1,12 +1,16 @@
 """RecoveryOS backend application entrypoint.
 
-Phase 1 foundation only: exposes a single deterministic health endpoint
-as a smoke test for the application foundation. No RecoveryOS business logic.
+Phase 1 foundation: a single deterministic health endpoint. Phase 4: a
+minimal payment event ingestion endpoint wired through the ingestion service.
+No RecoveryOS business logic beyond event ingestion.
 """
 
 from fastapi import FastAPI
 
+from .routes.events import router as events_router
+
 app = FastAPI(title="RecoveryOS API", version="0.1.0")
+app.include_router(events_router)
 
 HEALTH_RESPONSE = {"status": "ok"}
 
