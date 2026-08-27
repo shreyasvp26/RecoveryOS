@@ -60,9 +60,9 @@ The two modes are kept clearly distinct so that results are never conflated.
 
 All benchmark **recovery amounts are simulated evaluation results** — they are produced by the deterministic test harness, not by real Razorpay transactions. **RecoveryOS does not claim these as production Razorpay revenue.** They exist only to measure relative effectiveness of RecoveryOS against baselines under identical conditions.
 
-## Current Implementation Status (Phase 8)
+## Current Implementation Status (Phase 9)
 
-**Phase 7 adds deterministic intervention selection and bounded execution.** This repository currently contains:
+**Phase 8 delivered the evaluation boundary; Phase 9 added the honest three-strategy benchmark.** This repository currently contains:
 
 - A scaffolded FastAPI backend exposing a deterministic health endpoint smoke test.
 - The locked Phase 2 `PaymentEvent` domain contract and validation.
