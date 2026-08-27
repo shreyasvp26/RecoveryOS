@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .classification import ClassificationResult
@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS execution_outcomes (
 )
 """
 
+# Phase 10: a read-only store for the latest persisted benchmark run summary so
+# the Command Center can display real backend benchmark data. This table holds
+# only the compact, already-computed summary (strategy results); it never
+# stores hidden outcome probabilities or evaluation internals.
+_BENCHMARK_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+    run_id           TEXT PRIMARY KEY,
+    seed             INTEGER NOT NULL,
+    event_count      INTEGER NOT NULL,
+    model_seed       INTEGER NOT NULL,
+    evaluation_time  TEXT NOT NULL,
+    evaluation_mode  TEXT NOT NULL,
+    saved_at         TEXT NOT NULL,
+    summary_json     TEXT NOT NULL
+)
+"""
+
 
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection to the given database path."""
@@ -114,6 +131,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_POLICY_DECISIONS_DDL)
         conn.execute(_INTERVENTION_ATTEMPTS_DDL)
         conn.execute(_EXECUTION_OUTCOMES_DDL)
+        conn.execute(_BENCHMARK_RUNS_DDL)
         conn.commit()
     except sqlite3.Error:
         conn.rollback()
@@ -426,3 +444,293 @@ def get_policy_history(
         has_successful_intervention=has_successful_intervention,
         existing_daily_spend_paise=existing_daily_spend_paise,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 read-only queries (Command Center + Event Decision Trace).
+# These functions only READ persisted state so the operator dashboard can
+# render it; they never make, change, or fabricate a decision.
+# ---------------------------------------------------------------------------
+
+
+def list_payment_events(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    query: str | None = None,
+    risk_flag: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return event summaries (newest first), optionally filtered.
+
+    ``query`` matches a substring against event/customer/order/payment ids.
+    ``risk_flag`` filters on the locked risk_flag value set. Limit caps the
+    response; the returned records are the full PaymentEvent contract so the
+    Command Center can render real persisted events.
+    """
+    sql = "SELECT * FROM payment_events WHERE 1 = 1"
+    params: list[Any] = []
+    if query:
+        like = f"%{query}%"
+        sql += (
+            " AND (event_id LIKE ? OR customer_id LIKE ? OR "
+            "order_id LIKE ? OR payment_id LIKE ?)"
+        )
+        params.extend([like, like, like, like])
+    if risk_flag:
+        sql += " AND risk_flag = ?"
+        params.append(risk_flag)
+    sql += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(int(limit))
+    rows = conn.execute(sql, params).fetchall()
+    return [_row_to_event(row).to_dict() for row in rows]
+
+
+def count_payment_events(conn: sqlite3.Connection) -> int:
+    """Count persisted payment events."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM payment_events"
+    ).fetchone()
+    return int(row["c"])
+
+
+def sum_event_amount_paise(conn: sqlite3.Connection) -> int:
+    """Total amount (paise) across persisted payment events (Revenue at Risk)."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_paise), 0) AS s FROM payment_events"
+    ).fetchone()
+    return int(row["s"])
+
+
+def get_policy_decisions_for_event(
+    conn: sqlite3.Connection, event_id: str
+) -> list[dict[str, Any]]:
+    """Return every persisted policy decision for one event, newest last."""
+    rows = conn.execute(
+        """
+        SELECT * FROM policy_decisions
+        WHERE event_id = ?
+        ORDER BY evaluated_at ASC
+        """,
+        (event_id,),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        data["allowed"] = bool(data["allowed"])
+        data["policy_rules_applied"] = json.loads(data["policy_rules_applied"])
+        out.append(data)
+    return out
+
+
+def get_execution_outcomes_for_event(
+    conn: sqlite3.Connection, event_id: str
+) -> list[dict[str, Any]]:
+    """Return every persisted execution outcome for one event, newest last."""
+    rows = conn.execute(
+        """
+        SELECT * FROM execution_outcomes
+        WHERE event_id = ?
+        ORDER BY reported_at ASC
+        """,
+        (event_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_intervention_attempts_for_event(
+    conn: sqlite3.Connection, event_id: str
+) -> list[dict[str, Any]]:
+    """Return every persisted intervention attempt for one event, newest last."""
+    rows = conn.execute(
+        """
+        SELECT * FROM intervention_attempts
+        WHERE event_id = ?
+        ORDER BY attempted_at ASC
+        """,
+        (event_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_policy_decision_stats(conn: sqlite3.Connection) -> dict[str, int]:
+    """Total and denied persisted policy decisions."""
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN allowed = 0 THEN 1 ELSE 0 END), 0) AS denied
+        FROM policy_decisions
+        """
+    ).fetchone()
+    return {"total": int(row["total"]), "denied": int(row["denied"])}
+
+
+def get_execution_outcome_stats(conn: sqlite3.Connection) -> dict[str, int]:
+    """Total and SUCCESS persisted execution outcomes."""
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success
+        FROM execution_outcomes
+        """
+    ).fetchone()
+    return {"total": int(row["total"]), "success": int(row["success"])}
+
+
+def count_denied_on_fraud_events(conn: sqlite3.Connection) -> int:
+    """Count denied policy decisions whose event is fraud_suspect.
+
+    This is the honest basis for the 'Fraud Actions Blocked' card: each denied
+    decision on a fraud event is a fraudulent action the policy gate refused.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS c
+        FROM policy_decisions pd
+        JOIN payment_events pe ON pe.event_id = pd.event_id
+        WHERE pd.allowed = 0 AND pe.risk_flag = 'fraud_suspect'
+        """
+    ).fetchone()
+    return int(row["c"])
+
+
+def get_policy_blocked_event_amounts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Aggregate events that policy blocked (>=1 denied decision).
+
+    Returns {count, amount_paise} over distinct blocked events. An event whose
+    every actionable candidate was denied is a real blocked action the operator
+    can see; this is the honest fraction of Revenue at Risk that RecoveryOS did
+    not act on because the safety gate refused it.
+    """
+    rows = conn.execute(
+        """
+        SELECT pe.event_id, pe.amount_paise
+        FROM payment_events pe
+        WHERE EXISTS (
+            SELECT 1 FROM policy_decisions pd
+            WHERE pd.event_id = pe.event_id AND pd.allowed = 0
+        )
+        """
+    ).fetchall()
+    return {
+        "count": len(rows),
+        "amount_paise": sum(int(row["amount_paise"]) for row in rows),
+    }
+
+
+def get_unclassified_event_amounts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Aggregate events with no persisted classification (never diagnosed).
+
+    Returns {count, amount_paise}. These events received no AI diagnosis, so
+    no intervention was attempted for them.
+    """
+    rows = conn.execute(
+        """
+        SELECT pe.event_id, pe.amount_paise
+        FROM payment_events pe
+        WHERE NOT EXISTS (
+            SELECT 1 FROM classification_results c
+            WHERE c.event_id = pe.event_id
+        )
+        """
+    ).fetchall()
+    return {
+        "count": len(rows),
+        "amount_paise": sum(int(row["amount_paise"]) for row in rows),
+    }
+
+
+def get_blocked_policy_decisions(
+    conn: sqlite3.Connection, *, limit: int = 100
+) -> list[dict[str, Any]]:
+    """Return denied policy decisions joined with their event context.
+
+    Used by the Policy & Blocked Actions screen; an operator can see the
+    event, customer, amount, the rule that blocked, and the denial reason.
+    """
+    rows = conn.execute(
+        """
+        SELECT pd.event_id, pd.proposed_intervention, pd.allowed, pd.denial_reason,
+               pd.policy_rules_applied, pd.evaluated_at,
+               pe.customer_id, pe.amount_paise, pe.currency, pe.risk_flag,
+               pe.failure_reason, pe.timestamp
+        FROM policy_decisions pd
+        LEFT JOIN payment_events pe ON pe.event_id = pd.event_id
+        WHERE pd.allowed = 0
+        ORDER BY pd.evaluated_at DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        data["allowed"] = bool(data["allowed"])
+        data["policy_rules_applied"] = json.loads(data["policy_rules_applied"])
+        out.append(data)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 benchmark persistence (read/write of the latest run summary only).
+# The summary is already computed by the frozen Phase 9 module; these functions
+# only store and retrieve it so the dashboard can display real backend data.
+# No benchmark algorithm or metric definition lives here.
+# ---------------------------------------------------------------------------
+
+
+def upsert_benchmark_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    seed: int,
+    event_count: int,
+    model_seed: int,
+    evaluation_time: str,
+    evaluation_mode: str,
+    summary_json: str,
+) -> None:
+    """Persist (or replace) a benchmark run summary, keyed by run_id."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO benchmark_runs (
+            run_id, seed, event_count, model_seed, evaluation_time,
+            evaluation_mode, saved_at, summary_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            int(seed),
+            int(event_count),
+            int(model_seed),
+            evaluation_time,
+            evaluation_mode,
+            datetime.now(timezone.utc).isoformat(),
+            summary_json,
+        ),
+    )
+    conn.commit()
+
+
+def get_latest_benchmark_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """Return the most recently saved benchmark run summary, or None."""
+    row = conn.execute(
+        """
+        SELECT run_id, seed, event_count, model_seed, evaluation_time,
+               evaluation_mode, saved_at, summary_json
+        FROM benchmark_runs
+        ORDER BY saved_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "run_id": row["run_id"],
+        "seed": row["seed"],
+        "event_count": row["event_count"],
+        "model_seed": row["model_seed"],
+        "evaluation_time": row["evaluation_time"],
+        "evaluation_mode": row["evaluation_mode"],
+        "saved_at": row["saved_at"],
+        "summary": json.loads(row["summary_json"]),
+    }
