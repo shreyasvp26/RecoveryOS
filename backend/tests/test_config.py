@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import DEFAULT_DATABASE_URL, get_database_path, get_database_url
+from app.config import (
+    DEFAULT_DATABASE_URL,
+    DEFAULT_OMNIROUTE_BASE_URL,
+    DEFAULT_OMNIROUTE_MODEL,
+    get_database_path,
+    get_database_url,
+    get_omniroute_api_key,
+    get_omniroute_base_url,
+    get_omniroute_model,
+)
 from app.db import connect_database, init_db
 
 
@@ -37,3 +46,24 @@ def test_connect_database_uses_configured_path(monkeypatch, tmp_path) -> None:
     finally:
         conn.close()
     assert db_path.exists()
+
+
+def test_omniroute_model_and_base_url_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("OMNIROUTE_MODEL", raising=False)
+    monkeypatch.delenv("OMNIROUTE_BASE_URL", raising=False)
+    assert get_omniroute_model() == DEFAULT_OMNIROUTE_MODEL
+    assert get_omniroute_base_url() == DEFAULT_OMNIROUTE_BASE_URL
+
+
+def test_omniroute_env_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("OMNIROUTE_MODEL", "my-model")
+    monkeypatch.setenv("OMNIROUTE_BASE_URL", "https://omniroute.example/v1")
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "sk-test")
+    assert get_omniroute_model() == "my-model"
+    assert get_omniroute_base_url() == "https://omniroute.example/v1"
+    assert get_omniroute_api_key() == "sk-test"
+
+
+def test_omniroute_api_key_defaults_to_empty(monkeypatch) -> None:
+    monkeypatch.delenv("OMNIROUTE_API_KEY", raising=False)
+    assert get_omniroute_api_key() == ""

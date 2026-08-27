@@ -58,16 +58,18 @@ The two modes are kept clearly distinct so that results are never conflated.
 
 All benchmark **recovery amounts are simulated evaluation results** — they are produced by the deterministic test harness, not by real Razorpay transactions. **RecoveryOS does not claim these as production Razorpay revenue.** They exist only to measure relative effectiveness of RecoveryOS against baselines under identical conditions.
 
-## Current Implementation Status (Phase 4)
+## Current Implementation Status (Phase 5)
 
-**Phase 4 is event generation and ingestion.** This repository currently contains:
+**Phase 5 adds advisory AI classification.** This repository currently contains:
 
 - A scaffolded FastAPI backend exposing a deterministic health endpoint smoke test.
 - The locked Phase 2 `PaymentEvent` domain contract and validation.
 - The Phase 3 SQLite persistence layer (`payment_events` table).
-- A deterministic, seedable synthetic `PaymentEvent` generator (`app/generator.py`). The same seed and parameters reproduce the same dataset. Generated events contain decision-time information only; benchmark ground truth is intentionally absent.
-- A thin event ingestion boundary (`app/ingestion.py`) that validates every event through the `PaymentEvent` contract, persists via the Phase 3 layer, rejects duplicates deterministically, and surfaces persistence/ingestion failures explicitly.
-- A minimal `POST /events` HTTP ingestion endpoint wired through the ingestion service.
+- Phase 4 deterministic, seedable synthetic `PaymentEvent` generation and a thin event ingestion boundary.
+- The Phase 5 advisory classification contract (`app/classification.py`) with the locked root-cause and candidate-intervention taxonomies.
+- A single configurable OmniRoute-backed classifier (`app/classifier.py`) that receives decision-time event information only, emits a structured JSON result, validates it strictly (at most one retry for malformed output), and fails explicitly on ML/provider errors.
+- Phase 5 classification persistence (`classification_results` table, correlated with `payment_events` by `event_id`).
+- A minimal `POST /events/{event_id}/classify` endpoint wiring load → classify → persist → return.
 - A scaffolded React + Vite frontend rendering a minimal RecoveryOS shell.
 
-**The V1 pipeline described above is planned, not yet implemented.** None of the following exist yet: AI reasoning, the policy gate, intervention selection, executor, Razorpay integration, outcome engine, audit trail, benchmark, or dashboard. Future phases will build toward the locked V1 architecture.
+**The V1 pipeline described above is planned, not yet implemented.** None of the following exist yet: the deterministic policy gate, intervention selection, executor, Razorpay integration, outcome engine, audit trail, benchmark, or dashboard. The AI classifier is advisory only; it cannot authorize, select, or execute an action, and it has no access to benchmark ground truth. Future phases will build toward the locked V1 architecture.

@@ -1,6 +1,6 @@
 # RecoveryOS — Five-Minute Pitch Notes
 
-**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation and ingestion exist, and none of the recovery pipeline is implemented yet.
+**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation, ingestion, and advisory AI classification exist, and none of the recovery execution pipeline is implemented yet.
 
 ## The Problem
 
