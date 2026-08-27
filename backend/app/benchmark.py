@@ -31,6 +31,13 @@ Evaluation honesty:
 * When a strategy attempts no intervention on an event, the modeled
   ``no_action`` baseline is what materializes for that event (uniform rule;
   see the strategy definitions below).
+* Executor execution is recorded precisely: only RecoveryOS can run the
+  policy-authorizing executor (``executed_by_executor`` True, with an
+  executor status). Baseline strategies select/attempt an intervention but
+  are modeled directly by the simulator and never claim executor success.
+* A pipeline exception is always visible and is never converted into an
+  ordinary recovery outcome; a failure that occurs after an intervention was
+  selected and executed preserves the attempted state.
 * The classifier used by default is a deterministic, project-owned controlled
   classifier (advisory, decision-time inputs only) so runs are reproducible.
   Any LLM adapter satisfying the classifier Protocol can be injected instead,
@@ -171,10 +178,16 @@ class BenchmarkEventResult:
     """One simulated outcome for one event under one strategy.
 
     The record is explicit about what happened:
-    - attempted: a real intervention was attempted on this event;
-    - execution_status: SUCCESS/FAILED when attempted (or None);
+    - attempted: an intervention was selected/attempted on this event;
+    - executed_by_executor: the intervention actually ran through the
+      RecoveryOS policy-authorizing executor (BoundedExecutor). False when the
+      intervention was modeled directly by the outcome simulator without the
+      executor (the No Action baseline and Naive Retry), even when attempted;
+    - execution_status: the executor's SUCCESS/FAILED (or None when the
+      executor did not run);
     - skipped: the strategy bypassed this event by eligibility definition;
-    - exception: the pipeline failed on this event and produced no outcome;
+    - exception: the pipeline failed on this event and produced no simulated
+      outcome (recovered is then False and the recovered amount is 0);
     - recovery_source: "attempt" when the outcome came from an attempted
       intervention, "passive" when the modeled no_action baseline applied.
     """
@@ -183,6 +196,7 @@ class BenchmarkEventResult:
     strategy: str
     intervention: str
     attempted: bool
+    executed_by_executor: bool
     execution_status: str | None
     skipped: bool
     exception: str | None
@@ -205,11 +219,29 @@ class BenchmarkEventResult:
             )
         if type(self.attempted) is not bool:
             raise InvalidBenchmarkConfigurationError("attempted must be a boolean")
+        if type(self.executed_by_executor) is not bool:
+            raise InvalidBenchmarkConfigurationError(
+                "executed_by_executor must be a boolean"
+            )
         if self.execution_status is not None and self.execution_status not in EXECUTION_STATUSES:
             raise InvalidBenchmarkConfigurationError(
                 f"execution_status must be None or one of {sorted(EXECUTION_STATUSES)}, "
                 f"got {self.execution_status!r}"
             )
+        if self.executed_by_executor:
+            if not self.attempted:
+                raise InvalidBenchmarkConfigurationError(
+                    "an executor-run intervention must also be attempted"
+                )
+            if self.execution_status is None:
+                raise InvalidBenchmarkConfigurationError(
+                    "an executor-run intervention must carry an execution_status"
+                )
+        else:
+            if self.execution_status is not None:
+                raise InvalidBenchmarkConfigurationError(
+                    "a non-executor event must not carry an execution_status"
+                )
         if type(self.skipped) is not bool:
             raise InvalidBenchmarkConfigurationError("skipped must be a boolean")
         if self.exception is not None and not isinstance(self.exception, str):
@@ -260,6 +292,7 @@ class BenchmarkEventResult:
             "strategy": self.strategy,
             "intervention": self.intervention,
             "attempted": self.attempted,
+            "executed_by_executor": self.executed_by_executor,
             "execution_status": self.execution_status,
             "skipped": self.skipped,
             "exception": self.exception,
@@ -281,9 +314,13 @@ class BenchmarkStrategyResult:
 
     Accounting invariant: processed + skipped + exceptions == event_count.
     processed counts events that produced a simulated outcome (attempted or
-    passive) without an exception. failed_outcomes counts attempted events
-    that simulated non-recovery. skipped counts events the strategy bypassed
-    by eligibility definition.
+    passive) without an exception. successful_interventions counts only events
+    whose intervention ran through the RecoveryOS executor and reported SUCCESS
+    (baseline strategies that never call the executor report 0).
+    failed_outcomes counts attempted events that simulated non-recovery and
+    are NOT exceptions (an exception is never a failed outcome, and a
+    post-execution exception is never an ordinary unsuccessful recovery).
+    skipped counts events the strategy bypassed by eligibility definition.
     """
 
     strategy: str
@@ -500,20 +537,39 @@ class BenchmarkReport:
 
 
 def _exception_record(
-    event: PaymentEvent, strategy: str, detail: str
+    event: PaymentEvent,
+    strategy: str,
+    detail: str,
+    *,
+    attempted: bool = False,
+    executed_by_executor: bool = False,
+    intervention: str = NO_ACTION,
+    execution_status: str | None = None,
 ) -> BenchmarkEventResult:
-    """Build a failed record carrying the pipeline exception (never conflation)."""
+    """Build an exception record carrying the pipeline failure (never conflation).
+
+    For a pre-intervention failure (e.g. classification) ``attempted`` stays
+    False. For a failure that happens AFTER an intervention was selected and
+    executed (e.g. the outcome simulation throws), the known state at failure
+    is preserved: the intervention, whether the executor ran, and the executor
+    status are carried on the record, and ``recovery_source`` is "attempt".
+    The record never claims recovery and never converts the exception into an
+    ordinary unsuccessful recovery.
+    """
     return BenchmarkEventResult(
         event_id=event.event_id,
         strategy=strategy,
-        intervention=NO_ACTION,
-        attempted=False,
-        execution_status=None,
+        intervention=intervention,
+        attempted=attempted,
+        executed_by_executor=executed_by_executor,
+        execution_status=execution_status,
         skipped=False,
         exception=detail,
         recovered=False,
         recovered_amount_paise=0,
-        recovery_source=RECOVERY_SOURCE_PASSIVE,
+        recovery_source=(
+            RECOVERY_SOURCE_ATTEMPT if attempted else RECOVERY_SOURCE_PASSIVE
+        ),
     )
 
 
@@ -538,6 +594,7 @@ def run_no_action(
                 strategy=STRATEGY_NO_ACTION,
                 intervention=NO_ACTION,
                 attempted=False,
+                executed_by_executor=False,
                 execution_status=None,
                 skipped=False,
                 exception=None,
@@ -575,6 +632,7 @@ def run_naive_retry(
                     strategy=STRATEGY_NAIVE_RETRY,
                     intervention=NO_ACTION,
                     attempted=False,
+                    executed_by_executor=False,
                     execution_status=None,
                     skipped=True,
                     exception=None,
@@ -595,7 +653,8 @@ def run_naive_retry(
                 strategy=STRATEGY_NAIVE_RETRY,
                 intervention=NAIVE_RETRY_INTERVENTION,
                 attempted=True,
-                execution_status="SUCCESS",
+                executed_by_executor=False,
+                execution_status=None,
                 skipped=False,
                 exception=None,
                 recovered=outcome.recovered,
@@ -675,7 +734,15 @@ def run_recoveryos(
                     outcome = simulator.simulate(event, intervention)
                 except Exception as exc:
                     results.append(
-                        _exception_record(event, STRATEGY_RECOVERY_OS, str(exc))
+                        _exception_record(
+                            event,
+                            STRATEGY_RECOVERY_OS,
+                            str(exc),
+                            attempted=True,
+                            executed_by_executor=True,
+                            intervention=intervention,
+                            execution_status=service_result.outcome.status,
+                        )
                     )
                     continue
                 results.append(
@@ -684,6 +751,7 @@ def run_recoveryos(
                         strategy=STRATEGY_RECOVERY_OS,
                         intervention=intervention,
                         attempted=True,
+                        executed_by_executor=True,
                         execution_status=service_result.outcome.status,
                         skipped=False,
                         exception=None,
@@ -715,6 +783,7 @@ def run_recoveryos(
                         strategy=STRATEGY_RECOVERY_OS,
                         intervention=NO_ACTION,
                         attempted=False,
+                        executed_by_executor=False,
                         execution_status=None,
                         skipped=False,
                         exception=None,
@@ -766,7 +835,9 @@ def _summarize(
     failed_outcomes = sum(
         1
         for record in event_results
-        if record.attempted and not record.recovered
+        if record.attempted
+        and not record.recovered
+        and record.exception is None
     )
     return BenchmarkStrategyResult(
         strategy=strategy,
