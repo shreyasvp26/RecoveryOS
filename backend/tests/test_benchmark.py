@@ -142,7 +142,8 @@ def test_naive_retry_eligibility_is_non_fraud_only() -> None:
         else:
             assert record.intervention == "retry_immediate"
             assert record.attempted is True
-            assert record.execution_status == "SUCCESS"
+            assert record.executed_by_executor is False
+            assert record.execution_status is None
             assert record.skipped is False
             assert record.recovery_source == "attempt"
         attempted.append(record.attempted)
@@ -171,6 +172,29 @@ def test_naive_retry_never_uses_hidden_recovery_probability() -> None:
     assert record.intervention == NO_ACTION
 
 
+def test_naive_retry_attempts_do_not_claim_recoveryos_executor_success() -> None:
+    report = run_benchmark(seed=42, event_count=60)
+    for record in report.event_results["naive_retry"]:
+        if record.attempted:
+            assert record.intervention == "retry_immediate"
+            assert record.executed_by_executor is False
+            assert record.execution_status is None
+            assert record.recovery_source == "attempt"
+        else:
+            assert record.execution_status is None
+    # Baseline never reports any RecoveryOS executor success.
+    naive = strategy_result(report.run, "naive_retry")
+    assert naive.successful_interventions == 0
+    assert naive.interventions_attempted > 0
+    # By contrast, a real RecoveryOS execution reports executor status.
+    recoveryos = strategy_result(report.run, "recovery_os")
+    assert any(
+        record.executed_by_executor and record.execution_status is not None
+        for record in report.event_results["recovery_os"]
+    )
+    assert recoveryos.interventions_attempted > 0
+
+
 # ---------------------------------------------------------------------------
 # RecoveryOS
 # ---------------------------------------------------------------------------
@@ -182,6 +206,7 @@ def test_recoveryos_runs_the_real_simulated_execution_pipeline() -> None:
     attempted = [record for record in records if record.attempted]
     assert attempted, "expected at least one RecoveryOS execution"
     for record in attempted:
+        assert record.executed_by_executor is True
         assert record.execution_status in ("SUCCESS", "FAILED")
         assert record.recovery_source == "attempt"
         assert record.skipped is False

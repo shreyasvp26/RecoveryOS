@@ -22,8 +22,14 @@ from app.benchmark import (
     DeterministicClassifier,
     InvalidBenchmarkConfigurationError,
     run_benchmark,
+    run_recoveryos,
 )
 from app.benchmark_metrics import fraud_intervention_rate, strategy_result
+from app.config import build_policy_config
+from app.generator import generate_events
+from app.outcome import OutcomeSimulator
+from app.outcome_model import generate_hidden_outcome_model
+from app.selector import NO_ACTION
 from app.executor import SIMULATED_INTERVENTIONS
 from app.models import PaymentEvent
 
@@ -172,6 +178,86 @@ def test_exception_does_not_count_as_not_recovered_or_failed_outcome() -> None:
     assert recoveryos.processed == 0
     assert recoveryos.failed_outcomes == 0
     assert recoveryos.recovered_events == 0
+
+
+class PostExecutionThrowingSimulator(OutcomeSimulator):
+    """A simulator that fails AFTER an intervention has been selected/executed.
+
+    It only raises when asked to simulate a real intervention (not the
+    ``no_action`` baseline), modelling an outcome-simulation failure that occurs
+    after the RecoveryOS executor already ran with a known status.
+    """
+
+    def simulate(self, event, intervention):
+        if intervention != NO_ACTION:
+            raise RuntimeError("simulated outcome provider unavailable")
+        return super().simulate(event, intervention)
+
+
+def test_post_execution_exception_preserves_attempted_state() -> None:
+    events = generate_events(seed=42, count=60)
+    model = generate_hidden_outcome_model(events, 42)
+    simulator = PostExecutionThrowingSimulator(model)
+    records = run_recoveryos(
+        events,
+        simulator,
+        DeterministicClassifier(),
+        EVALUATION_TIME,
+        build_policy_config(),
+    )
+
+    executed_exceptions = [
+        record for record in records if record.exception is not None and record.attempted
+    ]
+    assert executed_exceptions, "expected at least one post-execution exception"
+    for record in executed_exceptions:
+        assert record.attempted is True
+        assert record.executed_by_executor is True
+        assert record.execution_status in ("SUCCESS", "FAILED")
+        assert record.intervention != NO_ACTION
+        assert record.recovery_source == "attempt"
+        assert record.recovered is False
+        assert record.recovered_amount_paise == 0
+        assert record.skipped is False
+
+    no_action_records = [record for record in records if record.intervention == NO_ACTION]
+    for record in no_action_records:
+        assert record.attempted is False
+        assert record.execution_status is None
+        assert record.executed_by_executor is False
+
+
+def test_post_execution_exception_is_not_a_failed_outcome() -> None:
+    events = generate_events(seed=42, count=80)
+    model = generate_hidden_outcome_model(events, 42)
+    simulator = PostExecutionThrowingSimulator(model)
+    records = run_recoveryos(
+        events,
+        simulator,
+        DeterministicClassifier(),
+        EVALUATION_TIME,
+        build_policy_config(),
+    )
+    executed = [record for record in records if record.attempted]
+    assert executed
+    thrown = [record for record in executed if record.exception is not None]
+    assert thrown, "expected at least one post-execution exception"
+    normal_failures = [record for record in executed if record.exception is None]
+
+    def summary(records):
+        exceptions = sum(1 for r in records if r.exception is not None)
+        attempted = sum(1 for r in records if r.attempted)
+        failed = sum(
+            1
+            for r in records
+            if r.attempted and not r.recovered and r.exception is None
+        )
+        return exceptions, attempted, failed
+
+    exceptions, attempted, failed = summary(records)
+    assert exceptions == len(thrown)
+    assert failed == len(normal_failures) and failed >= 0
+    assert failed != exceptions, "exceptions must not be conflated with failed outcomes"
 
 
 # ---------------------------------------------------------------------------
