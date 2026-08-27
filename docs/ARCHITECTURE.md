@@ -50,7 +50,9 @@ Flow explanation:
 RecoveryOS operates in two distinct modes:
 
 - **REAL_RAZORPAY** — the intervention executes against Razorpay **Test Mode**. This is a controlled, non-production environment used to exercise the real integration.
-- **SIMULATED** — the intervention is evaluated through a controlled simulation with a deterministic outcome model, used to measure RecoveryOS behavior at scale without touching any payment rails.
+- **SIMULATED** — the operational step is recorded as executed without touching any payment rails. It carries **no recovery/outcome model**: Phase 7's simulated execution does not estimate, label, or predict whether any money would be recovered.
+
+Neither mode produces a **revenue recovery outcome** in Phase 7. `SUCCESS` describes only whether the execution step itself ran. Whether revenue was actually recovered is answered later by the **outcome/benchmark layer**, which measures simulated evaluation results against baselines — not by selection or execution.
 
 The two modes are kept clearly distinct so that results are never conflated.
 
@@ -125,7 +127,7 @@ The executor's API is effectively `execute(event, intervention, policy_decision,
 - Simulated interventions (`retry_immediate`, `retry_delayed`, `reminder`, `alternate_method_prompt`) report `execution_mode = SIMULATED` and `status = SUCCESS` for the operation itself.
 - `payment_link` reports `execution_mode = REAL_RAZORPAY` and creates a genuine Payment Link through the isolated `razorpay_client` boundary (Razorpay Test Mode only). Provider/config failures produce explicit `FAILED` outcomes with detail; the URL is never fabricated.
 
-Execution `SUCCESS` means only that the operational step ran. It is kept strictly separate from revenue recovery.
+Execution `SUCCESS` means only that the operational step ran. It is kept strictly separate from revenue recovery: there is **no outcome model** in Phase 7, simulated or otherwise — an execution outcome describes the operation, and whether revenue was recovered belongs to the later benchmark/outcome layer. No Phase 7 code and no Razorpay response is ever labeled as recovered revenue.
 
 ### The six locked rules
 

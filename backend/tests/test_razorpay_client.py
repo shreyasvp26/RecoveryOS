@@ -42,8 +42,44 @@ class FakeSdk:
         return self.create(data)
 
 
+TEST_MODE_KEY_ID = "rzp_test_abcdefghijklmn"
+TEST_MODE_KEY_SECRET = "test_key_secret"
+
+
 def _client(sdk: FakeSdk) -> RazorpayPaymentLinkClient:
-    return RazorpayPaymentLinkClient("test_key_id", "test_key_secret", sdk=sdk)
+    return RazorpayPaymentLinkClient(TEST_MODE_KEY_ID, TEST_MODE_KEY_SECRET, sdk=sdk)
+
+
+def test_valid_test_mode_key_id_is_accepted() -> None:
+    client = RazorpayPaymentLinkClient(
+        "rzp_test_0123456789abcdef", "secret", sdk=FakeSdk(responses=[VALID_RESPONSE])
+    )
+    result = client.create_payment_link(
+        amount_paise=100, currency="INR", reference_id="evt0", description="d"
+    )
+    assert isinstance(result, PaymentLinkResult)
+    assert result.id == "plink_XYZ123"
+
+
+def test_live_rzp_key_id_is_explicitly_rejected() -> None:
+    with pytest.raises(RazorpayConfigurationError) as exc_info:
+        RazorpayPaymentLinkClient("rzp_live_9876543210abcdef", "some_secret")
+    assert "rzp_live_" in str(exc_info.value)
+    assert "TEST MODE" in str(exc_info.value)
+
+
+def test_non_test_mode_key_id_is_rejected() -> None:
+    with pytest.raises(RazorpayConfigurationError):
+        RazorpayPaymentLinkClient("key_id", "key_secret")
+
+
+def test_missing_credentials_remain_an_explicit_configuration_failure() -> None:
+    with pytest.raises(RazorpayConfigurationError):
+        RazorpayPaymentLinkClient("", "")
+    with pytest.raises(RazorpayConfigurationError):
+        RazorpayPaymentLinkClient(TEST_MODE_KEY_ID, "")
+    with pytest.raises(RazorpayConfigurationError):
+        RazorpayPaymentLinkClient("", TEST_MODE_KEY_SECRET)
 
 
 VALID_RESPONSE = {
@@ -93,13 +129,6 @@ def test_razorpay_api_failure_is_explicit() -> None:
         )
     assert "razorpay_api_error" in str(exc_info.value)
     assert not sdk.calls[-1].get("fake_url")
-
-
-def test_authentication_configuration_failure() -> None:
-    with pytest.raises(RazorpayConfigurationError):
-        RazorpayPaymentLinkClient("", "")
-    with pytest.raises(RazorpayConfigurationError):
-        RazorpayPaymentLinkClient("key_id", "")
 
 
 def test_unexpected_response_not_an_object() -> None:

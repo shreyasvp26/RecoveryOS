@@ -62,12 +62,22 @@ def reference_id_from(event_id: str) -> str:
     return reference
 
 
+# Razorpay key ids are prefixed by mode. Execution is Test Mode only; a live
+# or unrecognized key id is rejected before any SDK call. Only the mode
+# prefixes are referenced here — credentials themselves are never hardcoded.
+_TEST_MODE_KEY_ID_PREFIX = "rzp_test_"
+_LIVE_MODE_KEY_ID_PREFIX = "rzp_live_"
+
+
 class RazorpayPaymentLinkClient:
-    """The single boundary wrapping the Razorpay Python SDK (Test Mode).
+    """The single boundary wrapping the Razorpay Python SDK (Test Mode only).
 
     The SDK is imported lazily so that importing this module never requires
     the razorpay package; tests inject a fake sdk object. No credentials are
-    ever hardcoded.
+    ever hardcoded. Construction enforces the Test Mode invariant:
+    a missing, live (``rzp_live_``), or unrecognized key is rejected with an
+    explicit ``RazorpayConfigurationError``, so REAL_RAZORPAY execution can
+    never run against the production Razorpay environment.
     """
 
     def __init__(
@@ -80,6 +90,16 @@ class RazorpayPaymentLinkClient:
             raise RazorpayConfigurationError(
                 "razorpay credentials are not configured; cannot execute "
                 "payment_link in REAL_RAZORPAY mode"
+            )
+        if key_id.startswith(_LIVE_MODE_KEY_ID_PREFIX):
+            raise RazorpayConfigurationError(
+                "rzp_live_ credentials are forbidden: execution is Razorpay "
+                "TEST MODE only and live-key Payment Links are never created"
+            )
+        if not key_id.startswith(_TEST_MODE_KEY_ID_PREFIX):
+            raise RazorpayConfigurationError(
+                "unrecognized razorpay key id: only Razorpay Test Mode "
+                "key ids starting with 'rzp_test_' are permitted"
             )
         if sdk is None:
             import razorpay  # lazy so imports/tests never require the SDK
