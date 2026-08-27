@@ -24,6 +24,10 @@ from .policy import (
     PolicyValidationError,
     parse_aware_datetime,
 )
+from .razorpay_client import (
+    RazorpayError,
+    reference_id_from,
+)
 
 # Explicit, structured execution modes. payment_link is the only intervention
 # that executes through REAL_RAZORPAY; everything else is SIMULATED.
@@ -170,12 +174,71 @@ class BoundedExecutor:
             )
 
         if intervention == PAYMENT_LINK:
-            raise ExecutionRejectedError(
-                "payment_link execution requires a razorpay client boundary"
-            )
+            return self._execute_payment_link(event, decision, razorpay_client)
 
         raise ExecutionRejectedError(
             f"intervention {intervention!r} has no execution path"
+        )
+
+    @staticmethod
+    def _execute_payment_link(
+        event: PaymentEvent,
+        decision: PolicyDecision,
+        razorpay_client: Any,
+    ) -> ExecutionOutcome:
+        """Create a Razorpay Test Mode Payment Link for the selected event.
+
+        Provider-side failures (configuration missing, API error, unexpected
+        response) produce an explicit FAILED result with the provider error
+        detail; they never become a fabricated success and the URL is never
+        invented client-side.
+        """
+        if razorpay_client is None:
+            return ExecutionOutcome(
+                event_id=event.event_id,
+                intervention=PAYMENT_LINK,
+                execution_mode="REAL_RAZORPAY",
+                status="FAILED",
+                detail="configuration_missing: razorpay client is not configured",
+                reported_at=decision.evaluated_at,
+            )
+
+        try:
+            reference_id = reference_id_from(event.event_id)
+        except ValueError as exc:
+            return ExecutionOutcome(
+                event_id=event.event_id,
+                intervention=PAYMENT_LINK,
+                execution_mode="REAL_RAZORPAY",
+                status="FAILED",
+                detail=f"invalid_reference: {exc}",
+                reported_at=decision.evaluated_at,
+            )
+
+        try:
+            result = razorpay_client.create_payment_link(
+                amount_paise=event.amount_paise,
+                currency=event.currency,
+                reference_id=reference_id,
+                description=f"RecoveryOS payment link for order {event.order_id}",
+            )
+        except RazorpayError as exc:
+            return ExecutionOutcome(
+                event_id=event.event_id,
+                intervention=PAYMENT_LINK,
+                execution_mode="REAL_RAZORPAY",
+                status="FAILED",
+                detail=str(exc),
+                reported_at=decision.evaluated_at,
+            )
+
+        return ExecutionOutcome(
+            event_id=event.event_id,
+            intervention=PAYMENT_LINK,
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference=result.short_url,
+            reported_at=decision.evaluated_at,
         )
 
     @staticmethod

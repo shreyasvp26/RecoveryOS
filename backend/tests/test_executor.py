@@ -13,6 +13,10 @@ from app.executor import (
 )
 from app.models import CustomerHistory, PaymentEvent
 from app.policy import PolicyDecision
+from app.razorpay_client import (
+    PaymentLinkResult,
+    RazorpayExecutionError,
+)
 from app.selector import NO_ACTION
 
 VALID_EVALUATED_AT = "2026-08-27T13:00:00+00:00"
@@ -150,11 +154,87 @@ def test_unknown_intervention_is_rejected() -> None:
         BoundedExecutor().execute(event, "wire_transfer", decision)
 
 
+class StubPaymentLinkClient:
+    def __init__(self, result: PaymentLinkResult | None = None, error: Exception | None = None):
+        self.result = result
+        self.error = error
+        self.calls: list[dict] = []
+
+    def create_payment_link(self, **kwargs) -> PaymentLinkResult:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        if self.result is not None:
+            return self.result
+        raise AssertionError("stub client has neither result nor error")
+
+
 def test_payment_link_requires_configured_client() -> None:
     event = _event()
     decision = _decision("payment_link")
-    with pytest.raises(ExecutionRejectedError):
-        BoundedExecutor().execute(event, "payment_link", decision)
+    outcome = BoundedExecutor().execute(event, "payment_link", decision, razorpay_client=None)
+    assert outcome.execution_mode == "REAL_RAZORPAY"
+    assert outcome.status == "FAILED"
+    assert "configuration_missing" in outcome.detail
+
+
+def test_payment_link_execution_through_real_razorpay_mode() -> None:
+    event = _event()
+    decision = _decision("payment_link")
+    client = StubPaymentLinkClient(
+        result=PaymentLinkResult(id="plink_xyz", short_url="https://rzp.io/l/real123")
+    )
+    outcome = BoundedExecutor().execute(
+        event, "payment_link", decision, razorpay_client=client
+    )
+    assert outcome.execution_mode == "REAL_RAZORPAY"
+    assert outcome.status == "SUCCESS"
+    assert outcome.external_reference == "https://rzp.io/l/real123"
+    call = client.calls[0]
+    assert call["amount_paise"] == event.amount_paise
+    assert call["currency"] == event.currency
+    assert call["reference_id"] == "evtexec"
+    assert "order_exec" in call["description"]
+
+
+def test_payment_link_provider_failure_is_failed_not_success() -> None:
+    event = _event()
+    decision = _decision("payment_link")
+    client = StubPaymentLinkClient(error=RazorpayExecutionError("razorpay_api_error: rejected"))
+    outcome = BoundedExecutor().execute(
+        event, "payment_link", decision, razorpay_client=client
+    )
+    assert outcome.execution_mode == "REAL_RAZORPAY"
+    assert outcome.status == "FAILED"
+    assert "razorpay_api_error" in outcome.detail
+    assert outcome.external_reference is None
+
+
+def test_payment_link_unexpected_response_is_failed_not_success() -> None:
+    from app.razorpay_client import RazorpayUnexpectedResponseError
+
+    event = _event()
+    decision = _decision("payment_link")
+    client = StubPaymentLinkClient(
+        error=RazorpayUnexpectedResponseError("razorpay_api_unexpected_response: no url")
+    )
+    outcome = BoundedExecutor().execute(
+        event, "payment_link", decision, razorpay_client=client
+    )
+    assert outcome.status == "FAILED"
+    assert "unexpected_response" in outcome.detail
+    assert outcome.external_reference is None
+
+
+def test_payment_link_failure_never_fabricates_url() -> None:
+    event = _event()
+    decision = _decision("payment_link")
+    client = StubPaymentLinkClient(error=RazorpayExecutionError("razorpay_api_error: down"))
+    outcome = BoundedExecutor().execute(
+        event, "payment_link", decision, razorpay_client=client
+    )
+    assert outcome.external_reference is None
+    assert outcome.status == "FAILED"
 
 
 def test_outcome_rejects_naive_timestamp() -> None:
