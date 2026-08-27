@@ -44,6 +44,11 @@ dist/
 .vite/
 *.local
 
+# --- SQLite ---
+*.db
+*.sqlite
+*.sqlite3
+
 # --- OS / Editor ---
 .DS_Store
 Thumbs.db
