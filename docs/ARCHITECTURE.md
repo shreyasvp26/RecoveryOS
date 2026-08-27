@@ -82,7 +82,7 @@ All benchmark **recovery amounts are simulated evaluation results** — they are
 - The Phase 8 evaluation boundary: a hidden, event-specific outcome model (`app/outcome_model.py`) and a deterministic recovery simulation (`app/outcome.py`), completely isolated from the decision path, with no persistence and no new endpoints.
 - A scaffolded React + Vite frontend rendering a minimal RecoveryOS shell.
 
-**The rest of the V1 pipeline is planned, not yet implemented.** The benchmark harness (strategies, metrics, reporting) and the audit dashboard do not exist yet. The outcome engine is partially realized as the Phase 8 evaluation foundation only (hidden model + simulation): it answers *did an executed intervention recover the money?* It never decides whether anything executes. Execution success is recorded only as an operation result; RecoveryOS claims no real revenue.
+**The rest of the V1 pipeline is planned, not yet implemented.** The audit dashboard and V2 optimizer do not exist yet. The benchmark is implemented (Phase 9) on top of the Phase 8 evaluation foundation (hidden model + simulation): over ONE shared event set and ONE shared hidden outcome model it measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline on simulated, labeled recovery outcome amounts, reporting honest results with no forced RecoveryOS victory. The outcome engine answers *did an executed intervention recover the money?* It never decides whether anything executes, and RecoveryOS claims no real revenue.
 
 ## The Policy Safety Gate (Phase 6)
 
