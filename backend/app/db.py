@@ -5,8 +5,10 @@ persistence boundary between the domain model and the application/service layer.
 Phase 5: adds the classification_results table for advisory AI classifications,
 correlated with payment_events by event_id. Phase 6: adds policy_decisions and
 intervention_attempts so the deterministic policy gate derives every historical
-fact from persisted state. No raw SQL lives outside this module. Persistence
-stores facts; it never makes business decisions.
+fact from persisted state. Phase 7: adds execution_outcomes so every bounded
+execution (simulated or REAL_RAZORPAY) is recorded and correlated with the
+event. No raw SQL lives outside this module. Persistence stores facts; it
+never makes business decisions.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import Any
 from .classification import ClassificationResult
 from .config import get_database_path
 from .models import PaymentEvent
+from .executor import ExecutionOutcome
 from .policy import (
     InterventionAttempt,
     PolicyDecision,
@@ -77,6 +80,19 @@ CREATE TABLE IF NOT EXISTS intervention_attempts (
 )
 """
 
+_EXECUTION_OUTCOMES_DDL = """
+CREATE TABLE IF NOT EXISTS execution_outcomes (
+    event_id           TEXT NOT NULL,
+    intervention       TEXT NOT NULL,
+    execution_mode     TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    external_reference TEXT,
+    detail             TEXT,
+    reported_at        TEXT NOT NULL,
+    PRIMARY KEY (event_id, intervention, reported_at)
+)
+"""
+
 
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection to the given database path."""
@@ -97,6 +113,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_CLASSIFICATION_RESULTS_DDL)
         conn.execute(_POLICY_DECISIONS_DDL)
         conn.execute(_INTERVENTION_ATTEMPTS_DDL)
+        conn.execute(_EXECUTION_OUTCOMES_DDL)
         conn.commit()
     except sqlite3.Error:
         conn.rollback()
@@ -295,6 +312,63 @@ def get_intervention_attempt(
     if row is None:
         return None
     return InterventionAttempt.from_dict(dict(row))
+
+
+def insert_execution_outcome(
+    conn: sqlite3.Connection, outcome: ExecutionOutcome
+) -> None:
+    """Persist an ExecutionOutcome, preserving the outcome contract.
+
+    A logically identical outcome (same event, same intervention, same
+    reported time) is rejected as a duplicate (IntegrityError). Historical
+    outcomes are never overwritten or mutated.
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO execution_outcomes (
+                event_id, intervention, execution_mode, status,
+                external_reference, detail, reported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                outcome.event_id,
+                outcome.intervention,
+                outcome.execution_mode,
+                outcome.status,
+                outcome.external_reference,
+                outcome.detail,
+                outcome.reported_at,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_execution_outcome(
+    conn: sqlite3.Connection, event_id: str, intervention: str, reported_at: str
+) -> ExecutionOutcome | None:
+    """Retrieve an ExecutionOutcome, or None if it does not exist."""
+    row = conn.execute(
+        """
+        SELECT * FROM execution_outcomes
+        WHERE event_id = ? AND intervention = ? AND reported_at = ?
+        """,
+        (event_id, intervention, reported_at),
+    ).fetchone()
+    if row is None:
+        return None
+    return ExecutionOutcome(
+        event_id=row["event_id"],
+        intervention=row["intervention"],
+        execution_mode=row["execution_mode"],
+        status=row["status"],
+        external_reference=row["external_reference"],
+        detail=row["detail"],
+        reported_at=row["reported_at"],
+    )
 
 
 def get_policy_history(

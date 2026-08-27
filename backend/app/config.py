@@ -11,6 +11,7 @@ Only the sqlite scheme is supported; SQLite remains the sole database.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 DEFAULT_DATABASE_URL = "sqlite:///./recoveryos.db"
 _DATABASE_URL_PREFIX = "sqlite:///"
@@ -87,6 +88,32 @@ def get_policy_daily_spend_cap_paise() -> int:
     return _resolve_policy_int(
         "POLICY_DAILY_SPEND_CAP_PAISE", DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE
     )
+
+
+def get_razorpay_key_id() -> str:
+    """Return the configured Razorpay Test Mode key id, or an empty string."""
+    return os.environ.get("RAZORPAY_KEY_ID", "")
+
+
+def get_razorpay_key_secret() -> str:
+    """Return the configured Razorpay Test Mode key secret, or an empty string."""
+    return os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+
+def build_razorpay_client() -> Any | None:
+    """Build the Razorpay Test Mode client boundary, or None when unconfigured.
+
+    Execution only ever runs in REAL_RAZORPAY mode when Test Mode credentials
+    are present in the environment; a missing configuration is explicit and
+    never silently bypassed.
+    """
+    from .razorpay_client import RazorpayPaymentLinkClient
+
+    key_id = get_razorpay_key_id()
+    key_secret = get_razorpay_key_secret()
+    if not key_id or not key_secret:
+        return None
+    return RazorpayPaymentLinkClient(key_id, key_secret)
 
 
 def build_policy_config() -> "PolicyConfig":

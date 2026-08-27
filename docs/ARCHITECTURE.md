@@ -58,9 +58,9 @@ The two modes are kept clearly distinct so that results are never conflated.
 
 All benchmark **recovery amounts are simulated evaluation results** — they are produced by the deterministic test harness, not by real Razorpay transactions. **RecoveryOS does not claim these as production Razorpay revenue.** They exist only to measure relative effectiveness of RecoveryOS against baselines under identical conditions.
 
-## Current Implementation Status (Phase 6)
+## Current Implementation Status (Phase 7)
 
-**Phase 6 adds the deterministic policy safety gate.** This repository currently contains:
+**Phase 7 adds deterministic intervention selection and bounded execution.** This repository currently contains:
 
 - A scaffolded FastAPI backend exposing a deterministic health endpoint smoke test.
 - The locked Phase 2 `PaymentEvent` domain contract and validation.
@@ -71,11 +71,15 @@ All benchmark **recovery amounts are simulated evaluation results** — they are
 - Phase 5 classification persistence (`classification_results` table, correlated with `payment_events` by `event_id`).
 - A minimal `POST /events/{event_id}/classify` endpoint wiring load → classify → persist → return.
 - The Phase 6 deterministic policy engine (`app/policy.py`): a pure, stateless Python gate that answers one question — *is this proposed intervention permitted?* It contains zero LLM calls, selects nothing, and executes nothing.
-- Phase 6 policy persistence (`policy_decisions` table, preserving the decision contract) and minimal intervention history (`intervention_attempts` table, the future executor's record; Phase 6 writes no execution records).
+- Phase 6 policy persistence (`policy_decisions` table, preserving the decision contract) and intervention history (`intervention_attempts` table, now written by the executor).
 - A `POST /events/{event_id}/policy` endpoint wiring load event → load classification → derive historical context → evaluate → persist → return.
+- The Phase 7 deterministic V1 selector (`app/selector.py`): picks exactly one intervention among candidates that have an authoritative ALLOW decision, using the locked priority `retry_delayed > payment_link > reminder > alternate_method_prompt > retry_immediate`; no LLM reasoning, no randomness, no economic optimization.
+- The Phase 7 bounded executor (`app/executor.py`): independently requires `PolicyDecision.allowed == true`, rejects mismatched bindings, never executes `no_action`, never calls the LLM. Simulated interventions report `SIMULATED`/`SUCCESS`; `payment_link` executes through `REAL_RAZORPAY`.
+- A Phase 7 isolated Razorpay client boundary (`app/razorpay_client.py`) wrapping the SDK (Test Mode only, credentials from the environment), returning genuine Payment Link references and explicit failures — never a fabricated URL.
+- Phase 7 execution persistence (`execution_outcomes` table, correlated by `event_id`) and a `POST /events/{event_id}/execute` endpoint that accepts no client intervention or authorization — the chain classification → policy → selector → executor fully determines execution against server-side time.
 - A scaffolded React + Vite frontend rendering a minimal RecoveryOS shell.
 
-**The V1 pipeline described above is planned, not yet implemented.** None of the following exist yet: intervention selection, the executor, Razorpay integration, outcome engine, audit trail, benchmark, or dashboard. The AI classifier is advisory only; the policy engine authorizes only; nothing executes.
+**The rest of the V1 pipeline is planned, not yet implemented.** None of the following exist yet: the outcome engine, the append-only audit dashboard, the benchmark harness, or the dashboard. Execution success is recorded only as an operation result; RecoveryOS claims no revenue.
 
 ## The Policy Safety Gate (Phase 6)
 
@@ -85,7 +89,7 @@ The critical security property is:
 LLM ─────X────→ Executor
 ```
 
-The only valid future path is:
+The only valid path is:
 
 ```
 LLM
@@ -94,12 +98,34 @@ Recommendation (advisory)
   ↓
 Deterministic Policy — ALLOW / DENY
   ↓
-Future Intervention Selection
+V1 Intervention Selection (deterministic priority)
   ↓
-Future Executor
+Bounded Executor (requires authoritative ALLOW)
+  ↓
+ExecutionOutcome (SIMULATED | REAL_RAZORPAY)
 ```
 
-**Authority path:** the LLM recommends; the deterministic Python policy authorizes; the (future) executor acts. No `execute=true` ever originates from model output.
+**Authority path:** the LLM recommends; the deterministic Python policy authorizes; the V1 selector chooses among authorized candidates; the bounded executor acts. No `execute=true` ever originates from model output, and no client can supply an intervention or an `allowed` flag.
+
+### The V1 selector (Phase 7)
+
+The selector consumes the advisory candidates from the classifier and the authoritative per-candidate policy decisions, drops `no_action`, keeps only candidates whose decision is `allowed == true`, and applies the locked priority:
+
+```
+retry_delayed  >  payment_link  >  reminder  >  alternate_method_prompt  >  retry_immediate
+```
+
+When no actionable candidate is authorized, the explicit result is `no_action` — which is never executed and never simulated. The selector uses no LLM reasoning, no randomness, no recovery predictions, and no economic optimization.
+
+### The bounded executor (Phase 7)
+
+The executor's API is effectively `execute(event, intervention, policy_decision, razorpay_client)`. It is not a second policy engine:
+
+- It **rejects** execution when `policy_decision.allowed` is not `true`, when the decision's `event_id`/`proposed_intervention` do not match, and for `no_action` or unknown interventions.
+- Simulated interventions (`retry_immediate`, `retry_delayed`, `reminder`, `alternate_method_prompt`) report `execution_mode = SIMULATED` and `status = SUCCESS` for the operation itself.
+- `payment_link` reports `execution_mode = REAL_RAZORPAY` and creates a genuine Payment Link through the isolated `razorpay_client` boundary (Razorpay Test Mode only). Provider/config failures produce explicit `FAILED` outcomes with detail; the URL is never fabricated.
+
+Execution `SUCCESS` means only that the operational step ran. It is kept strictly separate from revenue recovery.
 
 ### The six locked rules
 
@@ -136,8 +162,8 @@ This is a financial safety boundary; it never fails open. Malformed input, an in
 
 ### Policy vs selection boundary
 
-Policy asks *"is this candidate permitted?"* It does not rank candidates, compute expected value, recovery probability, or choose the best intervention — that is the future selection phase. Multiple candidates are evaluated independently (each may be allowed or denied on its own merits).
+Policy asks *"is this candidate permitted?"* The V1 selector then asks *"which authorized candidate has the highest locked priority?"* Neither computes expected value, recovery probability, or cost/recovery ranking, and neither chooses the "best" intervention economically — that is a later rescue but is intentionally out of scope for V1.
 
 ### Time handling
 
-All timestamps are timezone-aware ISO8601, normalized to UTC. `evaluation_time` is always supplied explicitly (the endpoint accepts it; when omitted it defaults to the server's current UTC time). Mixing naive/aware/local timestamps is prevented by fail-closed validation.
+All timestamps are timezone-aware ISO8601, normalized to UTC. The policy endpoint accepts an explicit `evaluation_time` (defaulting to the server's current UTC time); the execution endpoint always evaluates against server-side UTC time — a client can never choose a time that bypasses cooldown or customer limits. Mixing naive/aware/local timestamps is prevented by fail-closed validation.

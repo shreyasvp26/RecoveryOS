@@ -8,7 +8,7 @@ An **AI Revenue Recovery Control Plane** for the Razorpay AI Buildathon 2026 (Re
 
 The LLM never has direct authority over a money-moving action. AI output is advisory; a deterministic policy gate is authoritative; an executor performs the action; a benchmark proves value against baselines.
 
-> **Important:** This repository is in **Phase 6 — Deterministic Policy Engine / Safety Gate**. RecoveryOS does **not yet perform revenue recovery**. Event generation, ingestion, advisory AI classification, and the deterministic policy gate exist; the recovery pipeline (intervention selection, executor, Razorpay, benchmark, dashboard) is planned, not implemented.
+> **Important:** This repository is in **Phase 7 — Intervention Selection + Bounded Execution**. RecoveryOS performs **no production revenue recovery**: it can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link. The recovery pipeline (outcome engine, audit dashboard, benchmark) is planned, not implemented.
 
 ## Locked Architecture
 
@@ -33,7 +33,7 @@ See `docs/ARCHITECTURE.md` for the detailed design, including the distinction be
 ```
 recoveryos/
 ├── backend/       FastAPI application + pytest test suite
-│   ├── app/       Application package (models, persistence, generator, ingestion, classifier, policy)
+│   ├── app/       Application package (models, persistence, generator, ingestion, classifier, policy, selector, executor, razorpay client)
 │   ├── tests/     pytest tests
 │   ├── requirements.txt
 │   └── .env.example
@@ -87,7 +87,7 @@ Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
 
 ## Current Development Phase
 
-**Phase 6 — Deterministic Policy Engine / Safety Gate.** A payment event now flows end-to-end through generation → ingestion → SQLite → load → AI classification → SQLite → **deterministic policy evaluation** → persisted decision. The engine is pure Python, contains zero LLM calls, and answers one question per request: *is this proposed intervention permitted?* It never selects the best intervention, never executes anything, and produces an ALLOW/DENY decision with an explicit reason and the checks applied.
+**Phase 7 — Intervention Selection + Bounded Execution.** A payment event now flows end-to-end through generation → ingestion → SQLite → load → AI classification → SQLite → deterministic policy evaluation (every actionable candidate) → selection → **bounded execution** → persisted outcome. The selection is a pure, deterministic priority rule; the executor requires authoritative policy authorization and either simulates the action or creates a real Razorpay Test Mode Payment Link. Execution success is never claimed as revenue recovery.
 
 ### Phase 4 — Spinning Up Development Data
 
@@ -139,5 +139,27 @@ curl -X POST http://127.0.0.1:8000/events/<event_id>/policy \
 - **Fail-closed by construction** — malformed input, unknown interventions, timezone-naive timestamps, and history lookups that cannot be determined safely produce explicit controlled errors; policy never fabricates history, spend, or duplicates and never fails open.
 - **Historical facts come from persisted state** — the customer 24h count, most-recent event intervention, successful-duplicate flag, and daily spend are computed by the persistence boundary (`intervention_attempts`) with actual datetime arithmetic against the explicit evaluation timestamp, never from the LLM and never from shadow in-memory state.
 - **Persistence** — every evaluation is persisted to `policy_decisions` (correlated by `event_id`, preserving the decision contract). No execution exists: nothing in Phase 6 records a successful intervention.
+
+### Phase 7 — Deterministic Selection + Bounded Execution
+
+```bash
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app
+
+# select + execute the authorized intervention for an event (server decides everything)
+curl -X POST http://127.0.0.1:8000/events/<event_id>/execute     # no body, no client authorization
+```
+
+- **Never an LLM → executor path** — the LLM only proposes candidates. The deterministic policy gate independently authorizes each candidate; the selector picks exactly one among those with `allowed == true`; the executor independently requires an authoritative ALLOW decision before acting.
+- **Locked V1 priority** — `retry_delayed > payment_link > reminder > alternate_method_prompt > retry_immediate`. When every actionable candidate is denied (or none exists), the explicit result is `no_action` — which is never executed and never simulated.
+- **Deterministic selection** — the selector (Phase 7) uses no LLM reasoning, no randomness, no recovery predictions, and no economic optimization; it only intersects candidates with authoritative ALLOW decisions and applies the fixed priority.
+- **Bounded executor** — the executor author ≠ policy engine: it rejects any `PolicyDecision.allowed == false`, rejects mismatched event/intervention bindings, refuses `no_action`, never calls the LLM, and never decides recoverability.
+- **Explicit execution modes** — `retry_immediate`, `retry_delayed`, `reminder`, and `alternate_method_prompt` run as `SIMULATED`; `payment_link` runs as `REAL_RAZORPAY` (Razorpay **Test Mode** only, via the isolated `razorpay_client` boundary). Provider failures and configuration gaps produce explicit `FAILED` outcomes — never fabricated success, never a guessed Payment Link URL.
+- **No client bypass** — `POST /events/{event_id}/execute` accepts no intervention and no `allowed` flag; the authoritative chain (classification → policy → selection → executor) fully determines what executes, evaluated against server-side time.
+- **Persistence** — outcomes are appended to `execution_outcomes` (correlated by `event_id`); each execution also records an `intervention_attempts` row so Phase 6 policy facts (customer limits, cooldown, spend, duplicates) stay derived from persisted state. Historical decisions and outcomes are never overwritten.
+- **Execution success ≠ recovery success** — `SUCCESS` means only that the operation itself ran; whether money was recovered is a later-phase concern.
+
+What Phase 7 can and cannot do: it can select and execute (simulate or create a Test Mode Payment Link) a single authorized intervention per event. It cannot benchmark, cannot estimate recovery, cannot rank by expected value, and there is no audit dashboard or V2 optimizer.
 
 What Phase 6 can and cannot do: it can evaluate and persist advisory policy decisions. It cannot select the best intervention, rank candidates, or execute anything. Selection, executor, Razorpay integration, benchmark, and dashboard remain planned for later phases.

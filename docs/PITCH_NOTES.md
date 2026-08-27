@@ -1,6 +1,6 @@
 # RecoveryOS — Five-Minute Pitch Notes
 
-**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation, ingestion, advisory AI classification, and the deterministic policy gate exist, and none of the recovery execution pipeline (selection, executor, Razorpay, benchmark, dashboard) is implemented yet.
+**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation, ingestion, advisory AI classification, the deterministic policy gate, V1 intervention selection, and bounded execution (simulated or Razorpay Test Mode Payment Link) exist. The outcome engine, benchmark harness, and dashboard are not implemented yet.
 
 ## The Problem
 
