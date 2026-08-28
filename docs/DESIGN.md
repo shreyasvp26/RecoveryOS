@@ -55,8 +55,13 @@ Defined in `frontend/src/index.css` as CSS custom properties, using a dark
 ### Event Decision Trace (`components/EventTrace.jsx`)
 - Searchable/filterable persisted event list on the left.
 - Vertical timeline for the selected event: **Ingest → AI Classification →
-  Policy Gate(s) → Execution**, with a final-decision banner
-  (ALLOW / DENY / NO ACTION / NOT CLASSIFIED).
+  Policy Gate(s) → Execution → Outcome → Closed-loop verification (Phase 12)**,
+  with a final-decision banner (ALLOW / DENY / NO ACTION / NOT CLASSIFIED).
+- **Closed-loop verification (Phase 12)** renders each real Razorpay Payment
+  Link as `WAITING` (neutral/warn) until a verified `payment_link.paid` webhook
+  marks it `RECOVERED` (success) with the trusted `amount_paid`. It never
+  fabricates a recovered amount; events with no real link show an honest empty
+  state instead.
 - Explicit "No AI classification" / "Not executed" empty states.
 
 ### Policy & Blocked Actions (`components/PolicyBlocks.jsx`)

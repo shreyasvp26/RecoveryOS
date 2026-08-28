@@ -60,9 +60,9 @@ The two modes are kept clearly distinct so that results are never conflated.
 
 All benchmark **recovery amounts are simulated evaluation results** — they are produced by the deterministic test harness, not by real Razorpay transactions. **RecoveryOS does not claim these as production Razorpay revenue.** They exist only to measure relative effectiveness of RecoveryOS against baselines under identical conditions.
 
-## Current Implementation Status (Phase 9)
+## Current Implementation Status (Phase 12)
 
-**Phase 8 delivered the evaluation boundary; Phase 9 added the honest three-strategy benchmark.** This repository currently contains:
+**Phase 8 delivered the evaluation boundary; Phase 9 the honest benchmark; Phase 10 the read-only Command Center & Decision Trace; Phase 11 real Razorpay Payment Link execution; Phase 12 the closed-loop verified webhook.** This repository currently contains:
 
 - A scaffolded FastAPI backend exposing a deterministic health endpoint smoke test.
 - The locked Phase 2 `PaymentEvent` domain contract and validation.
@@ -84,8 +84,17 @@ All benchmark **recovery amounts are simulated evaluation results** — they are
 
 **The rest of the V1 pipeline is planned, not yet implemented.** The audit dashboard and V2 optimizer do not exist yet. The benchmark is implemented (Phase 9) on top of the Phase 8 evaluation foundation (hidden model + simulation): over ONE shared event set and ONE shared hidden outcome model it measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline on simulated, labeled recovery outcome amounts, reporting honest results with no forced RecoveryOS victory. The outcome engine answers *did an executed intervention recover the money?* It never decides whether anything executes, and RecoveryOS claims no real revenue.
 
-## The Policy Safety Gate (Phase 6)
+## The Phase 12 closed-loop webhook (outcome channel)
 
+Phase 12 adds a **verified, durable, audit-friendly OUTCOME channel** that turns a real Razorpay `payment_link.paid` webhook into a recovery outcome — it is architecturally separate from the execution channel and must never invoke the executor, selector, policy engine, classifier, or Payment Link creation.
+
+- **Signature boundary** — `POST /webhook/razorpay` recomputes HMAC-SHA256 over the exact raw request body and compares constant-time (`hmac.compare_digest`). A bad or missing `X-Razorpay-Signature` is a 4xx before any parsing or side effect (fail-closed). The secret (`RAZORPAY_WEBHOOK_SECRET`) is never committed and never stored in SQLite.
+- **Durable idempotency** — `X-Razorpay-Event-Id` is the SQLite PRIMARY KEY of `webhook_deliveries`, along with the SHA-256 of the raw body. Same id + same body = 2xx `deduplicated` no-op; same id + different body = 409 `conflict` (never overwritten, never a second recovery); persistent failure = 500 so Razorpay retries.
+- **Crash-safe claim/retry** — a delivery still `claimed` is an in-flight attempt that crashed before completing; a re-delivered same id/body is reprocessed to completion, never dropped as a duplicate. The recovery write is `INSERT OR IGNORE` (idempotent), so a crash between that write and the terminal status update completes cleanly with no double-count.
+- **Strict, event-specific validation** — a `payment_link.paid` event must carry a Payment Link id, report `status: paid`, and give a non-negative integer `amount_paid`; a malformed paid event is a 400, never silently unmatched. Unsupported events are recorded-and-ignored (2xx), never executed.
+- **Trusted correlation** — matches the persisted Phase 11 `execution_outcomes.payment_link_id` (REAL_RAZORPAY + SUCCESS + payment_link), never amount/customer/email. The trusted recovery amount is the `amount_paid` observed on the link, never the original event amount. Verified outcomes persist to `webhook_recovery_outcomes` (delivery-id PRIMARY KEY) and the dashboard trace labels each real link `waiting` → `recovered`.
+
+## The Policy Safety Gate (Phase 6)
 The critical security property is:
 
 ```
