@@ -32,7 +32,6 @@ from ..webhook_service import (
     S_IGNORED,
     S_PERSISTENCE_FAILURE,
     S_UNMATCHED,
-    S_VALID,
     process_webhook,
 )
 
@@ -126,5 +125,5 @@ async def razorpay_webhook(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content=result.to_dict(),
         )
-    # S_VALID, S_DEDUPLICATED, S_IGNORED, S_UNMATCHED, S_PROCESSED are 2xx.
+    # S_DEDUPLICATED, S_IGNORED, S_UNMATCHED, S_PROCESSED are 2xx.
     return JSONResponse(status_code=status.HTTP_200_OK, content=result.to_dict())

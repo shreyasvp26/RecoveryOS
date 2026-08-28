@@ -11,6 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import connect, init_db
+from app.executor import ExecutionOutcome
+from app.db import insert_execution_outcome
 from app.main import app
 from app.razorpay_webhook import (
     WebhookPayloadError,
@@ -181,7 +183,10 @@ def test_valid_signature_is_acknowledged(monkeypatch, tmp_path) -> None:
         delivery_id=DELIVERY_ID,
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "valid"
+    # No execution outcome is seeded, so a valid signature yields an UNMATCHED
+    # audit (a fresh payment_link.paid with an unknown/non-persisted link id),
+    # never a fabricated recovery.
+    assert response.json()["status"] == "unmatched"
     assert response.json()["event"] == "payment_link.paid"
 
 
@@ -323,7 +328,9 @@ def test_duplicate_delivery_is_a_noop_and_not_double_counted(
 
     first = client.post("/webhook/razorpay", content=body, headers=headers)
     assert first.status_code == 200
-    assert first.json()["status"] == "valid"
+    # No execution outcome is seeded -> the fresh paid event is an unmatched
+    # audit (unknown link), which is still a single durable delivery row.
+    assert first.json()["status"] == "unmatched"
 
     # Re-delivery of the exact same body under the same event id is a 2xx
     # no-op — it must never be processed or counted a second time.
@@ -427,3 +434,144 @@ def test_persistence_failure_surfaces_500_so_razorpay_retries(
         assert response.json()["status"] == "persistence_failure"
     finally:
         pass  # autouse fixture clears overrides
+
+
+# ---------------------------------------------------------------------------
+# S3: correlation by the actual Razorpay Payment Link id (tests C + E)
+# ---------------------------------------------------------------------------
+
+
+def _seed_real_outcome(monkeypatch, tmp_path, *, payment_link_id: str) -> None:
+    """Persist a REAL_RAZORPAY payment_link SUCCESS outcome (Phase 11 record).
+
+    The seeded outcome is what the webhook correlates against: a previous
+    execution that created a genuine Razorpay Payment Link with the given id.
+    """
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wh.db'}")
+    conn = connect(str(tmp_path / "wh.db"))
+    init_db(conn)
+    try:
+        insert_execution_outcome(
+            conn,
+            ExecutionOutcome(
+                event_id="evt_seeded_1",
+                intervention="payment_link",
+                execution_mode="REAL_RAZORPAY",
+                status="SUCCESS",
+                external_reference="https://rzp.io/rzp/seed",
+                reported_at="2026-01-01T00:00:00+00:00",
+                payment_link_id=payment_link_id,
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def test_unknown_payment_link_is_unmatched_and_not_recovered(
+    monkeypatch, tmp_path
+) -> None:
+    """An unknown/linked-to-nothing Payment Link is UNMATCHED, never recovered."""
+    _seed_real_outcome(monkeypatch, tmp_path, payment_link_id="plink_other")
+    body = _raw()
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "unmatched"
+    assert response.json()["payment_link_id"] == PAYMENT_LINK_ID
+    # No fabricated recovery/no fabricated amount.
+    assert response.json()["amount_paid_paise"] is None
+
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        row = conn.execute(
+            "SELECT status FROM webhook_deliveries WHERE delivery_id = ?",
+            (DELIVERY_ID,),
+        ).fetchone()
+        assert row["status"] == "unmatched"
+    finally:
+        conn.close()
+
+
+def test_known_payment_link_is_processed_with_trusted_amount_paid(
+    monkeypatch, tmp_path
+) -> None:
+    """A matched Payment Link is PROCESSED with the trusted actual amount_paid.
+
+    Even though the original event amount is 75000, the link was actually paid
+    only 60000 (e.g. a discount/partial). The recovery must use the TRUSTED
+    amount_paid observed on the link, never the original event amount.
+    """
+    _seed_real_outcome(monkeypatch, tmp_path, payment_link_id=PAYMENT_LINK_ID)
+    discounted = json.dumps(
+        {
+            **PAID_EVENT,
+            "payload": {
+                **PAID_EVENT["payload"],
+                "payment_link": {
+                    **PAID_EVENT["payload"]["payment_link"],
+                    "entity": {
+                        **PAID_EVENT["payload"]["payment_link"]["entity"],
+                        "amount": 75000,
+                        "amount_paid": 60000,
+                    },
+                },
+            },
+        }
+    ).encode("utf-8")
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=discounted,
+        signature=_sign(discounted),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "processed"
+    assert response.json()["payment_link_id"] == PAYMENT_LINK_ID
+    # Trusted actual amount paid, NOT the original event amount.
+    assert response.json()["amount_paid_paise"] == 60000
+
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        row = conn.execute(
+            "SELECT status FROM webhook_deliveries WHERE delivery_id = ?",
+            (DELIVERY_ID,),
+        ).fetchone()
+        assert row["status"] == "processed"
+    finally:
+        conn.close()
+
+
+def test_known_payment_link_repeated_webhook_is_noop_not_double_counted(
+    monkeypatch, tmp_path
+) -> None:
+    """A matched Payment Link whose webhook is re-delivered stays a single no-op."""
+    _seed_real_outcome(monkeypatch, tmp_path, payment_link_id=PAYMENT_LINK_ID)
+    body = _raw()
+    headers = {SIGNATURE_HEADER: _sign(body), DELIVERY_ID_HEADER: DELIVERY_ID}
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wh.db'}")
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET)
+
+    first = client.post("/webhook/razorpay", content=body, headers=headers)
+    assert first.status_code == 200
+    assert first.json()["status"] == "processed"
+
+    second = client.post("/webhook/razorpay", content=body, headers=headers)
+    assert second.status_code == 200
+    assert second.json()["status"] == "deduplicated"
+
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        rows = conn.execute(
+            "SELECT status FROM webhook_deliveries WHERE delivery_id = ?",
+            (DELIVERY_ID,),
+        ).fetchall()
+        assert len(rows) == 1  # durable uniqueness, single audit row
+        assert rows[0]["status"] == "processed"
+    finally:
+        conn.close()

@@ -441,6 +441,43 @@ def get_execution_outcome(
     )
 
 
+def get_execution_outcome_by_payment_link_id(
+    conn: sqlite3.Connection, payment_link_id: str
+) -> ExecutionOutcome | None:
+    """Return the most recent REAL_RAZORPAY payment_link SUCCESS outcome that
+    created the given Payment Link id, or None.
+
+    A Payment Link id is only ever persisted on a REAL_RAZORPAY ``payment_link``
+    SUCCESS outcome, so matching on the actual Razorpay Payment Link id (never
+    amount/customer/email/URL) unambiguously identifies the Phase 11 execution
+    that produced that link. This is the webhook correlation key.
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM execution_outcomes
+        WHERE payment_link_id = ?
+          AND execution_mode = 'REAL_RAZORPAY'
+          AND status = 'SUCCESS'
+          AND intervention = 'payment_link'
+        ORDER BY reported_at DESC
+        LIMIT 1
+        """,
+        (payment_link_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return ExecutionOutcome(
+        event_id=row["event_id"],
+        intervention=row["intervention"],
+        execution_mode=row["execution_mode"],
+        status=row["status"],
+        external_reference=row["external_reference"],
+        detail=row["detail"],
+        reported_at=row["reported_at"],
+        payment_link_id=row["payment_link_id"],
+    )
+
+
 def get_policy_history(
     conn: sqlite3.Connection, event: PaymentEvent, evaluation_time: datetime
 ) -> PolicyHistory:

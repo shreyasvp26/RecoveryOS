@@ -28,7 +28,6 @@ from .razorpay_webhook import (
 )
 
 # Closed-loop statuses surfaced to the HTTP layer.
-S_VALID = "valid"
 S_DEDUPLICATED = "deduplicated"
 S_CONFLICT = "conflict"
 S_IGNORED = "ignored"
@@ -166,18 +165,55 @@ def _correlate_supported_event(
 ) -> WebhookProcessResult:
     """Correlate a verified payment_link.paid delivery with persisted state.
 
-    The payment link id must match a real Phase 11-persisted execution outcome.
-    Correlation is filled out in the correlation slice; a matching link yields a
-    verified recovery outcome, a non-matching link records an explicit
-    UNMATCHED audit (no fabricated recovery). This function never re-executes.
+    The payment link id must match the actual id of a REAL_RAZORPAY ``payment_link``
+    SUCCESS outcome persisted on the execution side (Phase 11). A match yields a
+    PROCESSED (verified, correlated) recovery outcome whose recovery amount is the
+    TRUSTED ``amount_paid`` observed on the link — never the original event amount.
+    A non-matching (or absent) link is recorded as an explicit UNMATCHED audit with
+    NO fabricated recovery. This function never re-executes and never invokes any
+    intervention path.
     """
-    # Correlation by payment_link_id happens in the correlation slice; for now
-    # a freshly claimed supported event is acknowledged as valid with no
-    # recovery fabricated and no execution invoked.
-    return WebhookProcessResult(
-        status=S_VALID,
-        delivery_id=event.delivery_id,
-        event_type=event.event_type,
-        payment_link_id=event.payment_link_id,
-        detail="verified delivery recorded; correlation pending",
-    )
+    link_id = event.payment_link_id
+    try:
+        if link_id is None:
+            db.update_webhook_delivery_status(conn, event.delivery_id, _DELIVERY_UNMATCHED)
+            return WebhookProcessResult(
+                status=S_UNMATCHED,
+                delivery_id=event.delivery_id,
+                event_type=event.event_type,
+                detail="payment_link.paid event carried no payment link id; "
+                "cannot correlate to a persisted recovery",
+            )
+
+        matched = db.get_execution_outcome_by_payment_link_id(conn, link_id)
+        if matched is None:
+            db.update_webhook_delivery_status(conn, event.delivery_id, _DELIVERY_UNMATCHED)
+            return WebhookProcessResult(
+                status=S_UNMATCHED,
+                delivery_id=event.delivery_id,
+                event_type=event.event_type,
+                payment_link_id=link_id,
+                detail="payment link id does not match any persisted REAL_RAZORPAY "
+                "recovery; recorded as unmatched with no fabricated recovery",
+            )
+
+        db.update_webhook_delivery_status(conn, event.delivery_id, _DELIVERY_PROCESSED)
+        return WebhookProcessResult(
+            status=S_PROCESSED,
+            delivery_id=event.delivery_id,
+            event_type=event.event_type,
+            payment_link_id=link_id,
+            amount_paid_paise=event.amount_paid_paise,
+            detail=f"payment link id {link_id!r} correlated to Phase 11 execution "
+            f"outcome for event {matched.event_id!r}; trusted amount_paid on the "
+            "link recorded as the recovery outcome",
+        )
+    except sqlite3.Error:
+        return WebhookProcessResult(
+            status=S_PERSISTENCE_FAILURE,
+            delivery_id=event.delivery_id,
+            event_type=event.event_type,
+            payment_link_id=link_id,
+            detail="persistence_failure during correlation; returning error so "
+            "Razorpay retries",
+        )
