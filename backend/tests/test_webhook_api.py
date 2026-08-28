@@ -10,9 +10,8 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import connect, init_db
+from app.db import connect, init_db, insert_execution_outcome
 from app.executor import ExecutionOutcome
-from app.db import insert_execution_outcome
 from app.main import app
 from app.razorpay_webhook import (
     WebhookPayloadError,
@@ -575,3 +574,110 @@ def test_known_payment_link_repeated_webhook_is_noop_not_double_counted(
         assert rows[0]["status"] == "processed"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# S4: verified recovery outcome + audit, and no-execution / benchmark isolation
+# ---------------------------------------------------------------------------
+
+
+def test_d_verified_paid_link_yields_durable_recovery_outcome(
+    monkeypatch, tmp_path
+) -> None:
+    """A matched payment_link.paid yields a durable recovery outcome row.
+
+    Also proves a repeated webhook never yields a second recovery row (durable
+    PRIMARY KEY uniqueness on the delivery id).
+    """
+    _seed_real_outcome(monkeypatch, tmp_path, payment_link_id=PAYMENT_LINK_ID)
+    body = _raw()
+    headers = {SIGNATURE_HEADER: _sign(body), DELIVERY_ID_HEADER: DELIVERY_ID}
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wh.db'}")
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET)
+
+    first = client.post("/webhook/razorpay", content=body, headers=headers)
+    assert first.status_code == 200
+    assert first.json()["status"] == "processed"
+    assert first.json()["amount_paid_paise"] == 75000  # trusted amount_paid
+
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        rec = conn.execute(
+            "SELECT * FROM webhook_recovery_outcomes WHERE delivery_id = ?",
+            (DELIVERY_ID,),
+        ).fetchone()
+        assert rec is not None
+        assert rec["payment_link_id"] == PAYMENT_LINK_ID
+        assert rec["referenced_event_id"] == "evt_seeded_1"
+        assert rec["amount_paid_paise"] == 75000  # trusted amount_paid, not original
+        assert rec["currency"] == "INR"
+        assert rec["payment_id"] == PAYMENT_ID
+
+        # Re-delivery is a 2xx no-op and never creates a second recovery row.
+        second = client.post("/webhook/razorpay", content=body, headers=headers)
+        assert second.status_code == 200
+        assert second.json()["status"] == "deduplicated"
+        rows = conn.execute(
+            "SELECT * FROM webhook_recovery_outcomes WHERE delivery_id = ?",
+            (DELIVERY_ID,),
+        ).fetchall()
+        assert len(rows) == 1
+    finally:
+        conn.close()
+
+
+def test_f_webhook_path_never_executes(monkeypatch, tmp_path) -> None:
+    """The webhook OUTCOME path never invokes the executor.
+
+    Even on a fully verified, correlated paid event, execution must not run.
+    A guarded spy on the executor would fail the test if any execution path
+    were ever wired into the webhook boundary.
+    """
+    from app.executor import BoundedExecutor as ExecutorCls
+
+    calls = []
+
+    def _boom(*args, **kwargs):  # pragma: no cover - called only on regression
+        calls.append(1)
+        raise AssertionError("webhook path must never invoke the executor")
+
+    monkeypatch.setattr(ExecutorCls, "execute", _boom)
+
+    _seed_real_outcome(monkeypatch, tmp_path, payment_link_id=PAYMENT_LINK_ID)
+    body = _raw()
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "processed"
+    assert calls == []  # executor was never reached from the webhook path
+
+
+def test_f_benchmark_never_calls_razorpay(monkeypatch) -> None:
+    """The benchmark stays fully simulated: it never builds a Razorpay client.
+
+    A guard on the executor's execute() asserts the client is always None, so
+    no real provider call is possible anywhere in the benchmark run.
+    """
+    from app.benchmark import run_benchmark
+    from app.executor import BoundedExecutor
+
+    original_execute = BoundedExecutor.execute
+
+    def _guard_execute(self, event, intervention, decision, razorpay_client=None):
+        assert (
+            razorpay_client is None
+        ), "benchmark must never construct or pass a Razorpay client"
+        return original_execute(self, event, intervention, decision, razorpay_client)
+
+    monkeypatch.setattr(BoundedExecutor, "execute", _guard_execute)
+
+    report = run_benchmark(seed=3, event_count=6)
+    # A valid report was produced without raising the guard -> no Razorpay use.
+    assert report.event_results
+    for strategy, records in report.event_results.items():
+        assert records  # every strategy produced outcome records

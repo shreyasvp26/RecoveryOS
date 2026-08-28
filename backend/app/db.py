@@ -129,6 +129,27 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 )
 """
 
+# Phase 12 (S4): the durable store of VERIFIED, correlated recovery outcomes.
+# A row is written only after a verified payment_link.paid webhook has been
+# correlated (by payment_link_id) to a REAL_RAZORPAY execution outcome that
+# created that link. delivery_id (X-Razorpay-Event-Id) is the PRIMARY KEY, so
+# SQLite enforces durable uniqueness: an event can never yield a second
+# recovery. The recovery amount is the TRUSTED amount_paid observed on the
+# link (never the original event amount); if the provider did not report an
+# amount it is recorded as NULL rather than fabricated. This is an OUTCOME
+# store only — it never drives execution.
+_WEBHOOK_RECOVERY_OUTCOMES_DDL = """
+CREATE TABLE IF NOT EXISTS webhook_recovery_outcomes (
+    delivery_id         TEXT PRIMARY KEY,
+    payment_link_id     TEXT NOT NULL,
+    referenced_event_id TEXT NOT NULL,
+    amount_paid_paise   INTEGER,
+    currency            TEXT,
+    payment_id          TEXT,
+    recovered_at        TEXT NOT NULL
+)
+"""
+
 
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection to the given database path.
@@ -159,6 +180,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_EXECUTION_OUTCOMES_DDL)
         conn.execute(_BENCHMARK_RUNS_DDL)
         conn.execute(_WEBHOOK_DELIVERIES_DDL)
+        conn.execute(_WEBHOOK_RECOVERY_OUTCOMES_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
@@ -953,3 +975,59 @@ def update_webhook_delivery_status(
     except sqlite3.Error:
         conn.rollback()
         raise
+
+
+def insert_webhook_recovery_outcome(
+    conn: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    payment_link_id: str,
+    referenced_event_id: str,
+    amount_paid_paise: int | None,
+    currency: str | None,
+    payment_id: str | None,
+    recovered_at: str,
+) -> None:
+    """Persist a verified, correlated recovery outcome (durable, idempotent).
+
+    ``delivery_id`` (X-Razorpay-Event-Id) is the PRIMARY KEY and equals the
+    webhook delivery id already gated for uniqueness, so an event can never
+    yield a second recovery. The amount is the TRUSTED amount_paid observed on
+    the link; an absent amount is recorded as NULL rather than fabricated.
+    sqlite3.Error propagates so the caller can surface it as an error HTTP.
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO webhook_recovery_outcomes (
+                delivery_id, payment_link_id, referenced_event_id,
+                amount_paid_paise, currency, payment_id, recovered_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                payment_link_id,
+                referenced_event_id,
+                amount_paid_paise,
+                currency,
+                payment_id,
+                recovered_at,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_webhook_recovery_outcome(
+    conn: sqlite3.Connection, delivery_id: str
+) -> dict[str, Any] | None:
+    """Retrieve a persisted recovery outcome by its idempotency key, or None."""
+    row = conn.execute(
+        "SELECT * FROM webhook_recovery_outcomes WHERE delivery_id = ?",
+        (delivery_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)

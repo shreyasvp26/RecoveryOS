@@ -197,6 +197,31 @@ def _correlate_supported_event(
                 "recovery; recorded as unmatched with no fabricated recovery",
             )
 
+        # Persist the verified, correlated recovery outcome. delivery_id is the
+        # PRIMARY KEY and was already gated for durable uniqueness at claim, so
+        # this can never double-count; an IntegrityError here still refuses a
+        # second recovery rather than overwriting.
+        try:
+            db.insert_webhook_recovery_outcome(
+                conn,
+                delivery_id=event.delivery_id,
+                payment_link_id=link_id,
+                referenced_event_id=matched.event_id,
+                amount_paid_paise=event.amount_paid_paise,
+                currency=event.currency,
+                payment_id=event.payment_id,
+                recovered_at=received_at,
+            )
+        except sqlite3.IntegrityError:
+            return WebhookProcessResult(
+                status=S_CONFLICT,
+                delivery_id=event.delivery_id,
+                event_type=event.event_type,
+                payment_link_id=link_id,
+                detail="a verified recovery outcome for this delivery already "
+                "exists; refusing a second recovery",
+            )
+
         db.update_webhook_delivery_status(conn, event.delivery_id, _DELIVERY_PROCESSED)
         return WebhookProcessResult(
             status=S_PROCESSED,
@@ -206,7 +231,7 @@ def _correlate_supported_event(
             amount_paid_paise=event.amount_paid_paise,
             detail=f"payment link id {link_id!r} correlated to Phase 11 execution "
             f"outcome for event {matched.event_id!r}; trusted amount_paid on the "
-            "link recorded as the recovery outcome",
+            "link recorded as the verified recovery outcome",
         )
     except sqlite3.Error:
         return WebhookProcessResult(
