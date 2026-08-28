@@ -111,10 +111,56 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
 )
 """
 
+# Phase 12: a durable idempotency + audit store for verified Razorpay webhook
+# deliveries. delivery_id is the canonical idempotency key (X-Razorpay-Event-Id)
+# with a DB-level PRIMARY KEY so duplicates are rejected by SQLite, not by
+# in-memory state. body_sha256 of the exact raw body enables explicit CONFLICT
+# detection (same delivery id, different body). status advances through the
+# closed-loop processing (claimed -> ignored/unmatched/processed). The webhook
+# secret itself is never stored here.
+_WEBHOOK_DELIVERIES_DDL = """
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    delivery_id     TEXT PRIMARY KEY,
+    body_sha256     TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    payment_link_id TEXT,
+    status          TEXT NOT NULL,
+    received_at     TEXT NOT NULL
+)
+"""
+
+# Phase 12 (S4): the durable store of VERIFIED, correlated recovery outcomes.
+# A row is written only after a verified payment_link.paid webhook has been
+# correlated (by payment_link_id) to a REAL_RAZORPAY execution outcome that
+# created that link. delivery_id (X-Razorpay-Event-Id) is the PRIMARY KEY, so
+# SQLite enforces durable uniqueness: an event can never yield a second
+# recovery. The recovery amount is the TRUSTED amount_paid observed on the
+# link (never the original event amount); if the provider did not report an
+# amount it is recorded as NULL rather than fabricated. This is an OUTCOME
+# store only — it never drives execution.
+_WEBHOOK_RECOVERY_OUTCOMES_DDL = """
+CREATE TABLE IF NOT EXISTS webhook_recovery_outcomes (
+    delivery_id         TEXT PRIMARY KEY,
+    payment_link_id     TEXT NOT NULL,
+    referenced_event_id TEXT NOT NULL,
+    amount_paid_paise   INTEGER,
+    currency            TEXT,
+    payment_id          TEXT,
+    recovered_at        TEXT NOT NULL
+)
+"""
+
 
 def connect(path: str) -> sqlite3.Connection:
-    """Open a SQLite connection to the given database path."""
-    conn = sqlite3.connect(path)
+    """Open a SQLite connection to the given database path.
+
+    ``check_same_thread=False`` lets an async FastAPI route use the per-request
+    connection it received from a sync dependency even though the handler runs
+    on the event-loop thread. Every connection is created per request and
+    closed after use (never shared across requests), so disabling the
+    thread-affinity guard is safe here and standard for FastAPI + SQLite.
+    """
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -133,6 +179,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_INTERVENTION_ATTEMPTS_DDL)
         conn.execute(_EXECUTION_OUTCOMES_DDL)
         conn.execute(_BENCHMARK_RUNS_DDL)
+        conn.execute(_WEBHOOK_DELIVERIES_DDL)
+        conn.execute(_WEBHOOK_RECOVERY_OUTCOMES_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
@@ -400,6 +448,43 @@ def get_execution_outcome(
         WHERE event_id = ? AND intervention = ? AND reported_at = ?
         """,
         (event_id, intervention, reported_at),
+    ).fetchone()
+    if row is None:
+        return None
+    return ExecutionOutcome(
+        event_id=row["event_id"],
+        intervention=row["intervention"],
+        execution_mode=row["execution_mode"],
+        status=row["status"],
+        external_reference=row["external_reference"],
+        detail=row["detail"],
+        reported_at=row["reported_at"],
+        payment_link_id=row["payment_link_id"],
+    )
+
+
+def get_execution_outcome_by_payment_link_id(
+    conn: sqlite3.Connection, payment_link_id: str
+) -> ExecutionOutcome | None:
+    """Return the most recent REAL_RAZORPAY payment_link SUCCESS outcome that
+    created the given Payment Link id, or None.
+
+    A Payment Link id is only ever persisted on a REAL_RAZORPAY ``payment_link``
+    SUCCESS outcome, so matching on the actual Razorpay Payment Link id (never
+    amount/customer/email/URL) unambiguously identifies the Phase 11 execution
+    that produced that link. This is the webhook correlation key.
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM execution_outcomes
+        WHERE payment_link_id = ?
+          AND execution_mode = 'REAL_RAZORPAY'
+          AND status = 'SUCCESS'
+          AND intervention = 'payment_link'
+        ORDER BY reported_at DESC
+        LIMIT 1
+        """,
+        (payment_link_id,),
     ).fetchone()
     if row is None:
         return None
@@ -813,3 +898,158 @@ def get_latest_benchmark_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
         "saved_at": row["saved_at"],
         "summary": json.loads(row["summary_json"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 webhook delivery persistence (durable idempotency + audit).
+# delivery_id (X-Razorpay-Event-Id) is the canonical idempotency key; SQLite's
+# PRIMARY KEY enforces durable uniqueness. body_sha256 of the exact raw body
+# enables explicit CONFLICT detection for the same id with a different body.
+# Persistence stores delivered/processed facts; it never performs recovery.
+# ---------------------------------------------------------------------------
+
+
+def insert_webhook_delivery(
+    conn: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    body_sha256: str,
+    event_type: str,
+    payment_link_id: str | None,
+    status: str,
+    received_at: str,
+) -> None:
+    """Persist a webhook delivery claim.
+
+    ``delivery_id`` is a PRIMARY KEY, so a second delivery with the same id
+    raises sqlite3.IntegrityError (durable DB-level uniqueness, never
+    in-memory state). Other sqlite3.Error values propagate as persistence
+    failures for the caller to surface as an error HTTP (so Razorpay retries).
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO webhook_deliveries (
+                delivery_id, body_sha256, event_type, payment_link_id,
+                status, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                body_sha256,
+                event_type,
+                payment_link_id,
+                status,
+                received_at,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_webhook_delivery(
+    conn: sqlite3.Connection, delivery_id: str
+) -> dict[str, Any] | None:
+    """Retrieve a persisted webhook delivery by its idempotency key, or None."""
+    row = conn.execute(
+        "SELECT * FROM webhook_deliveries WHERE delivery_id = ?",
+        (delivery_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def update_webhook_delivery_status(
+    conn: sqlite3.Connection, delivery_id: str, status: str
+) -> None:
+    """Advance a webhook delivery's closed-loop status in place."""
+    try:
+        conn.execute(
+            "UPDATE webhook_deliveries SET status = ? WHERE delivery_id = ?",
+            (status, delivery_id),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def insert_webhook_recovery_outcome(
+    conn: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    payment_link_id: str,
+    referenced_event_id: str,
+    amount_paid_paise: int | None,
+    currency: str | None,
+    payment_id: str | None,
+    recovered_at: str,
+) -> None:
+    """Persist a verified, correlated recovery outcome (durable, idempotent).
+
+    ``delivery_id`` (X-Razorpay-Event-Id) is the PRIMARY KEY and equals the
+    webhook delivery id already gated for uniqueness, so an event can never
+    yield a second recovery. The amount is the TRUSTED amount_paid observed on
+    the link; an absent amount is recorded as NULL rather than fabricated.
+    sqlite3.Error propagates so the caller can surface it as an error HTTP.
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO webhook_recovery_outcomes (
+                delivery_id, payment_link_id, referenced_event_id,
+                amount_paid_paise, currency, payment_id, recovered_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                payment_link_id,
+                referenced_event_id,
+                amount_paid_paise,
+                currency,
+                payment_id,
+                recovered_at,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_webhook_recovery_outcome(
+    conn: sqlite3.Connection, delivery_id: str
+) -> dict[str, Any] | None:
+    """Retrieve a persisted recovery outcome by its idempotency key, or None."""
+    row = conn.execute(
+        "SELECT * FROM webhook_recovery_outcomes WHERE delivery_id = ?",
+        (delivery_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def get_webhook_recovery_outcome_by_payment_link_id(
+    conn: sqlite3.Connection, payment_link_id: str
+) -> dict[str, Any] | None:
+    """Retrieve the most recent verified recovery for a Payment Link, or None.
+
+    Read-only dashboard/trace support: correlates a Payment Link created on the
+    execution side to the verified recovery (if any) observed via the webhook.
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM webhook_recovery_outcomes
+        WHERE payment_link_id = ?
+        ORDER BY recovered_at DESC
+        LIMIT 1
+        """,
+        (payment_link_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)

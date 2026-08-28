@@ -12,10 +12,12 @@ from fastapi import FastAPI
 
 from .routes.dashboard import router as dashboard_router
 from .routes.events import router as events_router
+from .routes.webhook import router as webhook_router
 
 app = FastAPI(title="RecoveryOS API", version="0.1.0")
 app.include_router(events_router)
 app.include_router(dashboard_router)
+app.include_router(webhook_router)
 
 HEALTH_RESPONSE = {"status": "ok"}
 
