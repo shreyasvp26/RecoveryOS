@@ -102,7 +102,8 @@ function ExecutionStage({ executions, summary }) {
   )
 }
 
-function OutcomeStage({ executions, summary }) {  return (
+function OutcomeStage({ executions, summary }) {
+  return (
     <Stage title="Outcome" tone="info">
       <div className="kv-grid">
         <KeyVal k="Execution status" v={summary.execution_status || 'no execution recorded'} />
