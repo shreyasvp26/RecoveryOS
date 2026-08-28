@@ -1,6 +1,6 @@
 # RecoveryOS — Five-Minute Pitch Notes
 
-**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation, ingestion, advisory AI classification, the deterministic policy gate, V1 intervention selection, bounded execution (simulated or Razorpay Test Mode Payment Link), the Phase 8 evaluation foundation (hidden model + deterministic simulation), and the Phase 9 honest three-strategy benchmark (No Action vs Naive Retry vs the real RecoveryOS pipeline over a shared 500-event set and shared hidden model, reported as simulated) all exist. The audit dashboard and V2 optimizer are not implemented yet.
+**Status note:** This is the lock five-minute product story. The functionality described is the V1 target; event generation, ingestion, advisory AI classification, the deterministic policy gate, V1 intervention selection, bounded execution (simulated or Razorpay Test Mode Payment Link), the Phase 8 evaluation foundation (hidden model + deterministic simulation), the Phase 9 honest three-strategy benchmark (No Action vs Naive Retry vs the real RecoveryOS pipeline over a shared 500-event set and shared hidden model, reported as simulated), the read-only Recovery Command Center & Decision Trace dashboard (Phase 10), and the closed-loop verified webhook trace (Phase 12) all exist. The V2 optimizer is not implemented yet.
 
 ## The Problem
 
