@@ -11,6 +11,14 @@ Idempotency is durable: the X-Razorpay-Event-Id delivery id is a SQLite
 PRIMARY KEY, so duplicates are rejected by the database, and the same id with a
 different body is an explicit CONFLICT (never overwritten, never a second
 recovery). Persistent failures surface as errors so Razorpay retries.
+
+Crash-safe claim/retry: a delivery row still in the ``claimed`` state is an
+in-flight attempt that crashed before completing, so a re-delivered event with
+the same id/body is reprocessed to completion (never silently dropped as a
+duplicate). The recovery-outcome write is idempotent (INSERT OR IGNORE), so a
+crash between that write and the terminal status update completes cleanly on
+retry without double-counting. Only a delivery that reached a terminal status is
+deduplicated.
 """
 
 from __future__ import annotations
@@ -73,14 +81,23 @@ def _body_sha256(raw_body: bytes) -> str:
 def claim_webhook_delivery(
     conn: sqlite3.Connection, event: WebhookEvent, body_sha256: str, received_at: str
 ) -> str:
-    """Durably claim a delivery id, returning 'claimed'/'deduplicated'/'conflict'.
+    """Durably claim a delivery id, returning a claim disposition.
 
-    A fresh id is inserted and returns 'claimed'. A re-delivered id whose raw
-    body hash matches returns 'deduplicated' (a 2xx no-op; the prior outcome is
-    not reprocessed or double-counted). The same id with a DIFFERENT body hash
-    returns 'conflict' — an explicit, never-overwritten state. sqlite3.Error
-    (other than the unique-violation IntegrityError) propagates so the caller
-    can surface it as an error HTTP and Razorpay will retry.
+    Returns one of: ``claimed`` (fresh insert, ready to process), ``in_flight``
+    (the id was claimed by a previous attempt whose row is still ``claimed`` —
+    i.e. it crashed before reaching a terminal status, so it MUST be processed
+    to completion and is safe to retry), ``deduplicated`` (id + body already
+    reached a terminal status — a 2xx no-op, never reprocessed or double
+    counted), or ``conflict`` (same id, DIFFERENT body — an explicit never
+    overwritten state).
+
+    Crash-safety invariant: a row still in the ``claimed`` state is an
+    *in-flight* delivery that never completed, so Razorpay's retry is honored by
+    reprocessing it. Only a delivery that reached a terminal status
+    (processed/ignored/unmatched) is deduplicated. A different body is always a
+    conflict regardless of status. sqlite3.Error (other than the unique-violation
+    IntegrityError) propagates so the caller can surface it as an error HTTP and
+    Razorpay will retry.
     """
     claim_status = _DELIVERY_CLAIMED
     try:
@@ -98,9 +115,13 @@ def claim_webhook_delivery(
         existing = db.get_webhook_delivery(conn, event.delivery_id)
         if existing is None:
             raise
-        if existing["body_sha256"] == body_sha256:
-            return "deduplicated"
-        return "conflict"
+        if existing["body_sha256"] != body_sha256:
+            return "conflict"
+        # Same body. If the previous attempt never reached a terminal status, the
+        # delivery is still in-flight and must be completed on this retry.
+        if existing["status"] == _DELIVERY_CLAIMED:
+            return "in_flight"
+        return "deduplicated"
 
 
 def process_webhook(
@@ -135,7 +156,9 @@ def process_webhook(
             status=S_DEDUPLICATED,
             delivery_id=event.delivery_id,
             event_type=event.event_type,
-            detail="duplicate delivery (same event id and body); already recorded",
+            detail="duplicate delivery (same event id and body, already completed); "
+            "acknowledged as a no-op",
+            previous_status="deduplicated",
         )
     if claim == "conflict":
         return WebhookProcessResult(
@@ -146,8 +169,10 @@ def process_webhook(
             "overwrite and refusing a second recovery",
         )
 
-    # Freshly claimed. Unsupported events are explicitly recorded as ignored
-    # and acknowledged; they are never executed or turned into a recovery.
+    # Freshly claimed, or an in-flight retry whose prior attempt crashed before
+    # reaching a terminal status — both must be processed to completion exactly
+    # once. Unsupported events are explicitly recorded as ignored and
+    # acknowledged; they are never executed or turned into a recovery.
     if event.event_type != SUPPORTED_WEBHOOK_EVENT:
         db.update_webhook_delivery_status(conn, event.delivery_id, _DELIVERY_IGNORED)
         return WebhookProcessResult(
@@ -198,29 +223,19 @@ def _correlate_supported_event(
             )
 
         # Persist the verified, correlated recovery outcome. delivery_id is the
-        # PRIMARY KEY and was already gated for durable uniqueness at claim, so
-        # this can never double-count; an IntegrityError here still refuses a
-        # second recovery rather than overwriting.
-        try:
-            db.insert_webhook_recovery_outcome(
-                conn,
-                delivery_id=event.delivery_id,
-                payment_link_id=link_id,
-                referenced_event_id=matched.event_id,
-                amount_paid_paise=event.amount_paid_paise,
-                currency=event.currency,
-                payment_id=event.payment_id,
-                recovered_at=received_at,
-            )
-        except sqlite3.IntegrityError:
-            return WebhookProcessResult(
-                status=S_CONFLICT,
-                delivery_id=event.delivery_id,
-                event_type=event.event_type,
-                payment_link_id=link_id,
-                detail="a verified recovery outcome for this delivery already "
-                "exists; refusing a second recovery",
-            )
+        # PRIMARY KEY and the insert is idempotent (INSERT OR IGNORE), so a crash
+        # between this write and the delivery-status update is completed cleanly
+        # on Razorpay's retry — never double-counted, never a spurious conflict.
+        db.insert_webhook_recovery_outcome(
+            conn,
+            delivery_id=event.delivery_id,
+            payment_link_id=link_id,
+            referenced_event_id=matched.event_id,
+            amount_paid_paise=event.amount_paid_paise,
+            currency=event.currency,
+            payment_id=event.payment_id,
+            recovered_at=received_at,
+        )
 
         db.update_webhook_delivery_status(conn, event.delivery_id, _DELIVERY_PROCESSED)
         return WebhookProcessResult(

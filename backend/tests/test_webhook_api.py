@@ -10,7 +10,12 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import connect, init_db, insert_execution_outcome
+from app.db import (
+    connect,
+    init_db,
+    insert_execution_outcome,
+    insert_webhook_delivery,
+)
 from app.db import insert_webhook_recovery_outcome
 from app.executor import ExecutionOutcome
 from app.dashboard import build_event_trace
@@ -362,15 +367,20 @@ def test_same_event_id_with_different_body_is_explicit_conflict(
     assert first.status_code == 200
 
     # Same event id, but a different (tampered) body signed correctly: must be
-    # an explicit CONFLICT, never overwritten, never a second recovery.
+    # an explicit CONFLICT, never overwritten, never a second recovery. The
+    # body is a structurally-valid paid event (strictly validated) that differs
+    # only in amount_paid, so it bypasses shape validation and hits the 409.
     tampered = json.dumps(
         {
             **PAID_EVENT,
             "payload": {
                 **PAID_EVENT["payload"],
                 "payment_link": {
-                    **PAID_EVENT["payload"]["payment_link"]["entity"],
-                    "amount_paid": 99999,
+                    **PAID_EVENT["payload"]["payment_link"],
+                    "entity": {
+                        **PAID_EVENT["payload"]["payment_link"]["entity"],
+                        "amount_paid": 99999,
+                    },
                 },
             },
         }
@@ -772,3 +782,184 @@ def test_trace_phase12_labels_waiting_then_recovered(monkeypatch, tmp_path) -> N
     assert trace["phase12"]["payment_links"][0]["status"] == "recovered"
     assert trace["phase12"]["payment_links"][0]["recovered_amount_paise"] == 60000
     assert trace["phase12"]["payment_links"][0]["payment_id"] == PAYMENT_ID
+
+
+# ---------------------------------------------------------------------------
+# Phase 12.1 crash-safe claim/retry + strict paid-shape regression tests
+# ---------------------------------------------------------------------------
+
+
+def _paid_body(*, entity_updates=None, drop_entity_keys=None) -> bytes:
+    evt = json.loads(json.dumps(PAID_EVENT))
+    ent = evt["payload"]["payment_link"]["entity"]
+    for key in drop_entity_keys or []:
+        ent.pop(key, None)
+    for key, value in (entity_updates or {}).items():
+        if value is None:
+            ent.pop(key, None)
+        else:
+            ent[key] = value
+    return json.dumps(evt).encode("utf-8")
+
+
+def test_crash_after_claim_retry_reprocesses_to_completion(
+    monkeypatch, tmp_path
+) -> None:
+    """A delivery still in-flight ('claimed') is reprocessed, never dropped."""
+    _seed_real_outcome(monkeypatch, tmp_path, payment_link_id=PAYMENT_LINK_ID)
+    body = _raw()
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        # Simulate a prior attempt that claimed the delivery then crashed
+        # before writing the recovery outcome or a terminal status.
+        insert_webhook_delivery(
+            conn,
+            delivery_id=DELIVERY_ID,
+            body_sha256=hashlib.sha256(body).hexdigest(),
+            event_type="payment_link.paid",
+            payment_link_id=PAYMENT_LINK_ID,
+            status="claimed",
+            received_at="2026-08-28T00:00:00+00:00",
+        )
+    finally:
+        conn.close()
+
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "processed"
+
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        recovery = conn.execute(
+            "SELECT * FROM webhook_recovery_outcomes WHERE delivery_id=?",
+            (DELIVERY_ID,),
+        ).fetchone()
+        assert recovery is not None
+        assert recovery["amount_paid_paise"] == 75000
+        status = conn.execute(
+            "SELECT status FROM webhook_deliveries WHERE delivery_id=?",
+            (DELIVERY_ID,),
+        ).fetchone()["status"]
+        assert status == "processed"
+    finally:
+        conn.close()
+
+
+def test_crash_after_recovery_write_retry_completes_without_double_count(
+    monkeypatch, tmp_path
+) -> None:
+    """A crash after the recovery write but before the status update completes
+    cleanly on retry: valid recovery is completed, never double-counted."""
+    _seed_real_outcome(monkeypatch, tmp_path, payment_link_id=PAYMENT_LINK_ID)
+    body = _raw()
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        insert_webhook_delivery(
+            conn,
+            delivery_id=DELIVERY_ID,
+            body_sha256=hashlib.sha256(body).hexdigest(),
+            event_type="payment_link.paid",
+            payment_link_id=PAYMENT_LINK_ID,
+            status="claimed",
+            received_at="2026-08-28T00:00:00+00:00",
+        )
+        # The recovery row already exists from the first (crashed) attempt.
+        insert_webhook_recovery_outcome(
+            conn,
+            delivery_id=DELIVERY_ID,
+            payment_link_id=PAYMENT_LINK_ID,
+            referenced_event_id="evt_seeded_1",
+            amount_paid_paise=75000,
+            currency="INR",
+            payment_id=PAYMENT_ID,
+            recovered_at="2026-08-28T00:00:00+00:00",
+        )
+    finally:
+        conn.close()
+
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=DELIVERY_ID,
+    )
+    # No conflict despite the pre-existing recovery row; the delivery completes.
+    assert response.status_code == 200
+    assert response.json()["status"] == "processed"
+
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM webhook_recovery_outcomes WHERE delivery_id=?",
+            (DELIVERY_ID,),
+        ).fetchall()
+        assert len(rows) == 1  # idempotent: never a second recovery row
+        status = conn.execute(
+            "SELECT status FROM webhook_deliveries WHERE delivery_id=?",
+            (DELIVERY_ID,),
+        ).fetchone()["status"]
+        assert status == "processed"
+    finally:
+        conn.close()
+
+
+def test_paid_event_missing_link_id_is_strictly_rejected(monkeypatch, tmp_path) -> None:
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=_paid_body(drop_entity_keys=["id"]),
+        signature=_sign(_paid_body(drop_entity_keys=["id"])),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 400
+    assert response.json()["status"] == "invalid_payload"
+
+
+def test_paid_event_wrong_status_is_strictly_rejected(monkeypatch, tmp_path) -> None:
+    body = _paid_body(entity_updates={"status": "cancelled"})
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 400
+    assert response.json()["status"] == "invalid_payload"
+
+
+def test_paid_event_missing_amount_paid_is_strictly_rejected(
+    monkeypatch, tmp_path
+) -> None:
+    body = _paid_body(drop_entity_keys=["amount_paid"])
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 400
+    assert response.json()["status"] == "invalid_payload"
+
+
+def test_paid_event_non_integer_amount_paid_is_strictly_rejected(
+    monkeypatch, tmp_path
+) -> None:
+    body = _paid_body(entity_updates={"amount_paid": "100"})
+    response = _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=DELIVERY_ID,
+    )
+    assert response.status_code == 400
+    assert response.json()["status"] == "invalid_payload"

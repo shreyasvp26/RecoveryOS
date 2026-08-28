@@ -88,7 +88,22 @@ Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
 
 ## Current Development Phase
 
-**Phase 10 — Recovery Command Center & Decision Trace.** Three read-only operator screens over the persisted decision chain: a **Recovery Command Center** (Revenue at Risk, executed/blocked interventions, the simulated benchmark comparison), an **Event Decision Trace** (the full ingest → classify → policy → execute history for any event), and a **Policy & Blocked Actions** view (every denied intervention and why). The frontend holds no policy or benchmark logic; it only reads the backend. Simulated figures are explicitly labelled `SIMULATED`, Recoverable Revenue is reported as "Definition unavailable" (the repo defines no canonical value), and empty states are kept distinct from failures.
+**Phase 12 — Closed-Loop Recovery via Verified Razorpay Webhooks.** A secure, durable, and audit-friendly channel that turns a real Razorpay `payment_link.paid` webhook into a verified, correlated, duplicate-safe recovery outcome. The webhook is an **OUTCOME channel only**: it never invokes the executor, policy engine, selector, or link creation. It verifies an HMAC-SHA256 signature over the exact raw request body (constant-time compare, fail-closed 4xx before any parsing), then (1) durably claims the delivery under the `X-Razorpay-Event-Id` PRIMARY KEY, (2) strictly validates the `payment_link.paid` shape (link id, `status: paid`, non-negative `amount_paid`), (3) correlates to the persisted Phase 11 `payment_link_id` (never amount/customer), and (4) records a trusted recovery outcome derived only from the actual `amount_paid` observed on the link. Crash-safe: an in-flight `claimed` delivery is reprocessed to completion on retry, and the recovery write is idempotent (`INSERT OR IGNORE`), so a crash never double-counts and never loses a recovery. Dashboard traces label each real link `waiting` → `recovered`.
+
+### Phase 12 — Closed-Loop Recovery (Webhook)
+
+```bash
+cd backend
+# .env: RAZORPAY_WEBHOOK_SECRET=<shared Test Mode secret>  (never committed)
+uvicorn app.main:app                              # start the API
+```
+
+- **Signature-verified, fail-closed** — `POST /webhook/razorpay` recomputes HMAC-SHA256 over the exact raw request body and compares constant-time (`hmac.compare_digest`); a bad/missing signature is a 401/400 before any parsing. The note sent from a Payment Link is expected to carry the `X-Razorpay-Event-Id` idempotency key and the signed body.
+- **OUTCOME-only, architecturally separate** — this path never executes, never selects, never re-classifies, and never creates a Payment Link. It only records verified recovery evidence and labels the dashboard. (`BoundedExecutor.execute` is patched in tests to prove a webhook can never run an intervention.)
+- **Durable, explicit idempotency** — `X-Razorpay-Event-Id` is the SQLite PRIMARY KEY of `webhook_deliveries` (body SHA-256 stored). Same id + same body = 2xx `deduplicated` no-op; same id + **different** body = 409 `conflict` (never overwritten, never double-recovered); persistent failure = 500 so Razorpay retries.
+- **Crash-safe claim/retry** — a delivery still `claimed` (crashed mid-flight) is reprocessed to completion on Razorpay's retry, never silently dropped as a duplicate; the recovery-outcome insert is `INSERT OR IGNORE`, so a crash between the recovery write and the status update completes cleanly without double-counting.
+- **Trusted, correlated outcome** — correlation matches the persisted Phase 11 `execution_outcomes.payment_link_id` (REAL_RAZORPAY + SUCCESS + payment_link). The trusted recovery amount is the `amount_paid` observed on the link, never the original webhook event amount. Verified outcomes persist to `webhook_recovery_outcomes` (delivery-id PRIMARY KEY).
+- **Strictly validated shape** — a `payment_link.paid` event must carry a link id, report `status: paid`, and give a non-negative integer `amount_paid`; a malformed paid event is a 400, never silently unmatched. Unsupported events are recorded-and-ignored (2xx), never executed.
 
 ### Phase 10 — Recovery Command Center & Decision Trace
 
