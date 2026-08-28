@@ -9,15 +9,11 @@ import {
 import { eventTrace, listEvents, useAsync } from '../core/api.js'
 import { formatINR, formatTime } from '../core/format.js'
 
-function DecisionBadge({ summary }) {
-  const map = {
-    ALLOW: { tone: 'success', label: 'ALLOWED' },
-    DENY: { tone: 'danger', label: 'DENIED' },
-    no_action: { tone: 'warn', label: 'NO ACTION' },
-    not_classified: { tone: 'neutral', label: 'NOT CLASSIFIED' },
-  }
-  const m = map[summary.final_decision] || { tone: 'neutral', label: summary.final_decision }
-  return <Badge tone={m.tone}>{m.label}</Badge>
+const EXECUTION_STATE_META = {
+  EXECUTED: { tone: 'success', label: 'EXECUTED' },
+  POLICY_BLOCKED: { tone: 'danger', label: 'POLICY BLOCKED' },
+  NOT_CLASSIFIED: { tone: 'neutral', label: 'NOT CLASSIFIED' },
+  NO_EXECUTION_RECORDED: { tone: 'warn', label: 'NO EXECUTION RECORDED' },
 }
 
 function Stage({ title, tone = 'neutral', children }) {
@@ -41,12 +37,116 @@ function KeyVal({ k, v }) {
   )
 }
 
+function ExecutionStage({ executions, summary }) {
+  const state = summary.execution_state
+
+  if (executions.length > 0) {
+    return (
+      <Stage title="Execution" tone="success">
+        {executions.map((e, i) => (
+          <div key={i} className="execution-row">
+            <div className="meta-row">
+              <Badge tone={e.execution_mode === 'REAL_RAZORPAY' ? 'brand' : 'info'}>
+                {e.execution_mode === 'REAL_RAZORPAY'
+                  ? 'REAL RAZORPAY TEST MODE'
+                  : 'SIMULATED'}
+              </Badge>
+              <span className="mono">{e.intervention}</span>
+              <Badge tone={e.status === 'SUCCESS' ? 'success' : 'warn'}>{e.status}</Badge>
+            </div>
+            <div className="kv-grid">
+              <KeyVal k="Reference" v={e.external_reference} />
+              <KeyVal k="Reported" v={formatTime(e.reported_at)} />
+            </div>
+            {e.detail && <p className="stage__text mono">{e.detail}</p>}
+          </div>
+        ))}
+        <div className="stage__text">
+          Note: execution status records only whether the operation ran. Whether
+          revenue was recovered is a benchmark-level, simulated answer — never
+          inferred from execution success here.
+        </div>
+      </Stage>
+    )
+  }
+
+  if (state === 'POLICY_BLOCKED') {
+    return (
+      <Stage title="Execution" tone="danger">
+        <EmptyState
+          title="Blocked by policy"
+          message="Every actionable intervention was denied by the deterministic policy gate. A persisted denied decision proves this — no execution was permitted."
+        />
+      </Stage>
+    )
+  }
+
+  if (state === 'NOT_CLASSIFIED') {
+    return (
+      <Stage title="Execution" tone="neutral">
+        <EmptyState
+          title="No execution"
+          message="This event was never AI-classified, so the pipeline had no candidate interventions to authorize or run."
+        />
+      </Stage>
+    )
+  }
+
+  return (
+    <Stage title="Execution" tone="warn">
+      <EmptyState
+        title="No execution recorded"
+        message="This event was classified but no execution is recorded. That can mean no actionable intervention was available, or the event was never run through execution. It is not labelled 'policy denied' because no persisted decision proves a denial."
+      />
+    </Stage>
+  )
+}
+
+function OutcomeStage({ executions, summary }) {
+  return (
+    <Stage title="Outcome" tone="info">
+      <div className="kv-grid">
+        <KeyVal k="Execution status" v={summary.execution_status || 'no execution recorded'} />
+        <KeyVal k="Execution mode" v={summary.execution_mode || '—'} />
+      </div>
+      <div className="outcome-note">
+        <Badge tone="warn">SIMULATED BENCHMARK</Badge>
+        <p>
+          Recovery outcome is not available at event level. Simulated recovery is
+          measured at batch level by the Phase 9 benchmark; this view never
+          invents a per-event recovered amount. Execution success does not imply
+          revenue recovered.
+        </p>
+      </div>
+      {executions.some((e) => e.execution_mode === 'REAL_RAZORPAY') && (
+        <p className="stage__text">
+          This execution ran in real Razorpay Test Mode; its revenue outcome is
+          still recorded at the execution layer, not as a recovery figure here.
+        </p>
+      )}
+    </Stage>
+  )
+}
+
 function TraceTimeline({ trace }) {
   const { event, classification, policy_decisions, executions, attempts, summary } = trace
+  const execMeta = EXECUTION_STATE_META[summary.execution_state] || {
+    tone: 'neutral',
+    label: summary.execution_state || 'UNKNOWN',
+  }
   return (
     <div className="trace">
       <div className="trace__banner">
-        <DecisionBadge summary={summary} />
+        <div className="trace__badges">
+          <Badge tone={summary.final_decision === 'ALLOW' ? 'success' : summary.final_decision === 'DENY' ? 'danger' : 'neutral'}>
+            {summary.final_decision === 'ALLOW'
+              ? 'ALLOWED'
+              : summary.final_decision === 'DENY'
+                ? 'DENIED'
+                : String(summary.final_decision).replace(/_/g, ' ').toUpperCase()}
+          </Badge>
+          <Badge tone={execMeta.tone}>{execMeta.label}</Badge>
+        </div>
         <div className="trace__bannermeta">
           <span className="mono">{event.event_id}</span>
           <span>·</span>
@@ -73,10 +173,7 @@ function TraceTimeline({ trace }) {
           </div>
         </Stage>
 
-        <Stage
-          title="AI Classification"
-          tone={classification ? 'info' : 'neutral'}
-        >
+        <Stage title="AI Diagnosis" tone={classification ? 'info' : 'neutral'}>
           {classification ? (
             <>
               <div className="meta-row">
@@ -86,21 +183,29 @@ function TraceTimeline({ trace }) {
               <p className="stage__text">{classification.reasoning}</p>
               <div className="candidates">
                 {(classification.candidate_interventions || []).map((c) => (
-                  <span key={c} className="chip">{c}</span>
+                  <span key={c} className="chip">
+                    {c === 'no_action' ? `${c} (advisory)` : c}
+                  </span>
                 ))}
               </div>
             </>
           ) : (
-            <EmptyState title="No AI classification" message="This event has no persisted classification result." />
+            <EmptyState title="No AI diagnosis" message="This event has no persisted classification result." />
           )}
         </Stage>
 
+        <li className="stage-separator" aria-hidden="true">
+          <span>AI — advisory</span>
+          <span className="sep-line" />
+          <span>Policy — authoritative</span>
+        </li>
+
         <Stage
-          title={`Policy Gate${policy_decisions.length > 1 ? 's' : ''}`}
+          title={`Deterministic Policy${policy_decisions.length ? ` · ${policy_decisions.length}` : ''}`}
           tone={policy_decisions.some((d) => !d.allowed) ? 'danger' : 'success'}
         >
           {policy_decisions.length === 0 && (
-            <EmptyState title="No policy decision" message="No policy evaluation was persisted for this event." />
+            <EmptyState title="No policy decisions" message="No per-candidate policy evaluation was persisted for this event." />
           )}
           {policy_decisions.map((d, i) => (
             <div key={i} className="decision-row">
@@ -118,33 +223,20 @@ function TraceTimeline({ trace }) {
           ))}
         </Stage>
 
-        <Stage title="Execution" tone={executions.length ? 'success' : 'neutral'}>
-          {executions.length === 0 && (
-            <EmptyState title="Not executed" message="Policy did not permit an execution for this event." />
-          )}
-          {executions.map((e, i) => (
-            <div key={i} className="execution-row">
-              <div className="meta-row">
-                <Badge tone="success">{e.execution_mode}</Badge>
-                <span className="mono">{e.intervention}</span>
-                <Badge tone={e.status === 'SUCCESS' ? 'success' : 'warn'}>{e.status}</Badge>
-              </div>
-              <div className="kv-grid">
-                <KeyVal k="Reference" v={e.external_reference} />
-                <KeyVal k="Reported" v={formatTime(e.reported_at)} />
-              </div>
-              {e.detail && <p className="stage__text mono">{e.detail}</p>}
-            </div>
-          ))}
-          {attempts && attempts.length > 0 && (
-            <div className="attempts">
-              <div className="stage__title small">Attempts</div>
-              {attempts.map((a, i) => (
-                <KeyVal key={i} k={a.intervention || a.method || 'attempt'} v={`${a.status || a.attempted_at || ''} · ${formatTime(a.attempted_at)}`} />
-              ))}
-            </div>
-          )}
-        </Stage>
+        <ExecutionStage executions={executions} summary={summary} />
+        <OutcomeStage executions={executions} summary={summary} />
+
+        {attempts && attempts.length > 0 && (
+          <Stage title="Attempts" tone="neutral">
+            {attempts.map((a, i) => (
+              <KeyVal
+                key={i}
+                k={a.intervention || 'attempt'}
+                v={`${a.status || ''} · ${formatTime(a.attempted_at)}`}
+              />
+            ))}
+          </Stage>
+        )}
       </ol>
     </div>
   )

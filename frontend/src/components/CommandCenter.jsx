@@ -11,6 +11,18 @@ const STRATEGY_META = {
   no_action: { label: 'No action', tone: 'neutral', desc: 'Do nothing baseline' },
 }
 
+/** Render a benchmark-derived value, honestly showing Unavailable when absent. */
+function benchValue({ bench, value, formatter }) {
+  if (!bench || bench.available === false) {
+    return {
+      tone: 'neutral',
+      text: 'Unavailable',
+      sub: 'no persisted benchmark run',
+    }
+  }
+  return { tone: 'brand', text: formatter(value), sub: bench.evaluation_mode }
+}
+
 function BenchmarkPanel({ bench }) {
   if (!bench || bench.available === false) {
     return (
@@ -23,7 +35,7 @@ function BenchmarkPanel({ bench }) {
   return (
     <div className="benchmark">
       <div className="benchmark__meta">
-        <Badge tone="warn">SIMULATED — evaluation, not production revenue</Badge>
+        <Badge tone="warn">SIMULATED BENCHMARK — evaluation, not production revenue</Badge>
         <span className="meta-line">
           Run {bench.run_id} · seed {bench.seed} · {bench.event_count} events ·{' '}
           {bench.evaluation_mode}
@@ -41,7 +53,7 @@ function BenchmarkPanel({ bench }) {
               <div className="strategy__num" style={{ color: `var(--${meta.tone})` }}>
                 {formatINR(s.recovered_amount_paise)}
               </div>
-              <div className="strategy__label">simulated recovered</div>
+              <div className="strategy__label">SIMULATED revenue recovered</div>
               <dl className="strategy__details">
                 <div><dt>Recovery rate</dt><dd>{formatRate(s.recovery_rate)}</dd></div>
                 <div><dt>Efficiency</dt><dd>{formatINR(s.efficiency_paise_per_intervention)}/action</dd></div>
@@ -51,18 +63,20 @@ function BenchmarkPanel({ bench }) {
           )
         })}
       </div>
-      <div className="benchmark__delta">
-        <div>
-          <span className="delta-label">RecoveryOS vs no action</span>
-          <span className="delta-value">
-            {formatINR(bench.incremental_over_no_action_paise)}
-          </span>
-        </div>
-        <div>
-          <span className="delta-label">RecoveryOS vs naive retry</span>
-          <span className="delta-value">
-            {formatINR(bench.recoveryos_vs_naive_retry_paise)}
-          </span>
+
+      <div className="incremental">
+        <h4 className="incremental__title">RecoveryOS vs baselines (SIMULATED)</h4>
+        <div className="benchmark__delta">
+          <div className="delta-card">
+            <span className="delta-label">RecoveryOS vs No Action</span>
+            <span className="delta-value">{formatINR(bench.incremental_over_no_action_paise)}</span>
+            <span className="delta-note">incremental SIMULATED recovered revenue</span>
+          </div>
+          <div className="delta-card">
+            <span className="delta-label">RecoveryOS vs Naive Retry</span>
+            <span className="delta-value">{formatINR(bench.recoveryos_vs_naive_retry_paise)}</span>
+            <span className="delta-note">incremental SIMULATED recovered revenue</span>
+          </div>
         </div>
       </div>
     </div>
@@ -105,8 +119,18 @@ export default function CommandCenter() {
 
   const op = data.operational
   const rec = data.recoverable_revenue
-  const executed = op.interventions_executed
-  const succeeded = op.interventions_executed_success
+  const bench = data.benchmark
+
+  const simRecovered = benchValue({
+    bench,
+    value: bench?.recovery_os_recovered_amount_paise,
+    formatter: formatINR,
+  })
+  const recoveryRate = benchValue({
+    bench,
+    value: bench?.recovery_os_recovery_rate,
+    formatter: formatRate,
+  })
 
   return (
     <div className="screen">
@@ -122,44 +146,64 @@ export default function CommandCenter() {
           Real ingested payments
           <span className="legend-divider" />
           <span className="legend-dot" style={{ background: 'var(--warn)' }} />
-          Simulated benchmark
+          SIMULATED benchmark
         </div>
       </header>
 
-      <div className="kpi-grid">
-        <Stat
-          label="Revenue at Risk"
-          tone="danger"
-          value={formatINR(op.revenue_at_risk_paise)}
-          hint={op.revenue_at_risk_source}
-          sub="sum of ingested failed payments"
-        />
-        <Stat
-          label="Interventions Executed"
-          tone="success"
-          value={`${succeeded} / ${executed}`}
-          sub="successful / total"
-        />
-        <Stat
-          label="Blocked Interventions"
-          tone="warn"
-          value={op.blocked_interventions}
-          sub="denied by policy gates"
-        />
-        <Stat
-          label="Fraud Actions Blocked"
-          tone="warn"
-          value={op.fraud_actions_blocked}
-          sub="denied on fraud-suspect events"
-        />
-        <Stat label="Events Ingested" value={op.event_count} sub="persisted failures" />
-        <Stat
-          label="Policy Decisions"
-          tone="info"
-          value={op.policy_decisions_total}
-          sub="evaluations logged"
-        />
-      </div>
+      <section className="kpi-group">
+        <h2 className="group-label">Primary</h2>
+        <div className="kpi-grid kpi-grid--primary">
+          <Stat
+            label="Revenue at Risk"
+            tone="danger"
+            value={formatINR(op.revenue_at_risk_paise)}
+            hint={op.revenue_at_risk_source}
+            sub="sum of ingested failed payments"
+          />
+          <Stat
+            label="Recoverable Revenue"
+            tone="neutral"
+            value="Unavailable"
+            sub="no canonical definition"
+          />
+          <Stat
+            label="Simulated Revenue Recovered"
+            tone="brand"
+            value={simRecovered.text}
+            sub={simRecovered.sub}
+          />
+          <Stat
+            label="Recovery Rate"
+            tone={recoveryRate.tone}
+            value={recoveryRate.text}
+            sub={recoveryRate.sub}
+          />
+        </div>
+      </section>
+
+      <section className="kpi-group">
+        <h2 className="group-label">Operations</h2>
+        <div className="kpi-grid">
+          <Stat
+            label="Interventions Executed"
+            tone="success"
+            value={op.interventions_executed}
+            sub={`${op.interventions_executed_success} succeeded`}
+          />
+          <Stat
+            label="Blocked Interventions"
+            tone="warn"
+            value={op.blocked_interventions}
+            sub="denied by policy gates"
+          />
+          <Stat
+            label="Fraud Actions Blocked"
+            tone="warn"
+            value={op.fraud_actions_blocked}
+            sub="denied on fraud-suspect events"
+          />
+        </div>
+      </section>
 
       <div className="panel-grid">
         <Card
@@ -178,7 +222,7 @@ export default function CommandCenter() {
 
         <Card
           title="Revenue Not Recovered"
-          subtitle="Persisted actions taken or withheld"
+          subtitle="Durable, persisted reasons only"
         >
           <NotRecoveredPanel notRecovered={data.not_recovered} />
         </Card>
@@ -189,7 +233,7 @@ export default function CommandCenter() {
         subtitle="Phase 9 three-strategy evaluation across the same event set"
         action={<Badge tone="warn">SIMULATED</Badge>}
       >
-        <BenchmarkPanel bench={data.benchmark} />
+        <BenchmarkPanel bench={bench} />
       </Card>
     </div>
   )
