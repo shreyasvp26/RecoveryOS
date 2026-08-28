@@ -8,7 +8,7 @@ An **AI Revenue Recovery Control Plane** for the Razorpay AI Buildathon 2026 (Re
 
 The LLM never has direct authority over a money-moving action. AI output is advisory; a deterministic policy gate is authoritative; an executor performs the action; a benchmark proves value against baselines.
 
-> **Important:** This repository is in **Phase 9 — Honest Three-Strategy Benchmark**. RecoveryOS performs **no production revenue recovery**: it can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link, and the benchmark now proves value by comparison — over ONE shared 500-event synthetic set and ONE shared hidden outcome model, it measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline (classifier → policy → selector → executor) on simulated, labeled recovery outcome amounts. The audit dashboard and V2 optimizer remain future work.
+> **Important:** This repository is in **Phase 10 — Recovery Command Center & Decision Trace**. RecoveryOS performs **no production revenue recovery**: it can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link, and the benchmark proves value by comparison — over ONE shared 500-event synthetic set and ONE shared hidden outcome model, it measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline (classifier → policy → selector → executor) on simulated, labeled recovery outcome amounts. Phase 10 adds a **read-only operator dashboard** (Recovery Command Center, Event Decision Trace, Policy & Blocked Actions) over persisted state, with honest labeling of simulated figures. The V2 optimizer remains future work.
 
 ## Locked Architecture
 
@@ -39,7 +39,7 @@ recoveryos/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, BENCHMARK.md, PITCH_NOTES.md
+├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, PITCH_NOTES.md
 ├── README.md
 └── .gitignore
 ```
@@ -88,7 +88,24 @@ Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
 
 ## Current Development Phase
 
-**Phase 9 — Honest Three-Strategy Benchmark.** A payment event flows end-to-end through generation → ingestion → SQLite → load → AI classification → SQLite → deterministic policy evaluation (every actionable candidate) → selection → **bounded execution** → persisted outcome, exactly as in Phases 7–8. On top of that, Phase 9 delivers the benchmark harness that measures RecoveryOS against two baselines over the **same** event set and the **same** hidden outcome model, using simulated, labeled recovery outcome amounts — honestly, with no forced positive result.
+**Phase 10 — Recovery Command Center & Decision Trace.** Three read-only operator screens over the persisted decision chain: a **Recovery Command Center** (Revenue at Risk, executed/blocked interventions, the simulated benchmark comparison), an **Event Decision Trace** (the full ingest → classify → policy → execute history for any event), and a **Policy & Blocked Actions** view (every denied intervention and why). The frontend holds no policy or benchmark logic; it only reads the backend. Simulated figures are explicitly labelled `SIMULATED`, Recoverable Revenue is reported as "Definition unavailable" (the repo defines no canonical value), and empty states are kept distinct from failures.
+
+### Phase 10 — Recovery Command Center & Decision Trace
+
+```bash
+cd backend
+python -m app.populate --seed 42 --count 60      # deterministic demo dataset (SIMULATED execution)
+python -m app.benchmark_store --seed 42 --count 500  # persist a canonical benchmark run summary
+uvicorn app.main:app                              # start the API
+
+cd ../frontend
+npm run dev                                       # Vite dev server (proxies /api -> :8000)
+```
+
+- **Three screens, read-only** — Command Center (`/dashboard/summary`), Event Decision Trace (`/events` + `/events/{id}/trace`), and Policy & Blocked Actions (`/decisions/blocked`). No screen writes, and no frontend recomputes policy or benchmark metrics — the backend applies the locked Phase 9 metric readers.
+- **Honest figures, never invented** — Recoverable Revenue is shown as **Definition unavailable** because the repository defines no canonical metric and the hidden outcome model is evaluation ground truth that is intentionally not exposed. Benchmark comparisons come only from a persisted run; without one the panel shows an empty state rather than a guessed number. Simulated evaluation figures carry a prominent `SIMULATED` label.
+- **Real persisted state** — Revenue at Risk is the sum of ingested `payment_events.amount_paise`; blocked/fraud counts come from persisted `policy_decisions`; the trace reconstructs each event from `classification_results`, `policy_decisions`, `intervention_attempts`, and `execution_outcomes`. Per-event simulated recovery is NOT recorded (only execution outcomes are), so "Revenue Not Recovered" is substantiated as **policy_blocked** or **no classification** — never as a hidden outcome.
+- **No changes to frozen phases** — the decision pipeline (`benchmark.py`, `outcome.py`, `policy.py`, `selector.py`, `executor.py`, etc.) is untouched. `db.py`/`main.py` gain only additive, read-only Phase 10 entries plus the `benchmark_runs` persistence table. The full test suite (incl. the honesty guarantees in `tests/test_dashboard_api.py`) passes.
 
 ### Phase 9 — Honest Three-Strategy Benchmark
 
