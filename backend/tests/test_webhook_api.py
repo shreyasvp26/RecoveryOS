@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.db import connect, init_db
 from app.main import app
 from app.razorpay_webhook import (
     WebhookPayloadError,
@@ -17,6 +19,7 @@ from app.razorpay_webhook import (
     require_valid_signature,
     verify_signature,
 )
+from app.routes import webhook as webhook_routes
 
 client = TestClient(app)
 
@@ -178,7 +181,7 @@ def test_valid_signature_is_acknowledged(monkeypatch, tmp_path) -> None:
         delivery_id=DELIVERY_ID,
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "verified"
+    assert response.json()["status"] == "valid"
     assert response.json()["event"] == "payment_link.paid"
 
 
@@ -261,7 +264,7 @@ def test_unsupported_event_is_ignored_and_acknowledged(monkeypatch, tmp_path) ->
         delivery_id=DELIVERY_ID,
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "ignored_unsupported_event"
+    assert response.json()["status"] == "ignored"
     assert response.json()["event"] == "payment_link.expired"
 
 
@@ -292,3 +295,135 @@ def test_missing_event_id_after_valid_signature_is_rejected(monkeypatch, tmp_pat
     )
     assert response.status_code == 400
     assert response.json()["status"] == "invalid_payload"
+
+
+# ---------------------------------------------------------------------------
+# S2: durable idempotency & persistence (tests B + G-persistence)
+# ---------------------------------------------------------------------------
+
+
+def _delivery_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wh.db'}")
+    db_path = tmp_path / "wh.db"
+    conn = connect(str(db_path))
+    init_db(conn)
+    return conn
+
+
+def test_duplicate_delivery_is_a_noop_and_not_double_counted(
+    monkeypatch, tmp_path
+) -> None:
+    body = _raw()
+    headers = {
+        SIGNATURE_HEADER: _sign(body),
+        DELIVERY_ID_HEADER: DELIVERY_ID,
+    }
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wh.db'}")
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET)
+
+    first = client.post("/webhook/razorpay", content=body, headers=headers)
+    assert first.status_code == 200
+    assert first.json()["status"] == "valid"
+
+    # Re-delivery of the exact same body under the same event id is a 2xx
+    # no-op — it must never be processed or counted a second time.
+    second = client.post("/webhook/razorpay", content=body, headers=headers)
+    assert second.status_code == 200
+    assert second.json()["status"] == "deduplicated"
+
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM webhook_deliveries WHERE delivery_id = ?",
+            (DELIVERY_ID,),
+        ).fetchall()
+        assert len(rows) == 1  # durable uniqueness: exactly one row
+    finally:
+        conn.close()
+
+
+def test_same_event_id_with_different_body_is_explicit_conflict(
+    monkeypatch, tmp_path
+) -> None:
+    body = _raw()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wh.db'}")
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET)
+    headers = {SIGNATURE_HEADER: _sign(body), DELIVERY_ID_HEADER: DELIVERY_ID}
+
+    first = client.post("/webhook/razorpay", content=body, headers=headers)
+    assert first.status_code == 200
+
+    # Same event id, but a different (tampered) body signed correctly: must be
+    # an explicit CONFLICT, never overwritten, never a second recovery.
+    tampered = json.dumps(
+        {
+            **PAID_EVENT,
+            "payload": {
+                **PAID_EVENT["payload"],
+                "payment_link": {
+                    **PAID_EVENT["payload"]["payment_link"]["entity"],
+                    "amount_paid": 99999,
+                },
+            },
+        }
+    ).encode("utf-8")
+    conflict = client.post(
+        "/webhook/razorpay",
+        content=tampered,
+        headers={SIGNATURE_HEADER: _sign(tampered), DELIVERY_ID_HEADER: DELIVERY_ID},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["status"] == "conflict"
+
+    # The original delivery must be untouched (never overwritten).
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        row = conn.execute(
+            "SELECT * FROM webhook_deliveries WHERE delivery_id = ?",
+            (DELIVERY_ID,),
+        ).fetchone()
+        assert row is not None
+        assert row["body_sha256"] == hashlib.sha256(body).hexdigest()
+    finally:
+        conn.close()
+
+
+def test_persistence_failure_surfaces_500_so_razorpay_retries(
+    monkeypatch, tmp_path
+) -> None:
+    """A sqlite error during the idempotent claim must be an error HTTP."""
+    body = _raw()
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET)
+
+    class FailingConn:
+        """A connection that fails on every persistence operation."""
+
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        def commit(self):
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            return None
+
+    def failing_db():
+        return FailingConn()
+
+    app.dependency_overrides[webhook_routes.get_db] = failing_db
+    try:
+        response = client.post(
+            "/webhook/razorpay",
+            content=body,
+            headers={
+                SIGNATURE_HEADER: _sign(body),
+                DELIVERY_ID_HEADER: DELIVERY_ID,
+            },
+        )
+        assert response.status_code == 500
+        assert response.json()["status"] == "persistence_failure"
+    finally:
+        pass  # autouse fixture clears overrides

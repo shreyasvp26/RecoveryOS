@@ -111,10 +111,35 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
 )
 """
 
+# Phase 12: a durable idempotency + audit store for verified Razorpay webhook
+# deliveries. delivery_id is the canonical idempotency key (X-Razorpay-Event-Id)
+# with a DB-level PRIMARY KEY so duplicates are rejected by SQLite, not by
+# in-memory state. body_sha256 of the exact raw body enables explicit CONFLICT
+# detection (same delivery id, different body). status advances through the
+# closed-loop processing (claimed -> ignored/unmatched/processed). The webhook
+# secret itself is never stored here.
+_WEBHOOK_DELIVERIES_DDL = """
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    delivery_id     TEXT PRIMARY KEY,
+    body_sha256     TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    payment_link_id TEXT,
+    status          TEXT NOT NULL,
+    received_at     TEXT NOT NULL
+)
+"""
+
 
 def connect(path: str) -> sqlite3.Connection:
-    """Open a SQLite connection to the given database path."""
-    conn = sqlite3.connect(path)
+    """Open a SQLite connection to the given database path.
+
+    ``check_same_thread=False`` lets an async FastAPI route use the per-request
+    connection it received from a sync dependency even though the handler runs
+    on the event-loop thread. Every connection is created per request and
+    closed after use (never shared across requests), so disabling the
+    thread-affinity guard is safe here and standard for FastAPI + SQLite.
+    """
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -133,6 +158,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_INTERVENTION_ATTEMPTS_DDL)
         conn.execute(_EXECUTION_OUTCOMES_DDL)
         conn.execute(_BENCHMARK_RUNS_DDL)
+        conn.execute(_WEBHOOK_DELIVERIES_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
@@ -813,3 +839,80 @@ def get_latest_benchmark_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
         "saved_at": row["saved_at"],
         "summary": json.loads(row["summary_json"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 webhook delivery persistence (durable idempotency + audit).
+# delivery_id (X-Razorpay-Event-Id) is the canonical idempotency key; SQLite's
+# PRIMARY KEY enforces durable uniqueness. body_sha256 of the exact raw body
+# enables explicit CONFLICT detection for the same id with a different body.
+# Persistence stores delivered/processed facts; it never performs recovery.
+# ---------------------------------------------------------------------------
+
+
+def insert_webhook_delivery(
+    conn: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    body_sha256: str,
+    event_type: str,
+    payment_link_id: str | None,
+    status: str,
+    received_at: str,
+) -> None:
+    """Persist a webhook delivery claim.
+
+    ``delivery_id`` is a PRIMARY KEY, so a second delivery with the same id
+    raises sqlite3.IntegrityError (durable DB-level uniqueness, never
+    in-memory state). Other sqlite3.Error values propagate as persistence
+    failures for the caller to surface as an error HTTP (so Razorpay retries).
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO webhook_deliveries (
+                delivery_id, body_sha256, event_type, payment_link_id,
+                status, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                body_sha256,
+                event_type,
+                payment_link_id,
+                status,
+                received_at,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_webhook_delivery(
+    conn: sqlite3.Connection, delivery_id: str
+) -> dict[str, Any] | None:
+    """Retrieve a persisted webhook delivery by its idempotency key, or None."""
+    row = conn.execute(
+        "SELECT * FROM webhook_deliveries WHERE delivery_id = ?",
+        (delivery_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def update_webhook_delivery_status(
+    conn: sqlite3.Connection, delivery_id: str, status: str
+) -> None:
+    """Advance a webhook delivery's closed-loop status in place."""
+    try:
+        conn.execute(
+            "UPDATE webhook_deliveries SET status = ? WHERE delivery_id = ?",
+            (status, delivery_id),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise

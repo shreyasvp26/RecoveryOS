@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
@@ -20,11 +21,19 @@ from fastapi.responses import JSONResponse
 from ..config import get_razorpay_webhook_secret
 from ..db import connect_database, init_db
 from ..razorpay_webhook import (
-    SUPPORTED_WEBHOOK_EVENT,
     WebhookPayloadError,
     WebhookSignatureError,
     parse_webhook_payload,
     require_valid_signature,
+)
+from ..webhook_service import (
+    S_CONFLICT,
+    S_DEDUPLICATED,
+    S_IGNORED,
+    S_PERSISTENCE_FAILURE,
+    S_UNMATCHED,
+    S_VALID,
+    process_webhook,
 )
 
 router = APIRouter(tags=["webhook"])
@@ -97,24 +106,25 @@ async def razorpay_webhook(
             },
         )
 
-    if event.event_type != SUPPORTED_WEBHOOK_EVENT:
-        # Unsupported events are explicitly ignored and acknowledged, never
-        # executed and never fabricated into a recovery outcome.
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "ignored_unsupported_event",
-                "delivery_id": delivery_id,
-                "event": event.event_type,
-            },
-        )
-
-    return JSONResponse(
-        status_code=status.HTTP_200_OK,
-        content={
-            "status": "verified",
-            "delivery_id": delivery_id,
-            "event": event.event_type,
-            "payment_link_id": event.payment_link_id,
-        },
+    result = process_webhook(
+        conn, event, raw_body, datetime.now(timezone.utc).isoformat()
     )
+
+    # Map the closed-loop process status to an HTTP response. Duplicates are a
+    # 2xx no-op (no double count), conflicts are explicit 409 (never
+    # overwritten), unsupported events are acknowledged, persistence failures
+    # surface as an error so Razorpay retries, and validated/known events are
+    # acknowledged (correlation to a recovery/unmatched outcome happens in the
+    # service and is surfaced by the same status contract).
+    if result.status == S_CONFLICT:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=result.to_dict(),
+        )
+    if result.status == S_PERSISTENCE_FAILURE:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=result.to_dict(),
+        )
+    # S_VALID, S_DEDUPLICATED, S_IGNORED, S_UNMATCHED, S_PROCESSED are 2xx.
+    return JSONResponse(status_code=status.HTTP_200_OK, content=result.to_dict())
