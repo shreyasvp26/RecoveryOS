@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS execution_outcomes (
     status             TEXT NOT NULL,
     external_reference TEXT,
     detail             TEXT,
+    payment_link_id    TEXT,
     reported_at        TEXT NOT NULL,
     PRIMARY KEY (event_id, intervention, reported_at)
 )
@@ -132,10 +133,33 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_INTERVENTION_ATTEMPTS_DDL)
         conn.execute(_EXECUTION_OUTCOMES_DDL)
         conn.execute(_BENCHMARK_RUNS_DDL)
+        _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
         conn.rollback()
         raise
+
+
+_PAYMENT_LINK_ID_COLUMN = "payment_link_id"
+
+
+def _migrate_execution_outcomes_payment_link_id(conn: sqlite3.Connection) -> None:
+    """Idempotently add the nullable payment_link_id column to existing DBs.
+
+    A database created before Phase 11 has an execution_outcomes table without
+    the payment_link_id column. CREATE TABLE IF NOT EXISTS does not alter an
+    existing table, so this adds the column exactly once when it is missing.
+    """
+    if _PAYMENT_LINK_ID_COLUMN in _execution_outcome_columns(conn):
+        return
+    conn.execute(
+        f"ALTER TABLE execution_outcomes ADD COLUMN {_PAYMENT_LINK_ID_COLUMN} TEXT"
+    )
+
+
+def _execution_outcome_columns(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("PRAGMA table_info(execution_outcomes)").fetchall()
+    return {row["name"] for row in rows}
 
 
 def insert_payment_event(conn: sqlite3.Connection, event: PaymentEvent) -> None:
@@ -346,8 +370,8 @@ def insert_execution_outcome(
             """
             INSERT INTO execution_outcomes (
                 event_id, intervention, execution_mode, status,
-                external_reference, detail, reported_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                external_reference, detail, reported_at, payment_link_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 outcome.event_id,
@@ -357,6 +381,7 @@ def insert_execution_outcome(
                 outcome.external_reference,
                 outcome.detail,
                 outcome.reported_at,
+                outcome.payment_link_id,
             ),
         )
         conn.commit()
@@ -386,6 +411,7 @@ def get_execution_outcome(
         external_reference=row["external_reference"],
         detail=row["detail"],
         reported_at=row["reported_at"],
+        payment_link_id=row["payment_link_id"],
     )
 
 

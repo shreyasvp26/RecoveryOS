@@ -79,6 +79,7 @@ class ExecutionOutcome:
     external_reference: str | None = None
     detail: str | None = None
     reported_at: str = ""
+    payment_link_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_id, str) or not self.event_id.strip():
@@ -112,7 +113,7 @@ class ExecutionOutcome:
             raise ExecutionRejectedError(
                 f"{self.intervention!r} must be executed through SIMULATED"
             )
-        for name in ("external_reference", "detail"):
+        for name in ("external_reference", "detail", "payment_link_id"):
             value = getattr(self, name)
             if value is not None and (
                 not isinstance(value, str) or not value.strip()
@@ -133,6 +134,7 @@ class ExecutionOutcome:
             "external_reference": self.external_reference,
             "detail": self.detail,
             "reported_at": self.reported_at,
+            "payment_link_id": self.payment_link_id,
         }
 
 
@@ -251,6 +253,7 @@ class BoundedExecutor:
             status="SUCCESS",
             external_reference=result.short_url,
             reported_at=decision.evaluated_at,
+            payment_link_id=result.id,
         )
 
     @staticmethod
