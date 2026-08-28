@@ -552,6 +552,59 @@ def get_intervention_attempts_for_event(
     return [dict(row) for row in rows]
 
 
+def get_intervention_attempt_summary(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Batched persisted-intervention evidence for a set of events (no N+1).
+
+    Returns a mapping event_id -> {previous_attempts (int), last_intervention
+    (intervention | None), last_attempt_status (status | None),
+    last_attempted_at (attempted_at | None)}. Only reads persisted rows; no
+    policy or outcome logic is recomputed here.
+    """
+    if not event_ids:
+        return {}
+    placeholders = ",".join("?" * len(event_ids))
+    rows = conn.execute(
+        f"""
+        SELECT
+            event_id,
+            COUNT(*) AS previous_attempts,
+            MAX(attempted_at) AS last_attempted_at
+        FROM intervention_attempts
+        WHERE event_id IN ({placeholders})
+        GROUP BY event_id
+        """,
+        list(event_ids),
+    ).fetchall()
+    summary: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        summary[row["event_id"]] = {
+            "previous_attempts": int(row["previous_attempts"]),
+            "last_attempted_at": row["last_attempted_at"],
+            "last_intervention": None,
+            "last_attempt_status": None,
+        }
+    if summary:
+        latest_rows = conn.execute(
+            f"""
+            SELECT event_id, intervention, status, attempted_at
+            FROM intervention_attempts
+            WHERE event_id IN ({placeholders})
+            ORDER BY attempted_at DESC
+            """,
+            list(event_ids),
+        ).fetchall()
+        seen: set[str] = set()
+        for r in latest_rows:
+            if r["event_id"] in seen:
+                continue
+            seen.add(r["event_id"])
+            summary[r["event_id"]]["last_intervention"] = r["intervention"]
+            summary[r["event_id"]]["last_attempt_status"] = r["status"]
+    return summary
+
+
 def get_policy_decision_stats(conn: sqlite3.Connection) -> dict[str, int]:
     """Total and denied persisted policy decisions."""
     row = conn.execute(

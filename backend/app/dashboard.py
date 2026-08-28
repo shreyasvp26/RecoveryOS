@@ -131,6 +131,7 @@ def _benchmark_payload(conn) -> dict[str, Any]:
         _strategy_with_metrics(strategy_result(run, s))
         for s in ("no_action", "naive_retry", "recovery_os")
     ]
+    recovery_os = strategy_result(run, "recovery_os")
     return {
         "available": True,
         "run_id": latest["run_id"],
@@ -139,6 +140,11 @@ def _benchmark_payload(conn) -> dict[str, Any]:
         "evaluation_mode": latest["evaluation_mode"],
         "saved_at": latest["saved_at"],
         "strategies": strategies,
+        # The canonical Phase 9 RecoveryOS recovery rate and simulated recovered
+        # amount, surfaced as primary KPIs. Both are the frozen metric readers
+        # applied to the persisted run; the frontend only renders them.
+        "recovery_os_recovery_rate": recovery_rate(recovery_os),
+        "recovery_os_recovered_amount_paise": recovery_os.recovered_amount_paise,
         "incremental_over_no_action_paise": incremental_over_no_action(run),
         "recoveryos_vs_naive_retry_paise": recoveryos_vs_naive_retry(run),
     }
@@ -237,10 +243,16 @@ def _summarize_trace(
     decisions: list[dict[str, Any]],
     executions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Derive the concise final-decision summary from persisted facts."""
+    """Derive the concise final-decision summary from persisted facts.
+
+    ``execution_state`` is an honest, persisted-evidence-only label so the
+    frontend never overgeneralizes "no execution". It is NOT inferred: it
+    reflects exactly which records exist.
+    """
     summary: dict[str, Any] = {}
     if not classification:
         summary["final_decision"] = "not_classified"
+        summary["execution_state"] = "NOT_CLASSIFIED"
         summary["selected_intervention"] = None
         summary["execution_mode"] = None
         summary["execution_status"] = None
@@ -249,6 +261,7 @@ def _summarize_trace(
     if executions:
         last = executions[-1]
         summary["final_decision"] = "ALLOW"
+        summary["execution_state"] = "EXECUTED"
         summary["selected_intervention"] = last["intervention"]
         summary["execution_mode"] = last["execution_mode"]
         summary["execution_status"] = last["status"]
@@ -257,13 +270,19 @@ def _summarize_trace(
     denied = [d for d in decisions if not d["allowed"]]
     if denied:
         summary["final_decision"] = "DENY"
+        summary["execution_state"] = "POLICY_BLOCKED"
         summary["selected_intervention"] = None
         summary["denial_reasons"] = [d["denial_reason"] for d in denied]
         summary["execution_mode"] = None
         summary["execution_status"] = None
         return summary
 
+    # Classified but no execution and no denial: we cannot prove WHY there was
+    # no execution (possibly no actionable intervention was available, or the
+    # event was never run through the executor). Report a generic, honest state
+    # rather than asserting "policy denied".
     summary["final_decision"] = "no_action"
+    summary["execution_state"] = "NO_EXECUTION_RECORDED"
     summary["selected_intervention"] = None
     summary["execution_mode"] = None
     summary["execution_status"] = None
@@ -273,9 +292,12 @@ def _summarize_trace(
 def build_blocked_decisions(conn, *, limit: int = 100) -> dict[str, Any]:
     """Assemble the Policy & Blocked Actions payload."""
     rows = db.get_blocked_policy_decisions(conn, limit=limit)
+    event_ids = [row["event_id"] for row in rows]
+    attempt_summary = db.get_intervention_attempt_summary(conn, event_ids)
     blocked = []
     for row in rows:
         category = block_category(row["denial_reason"])
+        evidence = attempt_summary.get(row["event_id"], {})
         blocked.append(
             {
                 "event_id": row["event_id"],
@@ -290,6 +312,15 @@ def build_blocked_decisions(conn, *, limit: int = 100) -> dict[str, Any]:
                 "category_label": block_category_label(category),
                 "policy_rules_applied": row["policy_rules_applied"],
                 "evaluated_at": row["evaluated_at"],
+                # Evidence for the "why wasn't this recovered?" detail, from
+                # persisted intervention_attempts only. Always present (even
+                # when zero attempts) so the UI never needs a fallback value.
+                "evidence": {
+                    "previous_attempts": evidence.get("previous_attempts", 0),
+                    "last_intervention": evidence.get("last_intervention"),
+                    "last_attempt_status": evidence.get("last_attempt_status"),
+                    "last_attempted_at": evidence.get("last_attempted_at"),
+                },
             }
         )
     category_counts: dict[str, int] = {}
