@@ -40,7 +40,7 @@ function App() {
         <div className="sidebar__foot">
           <div className="foot-row">
             <span className="legend-dot" style={{ background: 'var(--success)' }} />
-            <span>Phase 10</span>
+            <span>Read-only operator view</span>
           </div>
           <div className="foot-row">
             <span className="legend-dot" style={{ background: 'var(--warn)' }} />
