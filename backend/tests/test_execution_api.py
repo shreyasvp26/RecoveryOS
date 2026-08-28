@@ -305,3 +305,22 @@ def test_execute_ignores_client_supplied_intervention(monkeypatch, tmp_path) -> 
     assert body["selected_intervention"] == "reminder"
     assert body["execution"]["intervention"] == "reminder"
     assert body["policy_decision"]["allowed"] is True
+
+
+def test_execute_live_razorpay_config_error_is_explicit(monkeypatch, tmp_path) -> None:
+    """Present-but-invalid (live) Razorpay credentials must be an explicit,
+    controllable configuration error at the dependency boundary — never an
+    opaque 'Internal Server Error' and never a fake success.
+    """
+    _seed_classified(
+        monkeypatch, tmp_path, candidates=["payment_link"], razorpay_client=None
+    )
+    # Force the REAL dependency path with a live key, bypassing the override.
+    app.dependency_overrides.pop(get_razorpay_client, None)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_live_abc123")
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "secret")
+    response = client.post("/events/evt_exec_api/execute")
+    assert response.status_code == 500
+    body = response.json()
+    assert "razorpay_configuration_error" in body["detail"]
+    assert "rzp_live_" in body["detail"]
