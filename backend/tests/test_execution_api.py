@@ -15,6 +15,7 @@ from app.main import app
 from app.razorpay_client import (
     PaymentLinkResult,
     RazorpayExecutionError,
+    RazorpayUnexpectedResponseError,
 )
 from app.routes.events import get_classifier, get_now, get_razorpay_client
 
@@ -134,6 +135,7 @@ def test_execute_simulated_retry_delayed(monkeypatch, tmp_path) -> None:
     assert exec_outcome["intervention"] == "retry_delayed"
     assert exec_outcome["execution_mode"] == "SIMULATED"
     assert exec_outcome["status"] == "SUCCESS"
+    assert exec_outcome["payment_link_id"] is None
 
     conn = connect(db_path)
     try:
@@ -178,6 +180,7 @@ def test_execute_payment_link_real_razorpay(monkeypatch, tmp_path) -> None:
     assert exec_outcome["execution_mode"] == "REAL_RAZORPAY"
     assert exec_outcome["status"] == "SUCCESS"
     assert exec_outcome["external_reference"] == "https://rzp.io/l/real123"
+    assert exec_outcome["payment_link_id"] == "plink_real"
     assert client_stub.calls[0]["amount_paise"] == 75000
     assert client_stub.calls[0]["reference_id"] == "evtexecapi"
 
@@ -217,6 +220,7 @@ def test_execute_payment_link_provider_failure(monkeypatch, tmp_path) -> None:
     assert body["execution"]["status"] == "FAILED"
     assert "razorpay_api_error" in body["execution"]["detail"]
     assert body["execution"]["external_reference"] is None
+    assert body["execution"]["payment_link_id"] is None
 
     db_path = _set_test_db(monkeypatch, tmp_path)
     conn = connect(db_path)
@@ -229,6 +233,32 @@ def test_execute_payment_link_provider_failure(monkeypatch, tmp_path) -> None:
         assert attempt["status"] == "failed"
     finally:
         conn.close()
+
+
+def test_execute_payment_link_malformed_provider_response_fails(monkeypatch, tmp_path) -> None:
+    """A response that cannot yield an id/short_url must never be a success."""
+    client_stub = StubPaymentLinkClient(
+        error=RazorpayUnexpectedResponseError(
+            "razorpay_api_unexpected_response: payment link id missing"
+        )
+    )
+    _seed_classified(
+        monkeypatch,
+        tmp_path,
+        candidates=["payment_link"],
+        razorpay_client=client_stub,
+    )
+    response = client.post("/events/evt_exec_api/execute")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "execution_failed"
+    assert body["selected_intervention"] == "payment_link"
+    exec_outcome = body["execution"]
+    assert exec_outcome["execution_mode"] == "REAL_RAZORPAY"
+    assert exec_outcome["status"] == "FAILED"
+    assert "razorpay_api_unexpected_response" in exec_outcome["detail"]
+    assert exec_outcome["external_reference"] is None
+    assert exec_outcome["payment_link_id"] is None
 
 
 def test_execute_all_denied_selects_no_action(monkeypatch, tmp_path) -> None:

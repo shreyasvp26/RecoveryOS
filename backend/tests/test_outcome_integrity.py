@@ -348,6 +348,7 @@ def test_execution_success_does_not_imply_recovery() -> None:
     execution = BoundedExecutor().execute(event, intervention, decision, None)
     assert execution.status == "SUCCESS"
     assert execution.execution_mode == "SIMULATED"
+    assert execution.payment_link_id is None
     assert simulator.simulate(event, intervention).recovered is False
 
 

@@ -155,6 +155,22 @@ def test_unexpected_response_empty_short_url() -> None:
         )
 
 
+def test_unexpected_response_missing_id_no_fabricated_payment_link_id() -> None:
+    sdk = FakeSdk(responses=[{"short_url": "https://rzp.io/l/abc", "status": "created"}])
+    with pytest.raises(RazorpayUnexpectedResponseError):
+        _client(sdk).create_payment_link(
+            amount_paise=100, currency="INR", reference_id="evt6", description="d"
+        )
+
+
+def test_unexpected_response_empty_id_no_fabricated_payment_link_id() -> None:
+    sdk = FakeSdk(responses=[{"id": "", "short_url": "https://rzp.io/l/abc"}])
+    with pytest.raises(RazorpayUnexpectedResponseError):
+        _client(sdk).create_payment_link(
+            amount_paise=100, currency="INR", reference_id="evt6", description="d"
+        )
+
+
 def test_failed_provider_operation_never_returns_success() -> None:
     sdk = FakeSdk(raises=Exception("provider rejected"))
     with pytest.raises(RazorpayExecutionError):

@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from app.db import get_execution_outcome, insert_execution_outcome
+from app.db import connect, get_execution_outcome, init_db, insert_execution_outcome
 from app.executor import ExecutionOutcome
 
 REPORTED_AT = "2026-08-27T13:00:00+00:00"
@@ -43,11 +43,14 @@ def test_execution_outcome_round_trip(db_conn) -> None:
         status="SUCCESS",
         external_reference="https://rzp.io/l/real123",
         detail=None,
+        payment_link_id="plink_real",
     )
     insert_execution_outcome(db_conn, outcome)
     retrieved = get_execution_outcome(db_conn, "evt_flow", "payment_link", REPORTED_AT)
     assert retrieved == outcome
     assert retrieved.to_dict() == outcome.to_dict()
+    assert retrieved.payment_link_id == "plink_real"
+    assert retrieved.external_reference == "https://rzp.io/l/real123"
 
 
 def test_failed_outcome_round_trip(db_conn) -> None:
@@ -61,6 +64,8 @@ def test_failed_outcome_round_trip(db_conn) -> None:
     insert_execution_outcome(db_conn, outcome)
     retrieved = get_execution_outcome(db_conn, "evt_flow", "payment_link", REPORTED_AT)
     assert retrieved == outcome
+    assert retrieved.payment_link_id is None
+    assert retrieved.external_reference is None
 
 
 def test_duplicate_outcome_is_rejected(db_conn) -> None:
@@ -80,3 +85,43 @@ def test_outcomes_correlated_by_event_id(db_conn) -> None:
     insert_execution_outcome(db_conn, second)
     assert get_execution_outcome(db_conn, "evt_a", "reminder", REPORTED_AT) == first
     assert get_execution_outcome(db_conn, "evt_b", "reminder", REPORTED_AT) == second
+
+
+_OLD_EXECUTION_OUTCOMES_DDL = """
+CREATE TABLE IF NOT EXISTS execution_outcomes (
+    event_id           TEXT NOT NULL,
+    intervention       TEXT NOT NULL,
+    execution_mode     TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    external_reference TEXT,
+    detail             TEXT,
+    reported_at        TEXT NOT NULL,
+    PRIMARY KEY (event_id, intervention, reported_at)
+)
+"""
+
+
+def test_init_db_migrates_preexisting_db_adding_payment_link_id(tmp_path) -> None:
+    db_path = tmp_path / "legacy.db"
+    conn = connect(str(db_path))
+    try:
+        conn.execute(_OLD_EXECUTION_OUTCOMES_DDL)
+        conn.commit()
+        result = conn.execute(
+            "PRAGMA table_info(execution_outcomes)"
+        ).fetchall()
+        assert "payment_link_id" not in {row["name"] for row in result}
+
+        init_db(conn)
+        result = conn.execute(
+            "PRAGMA table_info(execution_outcomes)"
+        ).fetchall()
+        assert "payment_link_id" in {row["name"] for row in result}
+
+        init_db(conn)
+        result = conn.execute(
+            "PRAGMA table_info(execution_outcomes)"
+        ).fetchall()
+        assert "payment_link_id" in {row["name"] for row in result}
+    finally:
+        conn.close()
