@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from ..classifier import (
@@ -56,6 +56,7 @@ from ..policy import (
     PolicyValidationError,
     parse_aware_datetime,
 )
+from ..razorpay_client import RazorpayConfigurationError
 
 router = APIRouter(tags=["events"])
 
@@ -70,9 +71,18 @@ def get_db() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def get_classifier() -> OmniRouteClassifier:
-    """FastAPI dependency: provide the configured OmniRoute classifier."""
-    return build_omniroute_adapter()
+def get_classifier() -> Iterator[OmniRouteClassifier]:
+    """FastAPI dependency: provide the configured OmniRoute classifier.
+
+    The adapter is closed when the request finishes so the underlying httpx
+    HTTP client is not leaked across repeated classify calls on a long-lived
+    process (a resource that would otherwise accumulate file descriptors).
+    """
+    classifier = build_omniroute_adapter()
+    try:
+        yield classifier
+    finally:
+        classifier.close()
 
 
 def get_policy_config() -> PolicyConfig:
@@ -93,9 +103,19 @@ def get_razorpay_client() -> object | None:
     """FastAPI dependency: the configured Razorpay Test Mode client boundary.
 
     Returns None when credentials are unconfigured; the executor surfaces
-    that as an explicit configuration_missing execution failure.
+    that as an explicit configuration_missing execution failure. Present-but-
+    invalid credentials (e.g. a live ``rzp_live_`` key or an unrecognized key
+    id) raise an explicit, controlled HTTP 500 with detail rather than an
+    opaque "Internal Server Error", so the operator can see and fix the
+    misconfiguration instead of silently mapping it to a benign missing-config.
     """
-    return build_razorpay_client()
+    try:
+        return build_razorpay_client()
+    except RazorpayConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"razorpay_configuration_error: {exc}",
+        ) from exc
 
 
 @router.post("/events")
@@ -155,23 +175,32 @@ def classify_event_endpoint(
 
     try:
         result = classify_event(event, classifier)
-    except ClassificationValidationError:
+    except ClassificationValidationError as exc:
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
             content={
                 "status": "classification_validation_failure",
                 "event_id": event_id,
+                "detail": str(exc) or "model output failed classification validation",
             },
         )
-    except OmniRouteError:
+    except OmniRouteError as exc:
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            content={"status": "classification_llm_error", "event_id": event_id},
+            content={
+                "status": "classification_llm_error",
+                "event_id": event_id,
+                "detail": str(exc) or "classification provider failed",
+            },
         )
-    except Exception:
+    except Exception as exc:
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"status": "classification_error", "event_id": event_id},
+            content={
+                "status": "classification_error",
+                "event_id": event_id,
+                "detail": f"unexpected classification failure: {exc}",
+            },
         )
 
     try:

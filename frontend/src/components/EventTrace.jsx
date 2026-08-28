@@ -176,7 +176,14 @@ function Phase12Stage({ phase12 }) {
 }
 
 function TraceTimeline({ trace }) {
-  const { event, classification, policy_decisions, executions, attempts, summary } = trace
+  const {
+    event = {},
+    classification,
+    policy_decisions = [],
+    executions = [],
+    attempts = [],
+    summary = {},
+  } = trace || {}
   const execMeta = EXECUTION_STATE_META[summary.execution_state] || {
     tone: 'neutral',
     label: summary.execution_state || 'UNKNOWN',
@@ -369,11 +376,11 @@ export default function EventTrace() {
           <div className="event-list">
             {list.status === 'loading' && <LoadingBlock label="Loading events…" />}
             {list.status === 'error' && <ErrorState message={list.error?.message} retry={() => setDebouncedQuery(debouncedQuery)} />}
-            {list.status === 'ok' && list.data.count === 0 && (
+            {list.status === 'ok' && (list.data?.count ?? 0) === 0 && (
               <EmptyState title="No matching events" message="No persisted events match the current filters." />
             )}
             {list.status === 'ok' &&
-              list.data.events.map((ev) => (
+              (list.data?.events ?? []).map((ev) => (
                 <EventRow
                   key={ev.event_id}
                   event={ev}

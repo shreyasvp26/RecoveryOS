@@ -114,7 +114,31 @@ def test_classify_llm_failure_is_explicit(monkeypatch, tmp_path) -> None:
     _stub_classifier()
     response = client.post("/events/evt_api_1/classify")
     assert response.status_code == 502
-    assert response.json()["status"] == "classification_llm_error"
+    body = response.json()
+    assert body["status"] == "classification_llm_error"
+    # The failure must be visible/auditable: a non-empty, non-sensitive detail.
+    assert "detail" in body and body["detail"]
+
+
+def test_classify_provider_failure_exposes_safe_detail(monkeypatch, tmp_path) -> None:
+    """A provider/malformed-response failure reports an explicit reason (Area 1/7)."""
+    _seed_event(monkeypatch, tmp_path)
+    _stub_classifier()
+    response = client.post("/events/evt_api_1/classify")
+    assert response.status_code == 502
+    assert "detail" in response.json()
+    assert response.json()["detail"]
+
+
+def test_classify_validation_failure_exposes_detail(monkeypatch, tmp_path) -> None:
+    _seed_event(monkeypatch, tmp_path)
+    bad = dict(VALID_RESULT, root_cause_category="unknown")
+    _stub_classifier(json.dumps(bad), json.dumps(bad))
+    response = client.post("/events/evt_api_1/classify")
+    assert response.status_code == 502
+    body = response.json()
+    assert body["status"] == "classification_validation_failure"
+    assert "detail" in body and body["detail"]
 
 
 def test_classify_validation_failure_is_explicit(monkeypatch, tmp_path) -> None:
