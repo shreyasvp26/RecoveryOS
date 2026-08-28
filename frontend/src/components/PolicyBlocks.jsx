@@ -148,7 +148,7 @@ export default function PolicyBlocks() {
               subtitle="Why interventions were withheld"
               action={<Badge tone="neutral">{data.count} total</Badge>}
             >
-              <CategoryGrid categories={data.categories} count={data.count} />
+              <CategoryGrid categories={data.categories || []} count={data.count} />
             </Card>
 
             <Card
@@ -169,7 +169,7 @@ export default function PolicyBlocks() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.blocked.map((b, i) => {
+                    {(data.blocked || []).map((b, i) => {
                       const k = keyOf(b)
                       const isSel = k === selectedKey
                       return (

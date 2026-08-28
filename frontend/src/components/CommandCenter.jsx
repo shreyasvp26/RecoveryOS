@@ -42,7 +42,7 @@ function BenchmarkPanel({ bench }) {
         </span>
       </div>
       <div className="strategy-grid">
-        {bench.strategies.map((s) => {
+        {(bench.strategies || []).map((s) => {
           const meta = STRATEGY_META[s.strategy] || { label: s.strategy, tone: 'neutral', desc: '' }
           return (
             <div key={s.strategy} className="strategy">
@@ -88,7 +88,7 @@ function NotRecoveredPanel({ notRecovered }) {
     <div className="notrecovered">
       <p className="panel-note">{notRecovered.note}</p>
       <div className="notrecovered__grid">
-        {notRecovered.categories.map((c) => (
+        {(notRecovered.categories || []).map((c) => (
           <div key={c.key} className="notrecovered__item">
             <div className="notrecovered__label">{c.label}</div>
             <div className="notrecovered__value">{formatINR(c.amount_paise)}</div>
@@ -117,8 +117,8 @@ export default function CommandCenter() {
     )
   }
 
-  const op = data.operational
-  const rec = data.recoverable_revenue
+  const op = data.operational ?? {}
+  const rec = data.recoverable_revenue ?? {}
   const bench = data.benchmark
 
   const simRecovered = benchValue({
