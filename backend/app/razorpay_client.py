@@ -144,7 +144,12 @@ class RazorpayPaymentLinkClient:
         except RazorpayError:
             raise
         except Exception as exc:
-            raise RazorpayExecutionError(f"razorpay_api_error: {exc}") from exc
+            # Control the externally visible detail: a stable identifier, never
+            # arbitrary provider exception text (which must not become a
+            # user/audit-facing data channel). The original exception is kept on
+            # the chain (from exc) for internal debugging, but its text is not
+            # surfaced in the message.
+            raise RazorpayExecutionError("razorpay_api_error") from exc
 
         if not isinstance(response, dict):
             raise RazorpayUnexpectedResponseError(
