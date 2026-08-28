@@ -161,6 +161,10 @@ class OmniRouteClassifier:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.0,
+            # Required explicitly: an OpenAI-compatible gateway may otherwise
+            # default to a text/event-stream response, which this adapter's
+            # single-shot JSON parsing cannot read.
+            "stream": False,
         }
         try:
             response = self._client.post(

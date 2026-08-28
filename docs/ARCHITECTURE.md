@@ -60,9 +60,9 @@ The two modes are kept clearly distinct so that results are never conflated.
 
 All benchmark **recovery amounts are simulated evaluation results** — they are produced by the deterministic test harness, not by real Razorpay transactions. **RecoveryOS does not claim these as production Razorpay revenue.** They exist only to measure relative effectiveness of RecoveryOS against baselines under identical conditions.
 
-## Current Implementation Status (Phase 12)
+## Current Implementation Status (Phase 14)
 
-**Phase 8 delivered the evaluation boundary; Phase 9 the honest benchmark; Phase 10 the read-only Command Center & Decision Trace; Phase 11 real Razorpay Payment Link execution; Phase 12 the closed-loop verified webhook.** This repository currently contains:
+**Phase 8 delivered the evaluation boundary; Phase 9 the honest benchmark; Phase 10 the read-only Command Center & Decision Trace; Phase 11 real Razorpay Payment Link execution; Phase 12 the closed-loop verified webhook; Phase 13 adversarial policy/trace hardening; Phase 14 end-to-end live verification, evidence, and documentation of V1.** This repository currently contains:
 
 - A scaffolded FastAPI backend exposing a deterministic health endpoint smoke test.
 - The locked Phase 2 `PaymentEvent` domain contract and validation.
@@ -80,9 +80,11 @@ All benchmark **recovery amounts are simulated evaluation results** — they are
 - A Phase 7 isolated Razorpay client boundary (`app/razorpay_client.py`) wrapping the SDK (Test Mode only, credentials from the environment), returning genuine Payment Link references and explicit failures — never a fabricated URL.
 - Phase 7 execution persistence (`execution_outcomes` table, correlated by `event_id`) and a `POST /events/{event_id}/execute` endpoint that accepts no client intervention or authorization — the chain classification → policy → selector → executor fully determines execution against server-side time.
 - The Phase 8 evaluation boundary: a hidden, event-specific outcome model (`app/outcome_model.py`) and a deterministic recovery simulation (`app/outcome.py`), completely isolated from the decision path, with no persistence and no new endpoints.
-- A scaffolded React + Vite frontend rendering a minimal RecoveryOS shell.
+- A React + Vite read-only operator frontend with three screens (Command Center, Event Decision Trace, Policy & Blocks) that render persisted backend state and never recompute policy or benchmark metrics.
 
 The V1 pipeline is fully implemented through Phase 12: the Phase 9 benchmark runs on top of the Phase 8 evaluation foundation (hidden model + simulation); Phase 10 added the read-only Recovery Command Center & Decision Trace over persisted state; Phase 11 added real Razorpay Test Mode Payment Link execution; and Phase 12 added the closed-loop verified webhook outcome channel (documented below). The V2 optimizer does not exist yet. The benchmark measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline over ONE shared event set and ONE shared hidden outcome model on simulated, labeled recovery outcome amounts, reporting honest results with no forced RecoveryOS victory. The outcome engine answers *did an executed intervention recover the money?* It never decides whether anything executes, and RecoveryOS claims no real revenue.
+
+Phase 14 verified this pipeline end to end against real Razorpay **Test Mode** infrastructure: a real classification, a deterministic authorization and selection, a real Test Mode Payment Link, a real manual payment, and a genuine `payment_link.paid` webhook that was HMAC-verified, correlated to the persisted link, and recorded as a single trusted recovery. See the README for the evidence and the honest limitations. **Test Mode is not production payment processing, and no production readiness is claimed.** Two limitations are load-bearing for interpreting the demo: the external LLM classification can vary between equivalent events even at `temperature = 0` (the deterministic policy and selector are reproducible only *given* a classifier output), and the benchmark's hidden outcome model carries no signal, so it cannot demonstrate the value of targeting.
 
 ## The Phase 12 closed-loop webhook (outcome channel)
 

@@ -8,7 +8,7 @@ An **AI Revenue Recovery Control Plane** for the Razorpay AI Buildathon 2026 (Re
 
 The LLM never has direct authority over a money-moving action. AI output is advisory; a deterministic policy gate is authoritative; an executor performs the action; a benchmark proves value against baselines.
 
-> **Important:** This repository is in **Phase 12 — Closed-Loop Recovery**. RecoveryOS performs **no production revenue recovery**: it can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link, and the benchmark proves value by comparison — over ONE shared 500-event synthetic set and ONE shared hidden outcome model, it measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline (classifier → policy → selector → executor) on simulated, labeled recovery outcome amounts. Phase 10 added a **read-only operator dashboard** (Recovery Command Center, Event Decision Trace, Policy & Blocked Actions) over persisted state, with honest labeling of simulated figures; Phase 12 closed the loop with a verified, outcome-only `payment_link.paid` webhook that marks each real link `waiting` → `recovered`. The V2 optimizer remains future work.
+> **Important:** This repository is at **Phase 14 — V1 verification and submission readiness**. RecoveryOS performs **no production revenue recovery**. It can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link; the closed loop has been demonstrated end to end against real Razorpay Test Mode infrastructure (see [Live Razorpay verification (Trace C)](#live-razorpay-verification-trace-c)). **Test Mode is not production payment processing**, and no claim of production readiness is made. The benchmark proves value only by comparison — over ONE shared 500-event **synthetic** set and ONE shared hidden outcome model, it measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline (classifier → policy → selector → executor) on simulated, labeled recovery amounts; read the [benchmark honesty disclosure](#benchmark-honesty-and-the-no-signal-limitation) before quoting any figure. A **read-only operator dashboard** (Recovery Command Center, Event Decision Trace, Policy & Blocked Actions) reports persisted state with honest labeling of simulated figures, and the verified, outcome-only `payment_link.paid` webhook marks each real link `waiting` → `recovered`. The V2 optimizer remains future work.
 
 ## Locked Architecture
 
@@ -86,11 +86,121 @@ uvicorn app.main:app --reload
 
 Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
 
-## Current Development Phase
+## Environment & Configuration
 
-**Phase 12 — Closed-Loop Recovery via Verified Razorpay Webhooks.** A secure, durable, and audit-friendly channel that turns a real Razorpay `payment_link.paid` webhook into a verified, correlated, duplicate-safe recovery outcome. The webhook is an **OUTCOME channel only**: it never invokes the executor, policy engine, selector, or link creation. It verifies an HMAC-SHA256 signature over the exact raw request body (constant-time compare, fail-closed 4xx before any parsing), then (1) durably claims the delivery under the `X-Razorpay-Event-Id` PRIMARY KEY, (2) strictly validates the `payment_link.paid` shape (link id, `status: paid`, non-negative `amount_paid`), (3) correlates to the persisted Phase 11 `payment_link_id` (never amount/customer), and (4) records a trusted recovery outcome derived only from the actual `amount_paid` observed on the link. Crash-safe: an in-flight `claimed` delivery is reprocessed to completion on retry, and the recovery write is idempotent (`INSERT OR IGNORE`), so a crash never double-counts and never loses a recovery. Dashboard traces label each real link `waiting` → `recovered`.
+All configuration is read from the environment. `backend/.env` is the local mechanism; copy `backend/.env.example` (which documents every variable and its default) and fill in real values.
 
-### Phase 12 — Closed-Loop Recovery (Webhook)
+```bash
+cd backend
+cp .env.example .env        # then edit; .env is gitignored and MUST NOT be committed
+```
+
+**Secrets must never be committed.** `.env` and `.env.*` (except `.env.example`) are gitignored, as are `*.db` SQLite files. No credential is ever hardcoded in source, written to SQLite, or echoed in API responses. If a secret is ever committed, treat it as compromised and rotate it in the provider dashboard.
+
+| Variable | Purpose | Behaviour when unset |
+| --- | --- | --- |
+| `OMNIROUTE_API_KEY` | Auth for the advisory AI classifier's model gateway | Classification fails explicitly; no fabricated classification |
+| `OMNIROUTE_MODEL` | Model identifier, externalized so no model name is hardcoded in business logic | Falls back to the `config.py` default |
+| `OMNIROUTE_BASE_URL` | OpenAI-compatible endpoint base URL | Falls back to the `config.py` default |
+| `RAZORPAY_KEY_ID` | Razorpay **Test Mode** key ID (`rzp_test_` prefix required) | `payment_link` execution reports an explicit `configuration_missing` failure |
+| `RAZORPAY_KEY_SECRET` | Razorpay Test Mode key secret | Same as above |
+| `RAZORPAY_WEBHOOK_SECRET` | HMAC-SHA256 secret for verifying webhook bodies — a **separate** secret from the API key secret, set in the Razorpay Dashboard webhook settings | Incoming webhooks fail verification (**fail-closed**) |
+| `POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H` | Rolling-24h per-customer intervention cap | Defaults to 2 |
+| `POLICY_EVENT_COOLDOWN_MINUTES` | Minimum gap between interventions on one event | Defaults to 30 |
+| `POLICY_DAILY_SPEND_CAP_PAISE` | Rolling-24h global spend cap | Defaults to 5000000 |
+| `DATABASE_URL` | SQLite path | Defaults to `sqlite:///./recoveryos.db` |
+
+**Razorpay Test Mode is enforced at the client boundary.** `razorpay_client.py` rejects any `rzp_live_` key, so the executor structurally cannot reach production Razorpay even if live credentials are supplied by mistake.
+
+For webhook delivery during local development, the backend must be reachable from Razorpay's servers. The verification below used a Cloudflare quick tunnel to expose `http://127.0.0.1:8000`, with the tunnel hostname registered as `https://<tunnel-host>/webhook/razorpay` in the Razorpay Dashboard webhook settings.
+
+## Running the demo
+
+The offline demo needs no Razorpay credentials and is fully deterministic:
+
+```bash
+cd backend
+python -m app.populate --seed 42 --count 60          # deterministic demo dataset (SIMULATED execution)
+python -m app.benchmark_store --seed 42 --count 500  # persist the canonical benchmark run summary
+uvicorn app.main:app                                 # start the API on :8000
+
+cd ../frontend
+npm run dev                                          # Vite dev server (proxies /api -> :8000)
+```
+
+To reset, stop the API, delete the SQLite file, and re-run the same two commands — `app.populate` is deterministic and idempotent, so the persisted chain reproduces exactly.
+
+The **live** Razorpay loop additionally requires Test Mode credentials, a webhook secret, a public tunnel whose hostname is registered in the Razorpay Dashboard, and a manual browser payment. See the limitations below before attempting it.
+
+## Live Razorpay verification (Trace C)
+
+The full closed loop has been demonstrated once, end to end, against **real Razorpay Test Mode** infrastructure with no fabricated events, classifications, payments, or webhooks, and no manual database edits. Each stage below is a distinct architectural boundary, and the evidence for each was captured separately.
+
+| Stage | What actually happened |
+| --- | --- |
+| **AI diagnosis** (advisory) | A genuinely new failed-payment event was ingested and classified by the real OmniRoute-backed classifier. The classification is advisory: it proposes candidate interventions and cannot authorize anything. |
+| **Deterministic policy** | The policy gate independently evaluated the candidates against the six locked rules and returned an authoritative `ALLOW`. |
+| **Deterministic selection** | The selector intersected the allowed candidates with the locked V1 priority and selected `payment_link`. The model was never asked or steered to pick it. |
+| **Real Test Mode execution** | The bounded executor created a real Razorpay **Test Mode** Payment Link (`REAL_RAZORPAY`, execution status `SUCCESS`). |
+| **Real payment** | The hosted Razorpay checkout page was paid manually in a browser by netbanking for ₹4,999 (499900 paise). Razorpay's API independently reports the link `paid` with `amount_paid` 499900 and the payment `captured`. |
+| **Real webhook** | Razorpay delivered a genuine `payment_link.paid` webhook to the tunnel from its own infrastructure. The endpoint was never called by hand and no delivery was synthesized. |
+| **HMAC verification** | The signature was recomputed over the **exact raw request body** and compared constant-time *before* any parsing. |
+| **Correlation** | The delivery was correlated to the persisted `execution_outcomes.payment_link_id` — never by amount, customer, or email — resolving to the originating event. |
+| **Recovery persistence** | A single recovery outcome was persisted, with the trusted amount taken from the link's own `amount_paid` (499900 paise), not from any client-supplied figure. |
+| **Idempotency / adversarial** | Verified by the repository's deterministic webhook suite: identical redelivery is a 2xx no-op with no second recovery, same delivery id + different body is a 409 conflict, and a tampered body is rejected fail-closed with 401. |
+
+The dashboard trace for the event transitions from `waiting` to `recovered`, reporting the recovered amount, recovery timestamp, and payment id.
+
+**Three states that are deliberately distinct.** All three occurred for this event, but the architecture never conflates them:
+
+- **Execution success** — the Payment Link operation itself ran (`execution_status: SUCCESS`). It says nothing about whether anyone paid.
+- **Payment success** — a real payer completed the Test Mode checkout and Razorpay captured the payment.
+- **Verified recovery** — RecoveryOS independently received, authenticated, correlated, and persisted the outcome. Only this state marks money as recovered.
+
+A successful execution is *not* evidence of recovery, and Razorpay reporting a payment as paid is *not* by itself accepted as recovery either. Recovery is recorded only after signature verification and correlation both succeed.
+
+## Operational limitations of the live demo
+
+These are genuine constraints on reproducing the verification above, stated plainly.
+
+- **Test Mode only.** All live verification uses Razorpay **Test Mode**. Test Mode does not represent production payment behaviour: it has different method availability (for example international cards are unsupported), no real settlement, no real fraud/risk decisioning, and no production rate limits or failure modes. **Nothing here demonstrates production payment processing.**
+- **Cloudflare quick tunnels are ephemeral.** The hostname changes every time the tunnel restarts, and an old hostname stops resolving. The Razorpay webhook URL must point at the **currently active** tunnel.
+- **Razorpay does not re-target queued retries.** A delivery that failed against a stale hostname is not redelivered to a newly configured URL. Correcting the webhook URL after a payment does not recover that delivery; a fresh payment is required. This was observed directly during verification.
+- **Recovery verification depends on an external webhook arriving.** RecoveryOS is fail-closed by design and will not mark anything recovered on its own. If the webhook does not arrive, the trace correctly stays at `waiting` — which is an honest report, not a bug.
+- **The hosted payment step is manual.** Completing the Razorpay checkout requires a human in a browser; it is not automatable within this repository, so the live loop cannot run unattended in CI.
+- **The live loop is a single verified instance**, not a load or reliability measurement.
+
+## AI / model variability
+
+During Phase 14, two semantically similar fresh events were classified by the real OmniRoute classifier at `temperature = 0.0` and produced **different candidate intervention sets** — one included `payment_link`, the other returned only `alternate_method_prompt`. The consequences are documented honestly:
+
+- **The live AI classification is genuine.** The variation is itself evidence that a real external model is being consulted rather than a canned response.
+- **`temperature = 0` does not make the classifier deterministic.** Determinism is not guaranteed across requests to a hosted, routed model endpoint, so the classification stage must be treated as non-reproducible.
+- **Selection is deterministic *after* classification.** Given a fixed classifier output, the policy gate and selector are pure and reproducible — the same candidates and persisted state always yield the same authorization and the same selected intervention.
+- **RecoveryOS does not force `payment_link`.** When the model omits it from the candidate set, `payment_link` simply cannot be selected. No prompt coercion, retry-until-desired-answer, or post-hoc candidate injection exists, and none was added to obtain the verified trace.
+- **This is an honest limitation of the current external-model dependency,** not a defect in the deterministic core. It means a live demo may need more than one event before `payment_link` is selected.
+
+The accurate overall claim is therefore: *the intervention-selection policy is deterministic once the classifier output is available, while the external LLM classification itself can vary between equivalent events.*
+
+## Benchmark honesty and the "no-signal" limitation
+
+Full methodology lives in `docs/BENCHMARK.md`. The essentials:
+
+- **The dataset is seeded and synthetic.** Events come from `app/generator.py` under an explicit seed (canonically seed 42, 500 events). **No benchmark figure is derived from real customer payment data**, from real Razorpay transactions, or from the live Trace C verification.
+- **All recovery amounts are simulated** and labeled `SIMULATED` (`evaluation_mode`).
+- **Disclosed limitation — the hidden outcome model carries no signal.** Recovery probabilities are drawn as independent uniform values (`rng.random()`) per (event, intervention) pair. They are **not correlated with any event feature** — not the failure reason, payment method, amount, or risk flag — and not correlated across interventions. Every intervention on every event therefore has an expected recovery probability of ≈0.5, and no intervention is genuinely better suited to any event.
+
+  Consequently **the benchmark cannot reward intelligent targeting**, and the canonical seed-42 result reflects exactly that: No Action recovers 242/500 events, Naive Retry 246/500, and RecoveryOS 241/500 — all statistically flat at the ~0.5 the model dictates. Naive Retry's small edge comes from attempting more interventions, not from choosing better ones, and RecoveryOS is slightly behind because policy correctly blocks fraud and terminal events.
+
+  What the benchmark **does** establish is harness integrity: fairness across a shared event set and shared model, order-invariant determinism, ground-truth isolation from the decision path, and honest accounting. What it **cannot** establish is that RecoveryOS's targeting recovers more revenue than a blanket retry. A signal-bearing outcome model would be required for that, and inventing one would mean fabricating the very correlations the system claims to exploit.
+
+The existing methodology, calculations, and results are preserved as-is. The unflattering seed-42 result is reported rather than suppressed, and nothing was tuned to improve presentation.
+
+## Closed-loop webhook mechanism
+
+A secure, durable, and audit-friendly channel that turns a real Razorpay `payment_link.paid` webhook into a verified, correlated, duplicate-safe recovery outcome. The webhook is an **OUTCOME channel only**: it never invokes the executor, policy engine, selector, or link creation. It verifies an HMAC-SHA256 signature over the exact raw request body (constant-time compare, fail-closed 4xx before any parsing), then (1) durably claims the delivery under the `X-Razorpay-Event-Id` PRIMARY KEY, (2) strictly validates the `payment_link.paid` shape (link id, `status: paid`, non-negative `amount_paid`), (3) correlates to the persisted Phase 11 `payment_link_id` (never amount/customer), and (4) records a trusted recovery outcome derived only from the actual `amount_paid` observed on the link. Crash-safe: an in-flight `claimed` delivery is reprocessed to completion on retry, and the recovery write is idempotent (`INSERT OR IGNORE`), so a crash never double-counts and never loses a recovery. Dashboard traces label each real link `waiting` → `recovered`.
+
+### Webhook guarantees
 
 ```bash
 cd backend
@@ -104,6 +214,10 @@ uvicorn app.main:app                              # start the API
 - **Crash-safe claim/retry** — a delivery still `claimed` (crashed mid-flight) is reprocessed to completion on Razorpay's retry, never silently dropped as a duplicate; the recovery-outcome insert is `INSERT OR IGNORE`, so a crash between the recovery write and the status update completes cleanly without double-counting.
 - **Trusted, correlated outcome** — correlation matches the persisted Phase 11 `execution_outcomes.payment_link_id` (REAL_RAZORPAY + SUCCESS + payment_link). The trusted recovery amount is the `amount_paid` observed on the link, never the original webhook event amount. Verified outcomes persist to `webhook_recovery_outcomes` (delivery-id PRIMARY KEY).
 - **Strictly validated shape** — a `payment_link.paid` event must carry a link id, report `status: paid`, and give a non-negative integer `amount_paid`; a malformed paid event is a 400, never silently unmatched. Unsupported events are recorded-and-ignored (2xx), never executed.
+
+## Phase history
+
+The sections below are a **historical record** of how each capability was built, retained for provenance and audit. They describe the phase in which a capability landed, not the current status of the repository — for current status see the top of this file.
 
 ### Phase 10 — Recovery Command Center & Decision Trace
 
@@ -245,4 +359,4 @@ What Phase 8 can and cannot do: it can deterministically simulate whether an exe
 
 What Phase 7 can and cannot do: it can select and execute (simulate or create a Test Mode Payment Link) a single authorized intervention per event. It cannot benchmark, cannot estimate recovery, cannot rank by expected value, and there is no audit dashboard or V2 optimizer.
 
-What Phase 6 can and cannot do: it can evaluate and persist advisory policy decisions. It cannot select the best intervention, rank candidates, or execute anything. Selection, executor, Razorpay integration, benchmark, and dashboard are the scope of later phases (7–12).
+What Phase 6 can and cannot do: it can evaluate and persist advisory policy decisions. It cannot select the best intervention, rank candidates, or execute anything. Selection, executor, Razorpay integration, benchmark, and dashboard were delivered by the later phases recorded above.
