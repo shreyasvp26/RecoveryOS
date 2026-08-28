@@ -1,4 +1,4 @@
-# RecoveryOS Phase 10 Dashboard Design
+# RecoveryOS Recovery Command Center & Decision Trace Dashboard Design
 
 The Recovery Command Center is a **read-only operator surface** over the
 persisted decision chain. It deliberately holds no policy, benchmark, or
