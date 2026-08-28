@@ -324,3 +324,97 @@ def test_execute_live_razorpay_config_error_is_explicit(monkeypatch, tmp_path) -
     body = response.json()
     assert "razorpay_configuration_error" in body["detail"]
     assert "rzp_live_" in body["detail"]
+
+
+def _count(db_path: str, table: str, evid: str) -> int:
+    conn = connect(db_path)
+    try:
+        init_db(conn)
+        return conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE event_id = ?", (evid,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_execute_cannot_duplicate_successful_execution(monkeypatch, tmp_path) -> None:
+    """Phase 3: a previously SUCCESSFULLY executed intervention for an event
+    can never execute again. The deterministic policy DUPLICATE rule must deny
+    a re-execution even when the evaluation time moves well past the cooldown
+    window, so no second execution outcome or intervention attempt is created.
+
+    This actively attempts to violate the invariant via a later re-request.
+    """
+    db_path = _seed_classified(
+        monkeypatch, tmp_path, candidates=["retry_delayed", "payment_link"]
+    )
+
+    first = client.post("/events/evt_exec_api/execute")
+    assert first.status_code == 200
+    assert first.json()["status"] == "execution_success"
+    assert first.json()["selected_intervention"] == "retry_delayed"
+
+    assert _count(db_path, "execution_outcomes", "evt_exec_api") == 1
+    assert _count(db_path, "intervention_attempts", "evt_exec_api") == 1
+
+    # Move the authoritative time 3 hours later (past cooldown + customer 24h).
+    LATER = datetime(2026, 8, 27, 16, 0, tzinfo=timezone.utc)
+    app.dependency_overrides[get_now] = lambda: LATER
+
+    second = client.post("/events/evt_exec_api/execute")
+    assert second.status_code == 200
+    body = second.json()
+    # The duplicate-successful-intervention rule denies every candidate, so
+    # selection falls through to the explicit, non-executable no_action.
+    assert body["status"] == "no_action"
+    assert body["selected_intervention"] == "no_action"
+    assert "execution" not in body
+
+    # No second outcome or attempt may have been created by the re-request.
+    assert _count(db_path, "execution_outcomes", "evt_exec_api") == 1
+    assert _count(db_path, "intervention_attempts", "evt_exec_api") == 1
+
+
+def test_execute_repeated_requests_never_execute_twice(monkeypatch, tmp_path) -> None:
+    """Hammering /execute for the same event must not produce a second real
+    execution: the outcome/attempt row count stays at one and every later call
+    degrades to an explicit no_action."""
+    db_path = _seed_classified(
+        monkeypatch, tmp_path, candidates=["reminder", "retry_immediate"]
+    )
+    first = client.post("/events/evt_exec_api/execute")
+    assert first.json()["status"] == "execution_success"
+    assert first.json()["selected_intervention"] == "reminder"
+
+    for i in range(5):
+        LATER = datetime(2026, 8, 27, 13, i + 1, tzinfo=timezone.utc)
+        app.dependency_overrides[get_now] = lambda: LATER
+        resp = client.post("/events/evt_exec_api/execute")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "no_action"
+
+    assert _count(db_path, "execution_outcomes", "evt_exec_api") == 1
+    assert _count(db_path, "intervention_attempts", "evt_exec_api") == 1
+
+
+def test_execute_retry_after_success_is_denied_not_re_executed(
+    monkeypatch, tmp_path
+) -> None:
+    """Repeating execute after a success must deny (not re-run) with the SAME
+    candidate set and a later evaluation time — the duplicate-successful rule is
+    the guard, independent of the candidate list on the event."""
+    db_path = _seed_classified(
+        monkeypatch, tmp_path, candidates=["retry_delayed", "payment_link"]
+    )
+    first = client.post("/events/evt_exec_api/execute")
+    assert first.json()["status"] == "execution_success"
+    assert first.json()["selected_intervention"] == "retry_delayed"
+
+    LATER = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
+    app.dependency_overrides[get_now] = lambda: LATER
+
+    re_exec = client.post("/events/evt_exec_api/execute")
+    assert re_exec.status_code == 200
+    assert re_exec.json()["status"] == "no_action"
+    assert _count(db_path, "execution_outcomes", "evt_exec_api") == 1
+    assert _count(db_path, "intervention_attempts", "evt_exec_api") == 1
