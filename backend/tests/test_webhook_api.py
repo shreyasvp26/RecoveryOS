@@ -963,3 +963,133 @@ def test_paid_event_non_integer_amount_paid_is_strictly_rejected(
     )
     assert response.status_code == 400
     assert response.json()["status"] == "invalid_payload"
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 final hardening: malformed nested-shape payloads -> controlled 400
+# ---------------------------------------------------------------------------
+
+
+def _post_malformed(monkeypatch, tmp_path, payload: dict, delivery_id: str):
+    """Post a signed-but-malformed webhook body using its EXACT raw bytes.
+
+    The HMAC signature is computed over the exact malformed JSON body, so the
+    request is cryptographically authenticated and reaches payload parsing.
+    This proves the 400 comes from shape validation, not from signature failure.
+    """
+    body = json.dumps(payload).encode("utf-8")
+    return _post_webhook(
+        monkeypatch,
+        tmp_path,
+        raw_body=body,
+        signature=_sign(body),
+        delivery_id=delivery_id,
+    )
+
+
+def _assert_rejected_no_recovery(response, conn) -> None:
+    assert response.status_code == 400
+    assert response.json()["status"] == "invalid_payload"
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM webhook_recovery_outcomes"
+    ).fetchone()
+    assert row["n"] == 0  # no recovery is ever recorded from a malformed payload
+
+
+def test_malformed_payload_is_object_is_rejected(monkeypatch, tmp_path) -> None:
+    # TEST A: payload is a JSON array instead of an object.
+    response = _post_malformed(
+        monkeypatch,
+        tmp_path,
+        {"event": "payment_link.paid", "payload": []},
+        DELIVERY_ID,
+    )
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        _assert_rejected_no_recovery(response, conn)
+    finally:
+        conn.close()
+
+
+def test_malformed_payload_payment_link_is_array_is_rejected(
+    monkeypatch, tmp_path
+) -> None:
+    # TEST B: payload.payment_link is an array instead of an object.
+    response = _post_malformed(
+        monkeypatch,
+        tmp_path,
+        {"event": "payment_link.paid", "payload": {"payment_link": []}},
+        DELIVERY_ID,
+    )
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        _assert_rejected_no_recovery(response, conn)
+    finally:
+        conn.close()
+
+
+def test_malformed_payload_payment_link_entity_is_array_is_rejected(
+    monkeypatch, tmp_path
+) -> None:
+    # TEST C: payload.payment_link.entity is an array instead of an object.
+    response = _post_malformed(
+        monkeypatch,
+        tmp_path,
+        {
+            "event": "payment_link.paid",
+            "payload": {"payment_link": {"entity": []}},
+        },
+        DELIVERY_ID,
+    )
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        _assert_rejected_no_recovery(response, conn)
+    finally:
+        conn.close()
+
+
+def test_malformed_payload_payment_is_array_is_rejected(monkeypatch, tmp_path) -> None:
+    # TEST D: the deeper, optional payment container is an array instead of an
+    # object. The parser accesses it, so it must also be a controlled 400.
+    response = _post_malformed(
+        monkeypatch,
+        tmp_path,
+        {
+            "event": "payment_link.paid",
+            "payload": {
+                "payment_link": {
+                    "entity": {
+                        "id": PAYMENT_LINK_ID,
+                        "status": "paid",
+                        "amount_paid": 100,
+                        "currency": "INR",
+                    }
+                },
+                "payment": [],
+            },
+        },
+        DELIVERY_ID,
+    )
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        _assert_rejected_no_recovery(response, conn)
+    finally:
+        conn.close()
+
+
+def test_malformed_unsupported_event_payload_is_rejected(monkeypatch, tmp_path) -> None:
+    # Same defect class for an unsupported event: the parser still reads the
+    # nested containers for every event type, so a malformed container is a
+    # controlled 400 (never a 500, never silently processed).
+    response = _post_malformed(
+        monkeypatch,
+        tmp_path,
+        {"event": "payment_link.cancelled", "payload": {"payment_link": []}},
+        DELIVERY_ID,
+    )
+    conn = _delivery_rows(tmp_path, monkeypatch)
+    try:
+        assert response.status_code == 400
+        assert response.json()["status"] == "invalid_payload"
+    finally:
+        conn.close()

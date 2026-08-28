@@ -127,6 +127,21 @@ def _event_field(payload: dict[str, Any]) -> str:
     return value
 
 
+def _child_dict(container: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    """Return ``container[key]`` as a dict, else raise ``WebhookPayloadError``.
+
+    Guards each JSON-object level the parser accesses. A missing key is treated
+    as an empty object (fields under it are optional), but a PRESENT value that
+    is not a JSON object (e.g. ``[]``, a string, or ``null`` where an object is
+    expected) is a signed-but-malformed shape and becomes a controlled 4xx —
+    never an ``AttributeError``/500. ``path`` names the field for diagnostics.
+    """
+    value = container.get(key, {})
+    if not isinstance(value, dict):
+        raise WebhookPayloadError(f"webhook payload field {path!r} must be a JSON object")
+    return value
+
+
 def _validate_paid_shape(payload: dict[str, Any]) -> None:
     """Strictly validate the shape of a `payment_link.paid` event.
 
@@ -138,7 +153,9 @@ def _validate_paid_shape(payload: dict[str, Any]) -> None:
     unmatched audit. Other event types stay structurally lenient because they
     are recorded-and-ignored, never processed.
     """
-    link_entity = (payload.get("payload", {}).get("payment_link", {}).get("entity")) or {}
+    payload_obj = _child_dict(payload, "payload", "payload")
+    link_obj = _child_dict(payload_obj, "payment_link", "payload.payment_link")
+    link_entity = link_obj.get("entity") or {}
     if not isinstance(link_entity, dict) or not link_entity:
         raise WebhookPayloadError(
             "payment_link.paid event is missing the payment_link.entity"
@@ -186,13 +203,11 @@ def parse_webhook_payload(raw_body: bytes, delivery_id: str) -> WebhookEvent:
     if event_type == SUPPORTED_WEBHOOK_EVENT:
         _validate_paid_shape(data)
 
-    link_entity = (
-        data.get("payload", {}).get("payment_link", {}).get("entity")
-        or {}
-    )
-    payment_entity = (
-        data.get("payload", {}).get("payment", {}).get("entity") or {}
-    )
+    payload_obj = _child_dict(data, "payload", "payload")
+    link_obj = _child_dict(payload_obj, "payment_link", "payload.payment_link")
+    link_entity = _child_dict(link_obj, "entity", "payload.payment_link.entity")
+    payment_obj = _child_dict(payload_obj, "payment", "payload.payment")
+    payment_entity = _child_dict(payment_obj, "entity", "payload.payment.entity")
 
     payment_link_id = link_entity.get("id")
     status = link_entity.get("status")
