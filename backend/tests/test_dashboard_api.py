@@ -244,3 +244,104 @@ def test_blocked_fraud_decision_with_context(monkeypatch, tmp_path) -> None:
     assert first["category"] == "fraud"
     cats = {c["key"]: c["count"] for c in body["categories"]}
     assert cats["fraud"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 final hardening integrity: recovery rate, execution state,
+# honest event-level recovery, blocked-detail evidence.
+# ---------------------------------------------------------------------------
+
+
+def _collect_keys(node, acc):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            acc.add(k)
+            _collect_keys(v, acc)
+    elif isinstance(node, list):
+        for it in node:
+            _collect_keys(it, acc)
+    return acc
+
+
+def test_summary_exposes_recovery_os_rate_from_persisted_benchmark(
+    monkeypatch, tmp_path
+) -> None:
+    _seed_benchmark(monkeypatch, tmp_path, seed=42, count=20)
+    body = client.get("/dashboard/summary").json()
+    app_bench = body["benchmark"]
+    assert app_bench["available"] is True
+    assert "recovery_os_recovery_rate" in app_bench
+    assert "recovery_os_recovered_amount_paise" in app_bench
+    rate = app_bench["recovery_os_recovery_rate"]
+    assert 0 <= rate <= 1
+    # Must match the persisted run's own strategy rate, not a new computation.
+    ro = next(s for s in app_bench["strategies"] if s["strategy"] == "recovery_os")
+    assert rate == ro["recovery_rate"]
+    assert app_bench["recovery_os_recovered_amount_paise"] == ro["recovered_amount_paise"]
+
+
+def test_summary_recovery_rate_not_fabricated_when_benchmark_absent(
+    monkeypatch, tmp_path
+) -> None:
+    _set_test_db(monkeypatch, tmp_path)
+    body = client.get("/dashboard/summary").json()
+    assert body["benchmark"]["available"] is False
+    # No recovery-rate zeros or fake fallbacks in the dashboard contract.
+    assert "recovery_os_recovery_rate" not in body["benchmark"]
+    assert "recovery_os_recovered_amount_paise" not in body["benchmark"]
+
+
+def test_trace_execution_state_executed(monkeypatch, tmp_path) -> None:
+    _seed_full_chain(monkeypatch, tmp_path)
+    trace = client.get("/events/evt_dash_1/trace").json()
+    assert trace["summary"]["execution_state"] == "EXECUTED"
+    assert trace["executions"]
+
+
+def test_trace_execution_state_policy_blocked(monkeypatch, tmp_path) -> None:
+    _seed_full_chain(
+        monkeypatch, tmp_path, payload=dict(VALID_EVENT, risk_flag="fraud_suspect"),
+        root="fraud_suspect",
+    )
+    trace = client.get("/events/evt_dash_1/trace").json()
+    assert trace["summary"]["execution_state"] == "POLICY_BLOCKED"
+    assert not trace["executions"]
+
+
+def test_trace_execution_state_not_classified(monkeypatch, tmp_path) -> None:
+    _seed_event(monkeypatch, tmp_path)
+    trace = client.get("/events/evt_dash_1/trace").json()
+    assert trace["summary"]["execution_state"] == "NOT_CLASSIFIED"
+    assert not trace["executions"]
+
+
+def test_trace_never_fabricates_event_recovered_amount(monkeypatch, tmp_path) -> None:
+    _seed_full_chain(monkeypatch, tmp_path)
+    trace = client.get("/events/evt_dash_1/trace").json()
+    keys = _collect_keys(trace, set())
+    for key in keys:
+        assert not key.lower().startswith("recovered"), (
+            f"trace must not expose a per-event recovered amount, found key {key!r}"
+        )
+
+
+def test_blocked_detail_includes_evidence(monkeypatch, tmp_path) -> None:
+    _seed_full_chain(
+        monkeypatch, tmp_path, payload=dict(VALID_EVENT, risk_flag="fraud_suspect"),
+        root="fraud_suspect",
+    )
+    body = client.get("/decisions/blocked").json()
+    item = body["blocked"][0]
+    assert "evidence" in item
+    assert isinstance(item["evidence"]["previous_attempts"], int)
+    assert item["evidence"]["previous_attempts"] == 0
+    assert item["evidence"]["last_intervention"] is None
+    assert item["evidence"]["last_attempt_status"] is None
+    assert item["evidence"]["last_attempted_at"] is None
+
+
+def test_not_recovered_only_supported_categories(monkeypatch, tmp_path) -> None:
+    _set_test_db(monkeypatch, tmp_path)
+    body = client.get("/dashboard/summary").json()
+    keys = {c["key"] for c in body["not_recovered"]["categories"]}
+    assert keys <= {"policy_blocked", "unclassified"}
