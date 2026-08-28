@@ -13,6 +13,14 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from dotenv import load_dotenv
+
+# Load the local development .env (never committed) so that every config
+# getter below can read Razorpay / policy / database environment values from
+# it. load_dotenv() never overrides variables already present in the process
+# environment, so explicit monkeypatch / shell-set values remain authoritative.
+load_dotenv()
+
 DEFAULT_DATABASE_URL = "sqlite:///./recoveryos.db"
 _DATABASE_URL_PREFIX = "sqlite:///"
 

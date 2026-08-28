@@ -2,4 +2,5 @@ fastapi
 uvicorn[standard]
 pytest
 httpx
+python-dotenv
 razorpay
