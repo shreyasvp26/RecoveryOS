@@ -235,7 +235,22 @@ def test_payment_link_unexpected_client_exception_is_explicit_failure() -> None:
     )
     assert outcome.status == "FAILED"
     assert "razorpay_api_error" in outcome.detail
-    assert "boundary leaked" in outcome.detail
+    # The raw provider exception text must not become user/audit-facing detail.
+    assert "boundary leaked" not in outcome.detail
+    assert outcome.external_reference is None
+
+
+def test_payment_link_provider_exception_text_never_escapes_detail() -> None:
+    event = _event()
+    decision = _decision("payment_link")
+    marker = "SECRET_SHOULD_NOT_ESCAPE"
+    client = StubPaymentLinkClient(error=RuntimeError(marker))
+    outcome = BoundedExecutor().execute(
+        event, "payment_link", decision, razorpay_client=client
+    )
+    assert outcome.status == "FAILED"
+    assert outcome.detail == "razorpay_api_error"
+    assert marker not in (outcome.detail or "")
     assert outcome.external_reference is None
 
 

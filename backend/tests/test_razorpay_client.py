@@ -131,6 +131,23 @@ def test_razorpay_api_failure_is_explicit() -> None:
     assert not sdk.calls[-1].get("fake_url")
 
 
+def test_provider_exception_text_does_not_escape_wrapped_error() -> None:
+    """Arbitrary provider exception text must not be surfaced in the raised
+    RazorpayExecutionError message (a user/audit-facing data channel)."""
+    marker = "SECRET_SHOULD_NOT_ESCAPE"
+    sdk = FakeSdk(raises=RuntimeError(marker))
+    client = _client(sdk)
+    with pytest.raises(RazorpayExecutionError) as exc_info:
+        client.create_payment_link(
+            amount_paise=100, currency="INR", reference_id="evt3", description="d"
+        )
+    assert "razorpay_api_error" in str(exc_info.value)
+    assert marker not in str(exc_info.value)
+    # The raw exception is preserved on the cause chain for internal debugging.
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert exc_info.value.__cause__.args == (marker,)
+
+
 def test_unexpected_response_not_an_object() -> None:
     sdk = FakeSdk(responses=[None])
     with pytest.raises(RazorpayUnexpectedResponseError):

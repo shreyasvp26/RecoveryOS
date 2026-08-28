@@ -235,6 +235,48 @@ def test_execute_payment_link_provider_failure(monkeypatch, tmp_path) -> None:
         conn.close()
 
 
+def test_execute_payment_link_provider_text_never_escapes_detail(
+    monkeypatch, tmp_path
+) -> None:
+    """Raw provider exception text must not surface in the API/persisted detail.
+
+    The stub raises an unexpected provider-side exception carrying a
+    recognizable marker; the executor's defense-in-depth branch must record a
+    controlled FAILED outcome whose detail is the stable ``razorpay_api_error``
+    identifier, never the raw exception text.
+    """
+    marker = "SECRET_SHOULD_NOT_ESCAPE"
+    client_stub = StubPaymentLinkClient(error=RuntimeError(marker))
+    db_path = _seed_classified(
+        monkeypatch,
+        tmp_path,
+        candidates=["payment_link"],
+        razorpay_client=client_stub,
+    )
+    response = client.post("/events/evt_exec_api/execute")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "execution_failed"
+    assert body["execution"]["status"] == "FAILED"
+    assert body["execution"]["detail"] == "razorpay_api_error"
+    assert marker not in json.dumps(body)
+    assert body["execution"]["external_reference"] is None
+    assert body["execution"]["payment_link_id"] is None
+
+    conn = connect(db_path)
+    try:
+        init_db(conn)
+        row = conn.execute(
+            "SELECT detail FROM execution_outcomes WHERE event_id = ?",
+            ("evt_exec_api",),
+        ).fetchone()
+        assert row is not None
+        assert row["detail"] == "razorpay_api_error"
+        assert marker not in (row["detail"] or "")
+    finally:
+        conn.close()
+
+
 def test_execute_payment_link_malformed_provider_response_fails(monkeypatch, tmp_path) -> None:
     """A response that cannot yield an id/short_url must never be a success."""
     client_stub = StubPaymentLinkClient(

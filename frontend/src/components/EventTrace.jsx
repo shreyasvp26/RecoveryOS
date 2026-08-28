@@ -142,9 +142,13 @@ function Phase12Stage({ phase12 }) {
     )
   }
 
+  const paymentLinks = Array.isArray(phase12?.payment_links)
+    ? phase12.payment_links
+    : []
+
   return (
     <Stage title="Closed-loop verification (Phase 12)" tone="info">
-      {phase12.payment_links.map((pl) => {
+      {paymentLinks.map((pl) => {
         const recovered = pl.status === 'recovered'
         return (
           <div key={pl.payment_link_id} className="execution-row">
@@ -165,7 +169,7 @@ function Phase12Stage({ phase12 }) {
           </div>
         )
       })}
-      {phase12.payment_links.length === 0 && (
+      {paymentLinks.length === 0 && (
         <EmptyState
           title="No payment links"
           message="No real payment-link outcome is recorded for this event."
