@@ -234,7 +234,58 @@ def build_event_trace(conn, event_id: str) -> dict[str, Any] | None:
         "policy_decisions": decisions,
         "executions": executions,
         "attempts": attempts,
+        "phase12": _summarize_phase12(conn, executions),
         "summary": _summarize_trace(classification, decisions, executions),
+    }
+
+
+def _summarize_phase12(
+    conn, executions: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Derive the honest Phase 12 closed-loop status from persisted executions.
+
+    Only REAL_RAZORPAY payment_link SUCCESS executions carry a genuine Payment
+    Link id; each is reported as ``waiting`` until a verified webhook recovery
+    outcome exists for that link, at which point it is ``recovered`` with the
+    trusted amount_paid. A recovered link is never counted twice. This is
+    read-only evidence; it never fabricates a recovery and never re-executes.
+    """
+    links = []
+    for ex in executions:
+        if (
+            ex.get("intervention") != "payment_link"
+            or ex.get("execution_mode") != "REAL_RAZORPAY"
+            or ex.get("status") != "SUCCESS"
+            or not ex.get("payment_link_id")
+        ):
+            continue
+        payment_link_id = ex["payment_link_id"]
+        recovery = db.get_webhook_recovery_outcome_by_payment_link_id(
+            conn, payment_link_id
+        )
+        if recovery is not None:
+            links.append(
+                {
+                    "payment_link_id": payment_link_id,
+                    "status": "recovered",
+                    "recovered_amount_paise": recovery.get("amount_paid_paise"),
+                    "recovered_at": recovery.get("recovered_at"),
+                    "payment_id": recovery.get("payment_id"),
+                }
+            )
+        else:
+            links.append(
+                {
+                    "payment_link_id": payment_link_id,
+                    "status": "waiting",
+                    "recovered_amount_paise": None,
+                    "recovered_at": None,
+                    "payment_id": None,
+                }
+            )
+    return {
+        "closed_loop": bool(links),
+        "payment_links": links,
     }
 
 

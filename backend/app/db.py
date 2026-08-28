@@ -1031,3 +1031,25 @@ def get_webhook_recovery_outcome(
     if row is None:
         return None
     return dict(row)
+
+
+def get_webhook_recovery_outcome_by_payment_link_id(
+    conn: sqlite3.Connection, payment_link_id: str
+) -> dict[str, Any] | None:
+    """Retrieve the most recent verified recovery for a Payment Link, or None.
+
+    Read-only dashboard/trace support: correlates a Payment Link created on the
+    execution side to the verified recovery (if any) observed via the webhook.
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM webhook_recovery_outcomes
+        WHERE payment_link_id = ?
+        ORDER BY recovered_at DESC
+        LIMIT 1
+        """,
+        (payment_link_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)

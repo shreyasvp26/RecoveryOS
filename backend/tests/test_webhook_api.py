@@ -11,7 +11,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import connect, init_db, insert_execution_outcome
+from app.db import insert_webhook_recovery_outcome
 from app.executor import ExecutionOutcome
+from app.dashboard import build_event_trace
 from app.main import app
 from app.razorpay_webhook import (
     WebhookPayloadError,
@@ -681,3 +683,92 @@ def test_f_benchmark_never_calls_razorpay(monkeypatch) -> None:
     assert report.event_results
     for strategy, records in report.event_results.items():
         assert records  # every strategy produced outcome records
+
+
+# ---------------------------------------------------------------------------
+# S5: dashboard / trace closed-loop labeling (waiting vs recovered)
+# ---------------------------------------------------------------------------
+
+
+def test_trace_phase12_labels_waiting_then_recovered(monkeypatch, tmp_path) -> None:
+    """The event trace labels a REAL_RAZORPAY link WAITING then RECOVERED."""
+    from app.db import insert_payment_event
+    from app.models import CustomerHistory, PaymentEvent
+
+    db_path = tmp_path / "phase12_trace.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    conn = connect(str(db_path))
+    init_db(conn)
+    try:
+        insert_payment_event(
+            conn,
+            PaymentEvent(
+                event_id="evt_phase12_1",
+                order_id="order_phase12_1",
+                payment_id="pay_phase12_1",
+                customer_id="cust_phase12_1",
+                amount_paise=75000,
+                currency="INR",
+                payment_method="card",
+                failure_reason="bank_timeout",
+                bank="HDFC",
+                risk_flag="normal",
+                customer_history=CustomerHistory(
+                    prior_successful_payments=4,
+                    prior_failed_payments=1,
+                    has_active_subscription=True,
+                ),
+                timestamp="2026-08-27T12:00:00+00:00",
+            ),
+        )
+        insert_execution_outcome(
+            conn,
+            ExecutionOutcome(
+                event_id="evt_phase12_1",
+                intervention="payment_link",
+                execution_mode="REAL_RAZORPAY",
+                status="SUCCESS",
+                external_reference="https://rzp.io/rzp/abc",
+                reported_at="2026-08-27T12:01:00+00:00",
+                payment_link_id=PAYMENT_LINK_ID,
+            ),
+        )
+    finally:
+        conn.close()
+
+    conn = connect(str(db_path))
+    try:
+        trace = build_event_trace(conn, "evt_phase12_1")
+    finally:
+        conn.close()
+    assert trace is not None
+    assert trace["phase12"]["closed_loop"] is True
+    assert trace["phase12"]["payment_links"][0]["status"] == "waiting"
+    assert trace["phase12"]["payment_links"][0]["recovered_amount_paise"] is None
+
+    # A verified webhook recovery arrives -> the link becomes RECOVERED.
+    conn = connect(str(db_path))
+    init_db(conn)
+    try:
+        insert_webhook_recovery_outcome(
+            conn,
+            delivery_id="evt_wh_recovery_1",
+            payment_link_id=PAYMENT_LINK_ID,
+            referenced_event_id="evt_phase12_1",
+            amount_paid_paise=60000,
+            currency="INR",
+            payment_id=PAYMENT_ID,
+            recovered_at="2026-08-27T12:30:00+00:00",
+        )
+    finally:
+        conn.close()
+
+    conn = connect(str(db_path))
+    try:
+        trace = build_event_trace(conn, "evt_phase12_1")
+    finally:
+        conn.close()
+    assert trace["phase12"]["payment_links"][0]["status"] == "recovered"
+    assert trace["phase12"]["payment_links"][0]["recovered_amount_paise"] == 60000
+    assert trace["phase12"]["payment_links"][0]["payment_id"] == PAYMENT_ID
