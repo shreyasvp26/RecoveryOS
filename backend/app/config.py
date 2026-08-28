@@ -108,6 +108,18 @@ def get_razorpay_key_secret() -> str:
     return os.environ.get("RAZORPAY_KEY_SECRET", "")
 
 
+def get_razorpay_webhook_secret() -> str:
+    """Return the configured Razorpay webhook secret, or an empty string.
+
+    This is a SEPARATE secret from the API key secret: it is the secret chosen
+    in the Razorpay Dashboard for webhook signature verification (HMAC-SHA256
+    over the raw request body). It is never committable and never stored in
+    the database. A missing value is explicit and verified against in a
+    fail-closed way by the webhook boundary.
+    """
+    return os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+
+
 def build_razorpay_client() -> Any | None:
     """Build the Razorpay client boundary, or None when credentials are unset.
 
