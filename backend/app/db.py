@@ -987,19 +987,24 @@ def insert_webhook_recovery_outcome(
     currency: str | None,
     payment_id: str | None,
     recovered_at: str,
-) -> None:
-    """Persist a verified, correlated recovery outcome (durable, idempotent).
+) -> bool:
+    """Persist a verified, correlated recovery outcome (idempotent).
 
     ``delivery_id`` (X-Razorpay-Event-Id) is the PRIMARY KEY and equals the
     webhook delivery id already gated for uniqueness, so an event can never
     yield a second recovery. The amount is the TRUSTED amount_paid observed on
     the link; an absent amount is recorded as NULL rather than fabricated.
-    sqlite3.Error propagates so the caller can surface it as an error HTTP.
+
+    Crash-safe: uses ``INSERT OR IGNORE`` so a retry (Razorpay redelivery after
+    a crash between the recovery write and the delivery-status update) treats an
+    already-present recovery as a no-op instead of a conflict — returning False
+    when the row already existed, True when this call inserted it. sqlite3.Error
+    (other than the ignored unique violation) propagates as a persistence failure.
     """
     try:
-        conn.execute(
+        cur = conn.execute(
             """
-            INSERT INTO webhook_recovery_outcomes (
+            INSERT OR IGNORE INTO webhook_recovery_outcomes (
                 delivery_id, payment_link_id, referenced_event_id,
                 amount_paid_paise, currency, payment_id, recovered_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1015,6 +1020,7 @@ def insert_webhook_recovery_outcome(
             ),
         )
         conn.commit()
+        return cur.rowcount > 0
     except sqlite3.Error:
         conn.rollback()
         raise

@@ -127,6 +127,43 @@ def _event_field(payload: dict[str, Any]) -> str:
     return value
 
 
+def _validate_paid_shape(payload: dict[str, Any]) -> None:
+    """Strictly validate the shape of a `payment_link.paid` event.
+
+    A paid event is the only webhook event the closed loop consumes, so its
+    shape is required to be complete and trustworthy: it must carry a real
+    Payment Link id, report status ``paid``, and give the actual non-negative
+    ``amount_paid``. Any structural gap raises ``WebhookPayloadError`` (mapped
+    to a 4xx) so an under-specified paid event is never silently turned into an
+    unmatched audit. Other event types stay structurally lenient because they
+    are recorded-and-ignored, never processed.
+    """
+    link_entity = (payload.get("payload", {}).get("payment_link", {}).get("entity")) or {}
+    if not isinstance(link_entity, dict) or not link_entity:
+        raise WebhookPayloadError(
+            "payment_link.paid event is missing the payment_link.entity"
+        )
+    link_id = link_entity.get("id")
+    if not isinstance(link_id, str) or not link_id.strip():
+        raise WebhookPayloadError(
+            "payment_link.paid event is missing a payment link id"
+        )
+    status = link_entity.get("status")
+    if status != "paid":
+        raise WebhookPayloadError(
+            f"payment_link.paid event must have status 'paid', got {status!r}"
+        )
+    amount_paid = link_entity.get("amount_paid")
+    if (
+        not isinstance(amount_paid, int)
+        or isinstance(amount_paid, bool)
+        or amount_paid < 0
+    ):
+        raise WebhookPayloadError(
+            "payment_link.paid event must carry a non-negative integer amount_paid"
+        )
+
+
 def parse_webhook_payload(raw_body: bytes, delivery_id: str) -> WebhookEvent:
     """Parse and validate a verified webhook raw body into a ``WebhookEvent``.
 
@@ -145,6 +182,9 @@ def parse_webhook_payload(raw_body: bytes, delivery_id: str) -> WebhookEvent:
         raise WebhookPayloadError("webhook payload must be a JSON object")
 
     event_type = _event_field(data)
+
+    if event_type == SUPPORTED_WEBHOOK_EVENT:
+        _validate_paid_shape(data)
 
     link_entity = (
         data.get("payload", {}).get("payment_link", {}).get("entity")

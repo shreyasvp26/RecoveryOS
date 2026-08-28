@@ -128,6 +128,53 @@ function OutcomeStage({ executions, summary }) {
   )
 }
 
+function Phase12Stage({ phase12 }) {
+  if (!phase12) return null
+
+  if (!phase12.closed_loop) {
+    return (
+      <Stage title="Closed-loop verification (Phase 12)" tone="neutral">
+        <EmptyState
+          title="No real payment-link loop"
+          message="This event has no REAL Razorpay payment-link execution, so there is no verified webhook recovery to close the loop on. This view never fabricates a recovered amount."
+        />
+      </Stage>
+    )
+  }
+
+  return (
+    <Stage title="Closed-loop verification (Phase 12)" tone="info">
+      {phase12.payment_links.map((pl) => {
+        const recovered = pl.status === 'recovered'
+        return (
+          <div key={pl.payment_link_id} className="execution-row">
+            <div className="meta-row">
+              <span className="mono">{pl.payment_link_id}</span>
+              <Badge tone={recovered ? 'success' : 'warn'}>
+                {recovered ? 'RECOVERED' : 'WAITING'}
+              </Badge>
+            </div>
+            <div className="kv-grid">
+              <KeyVal
+                k="Recovered via webhook"
+                v={recovered ? formatINR(pl.recovered_amount_paise) : 'awaiting verified payment_link.paid webhook'}
+              />
+              <KeyVal k="Payment" v={pl.payment_id} />
+              <KeyVal k="Recovered at" v={recovered ? formatTime(pl.recovered_at) : null} />
+            </div>
+          </div>
+        )
+      })}
+      {phase12.payment_links.length === 0 && (
+        <EmptyState
+          title="No payment links"
+          message="No real payment-link outcome is recorded for this event."
+        />
+      )}
+    </Stage>
+  )
+}
+
 function TraceTimeline({ trace }) {
   const { event, classification, policy_decisions, executions, attempts, summary } = trace
   const execMeta = EXECUTION_STATE_META[summary.execution_state] || {
@@ -225,6 +272,7 @@ function TraceTimeline({ trace }) {
 
         <ExecutionStage executions={executions} summary={summary} />
         <OutcomeStage executions={executions} summary={summary} />
+        <Phase12Stage phase12={trace.phase12} />
 
         {attempts && attempts.length > 0 && (
           <Stage title="Attempts" tone="neutral">
