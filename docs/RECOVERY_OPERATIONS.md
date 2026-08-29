@@ -43,6 +43,8 @@ Only the most recent policy evaluation drives a row's policy state; the full his
 | `RECOVERED` | a verified webhook confirmed the link was paid | correlated `webhook_recovery_outcomes` row |
 | `FAILED` | the execution attempt itself failed | most recent execution has `status = FAILED` |
 
+A `FAILED` row carries one further distinction in `outcome.state`. Normally it is `FAILED`: nothing happened provider-side and the action can be attempted again. When the attempt was a real Payment Link whose result RecoveryOS could not read, it is `PROVIDER_RESULT_UNKNOWN`: the link may exist, the row is not `actionable`, and the UI reads "Execution uncertain" instead of offering Execute. Neither state ever reports a recovered amount.
+
 `actionable` marks the rows where the authoritative state leaves room to act. It is a UI affordance derived from persisted evidence, **not an authorization**: the server re-derives policy on every execute regardless of what the row said.
 
 ---
@@ -86,14 +88,47 @@ Phase 21 adds `execution_claims`, keyed `PRIMARY KEY (event_id, intervention)`:
 - The claim is taken **immediately before** the executor and is the last thing before the external side effect.
 - The insert is a database-level compare-and-set, so exactly one concurrent caller proceeds. Everyone else is told `execution_in_progress`, `already_executed`, or `provider_result_unknown` with HTTP 409, and nothing is written.
 - A **successful** execution resolves the claim to `completed`, which is defense in depth behind the policy duplicate rule.
-- A **failed** execution releases the claim, so Phase 11 retry-after-failure semantics are unchanged.
-- If the provider was called but the result could not be confirmed or persisted, the claim is parked as `provider_result_unknown` and **never retried automatically**. RecoveryOS would rather say it does not know than fabricate a `FAILED` it cannot substantiate or risk duplicating a real provider-side action.
+- A **known failure** releases the claim, so Phase 11 retry-after-failure semantics are unchanged.
+- An **unknown provider result** keeps the claim as `provider_result_unknown` and is **never retried automatically**. RecoveryOS would rather say it does not know than fabricate a `FAILED` it cannot substantiate or risk duplicating a real provider-side action.
 
 This is a concurrency/idempotency primitive and nothing more. It stores no decision, grants no permission, and cannot make a denied candidate executable — a denied event never reaches the claim at all, because the gate runs first.
 
-### Known limitation
+---
 
-The Phase 11 executor maps a provider timeout to an explicit `FAILED` outcome, because the Razorpay client boundary cannot distinguish "the request never landed" from "the response was lost". Phase 21 does not change that frozen behavior. `PROVIDER_RESULT_UNKNOWN` therefore covers uncertainty that arises **after** the executor returned (a crash or persistence failure between the side effect and its record), not a provider-side timeout. Widening it would require changing the Phase 11 outcome contract and is deliberately out of scope.
+## Known failure vs unknown provider result
+
+The dangerous case is not a provider that says no. It is a provider that may have said yes into a socket that died: Razorpay creates the Payment Link, the response never arrives, and RecoveryOS holds a failure it cannot attribute. Treating that as a plain failure would release the claim and let the next click create a **second real Payment Link** for the same payment.
+
+The Razorpay client boundary therefore classifies every provider-call failure on the one axis that can duplicate money movement:
+
+| Evidence | Classification | Claim | Retry |
+| --- | --- | --- | --- |
+| validation rejected before anything was sent | known failure | released | possible |
+| the client is not configured | known failure | released | possible |
+| Razorpay answered with its `BAD_REQUEST_ERROR` code (SDK `BadRequestError`) — the request was read and refused | known failure | released | possible |
+| timeout, connection reset, truncated response | unknown | **retained** | **blocked** |
+| `ServerError` / `GatewayError` — the request reached Razorpay and something failed after that | unknown | **retained** | **blocked** |
+| a response that does not carry a readable Payment Link id | unknown | **retained** | **blocked** |
+| any exception the boundary does not recognize | unknown | **retained** | **blocked** |
+
+The default is conservative on purpose: a failure is treated as known only when there is positive evidence that the provider refused. Anything else is assumed to have possibly landed.
+
+The distinction is carried in the execution outcome `detail`, prefixed `provider_result_unknown:` — the same convention the codebase already uses for `configuration_missing` and `razorpay_api_unexpected_response`. There is no new table, no new column, and no new status: `status` stays `FAILED` under the Phase 11 contract, because RecoveryOS did not observe a success and will not claim one.
+
+The invariant, stated exactly:
+
+> **Known provider failure** → retry may remain possible.
+> **Ambiguous provider result** → the claim is retained, retry is blocked, and RecoveryOS claims neither success nor failure of the external side effect.
+
+RecoveryOS does **not** automatically retry an ambiguous `REAL_RAZORPAY` Payment Link creation, because doing so could create a duplicate external action. There is no background worker, no scheduled reconciliation and no automatic provider retry anywhere in this path.
+
+This is not distributed exactly-once delivery to Razorpay, and it is not claimed to be. The accurate claim is narrower: **after an ambiguous provider result, RecoveryOS prevents a second execution attempt through its operational path by retaining the durable execution claim.**
+
+### Known limitation: an ambiguous link cannot be reconciled
+
+Phase 12 correlates a paid webhook to an execution outcome **by `payment_link_id`**. An ambiguous attempt never learned the id, so if Razorpay really did create the link and it is later paid, the webhook arrives, is verified, and is recorded as `unmatched` — with no fabricated recovery attached to the event. The row stays `PROVIDER_RESULT_UNKNOWN`.
+
+Resolving such a link means looking it up in the Razorpay dashboard by the event's `reference_id`. Building that reconciliation into the product would be a new capability, and it is deliberately out of scope here: this change is about never creating the second link, not about resolving the first one.
 
 ---
 
@@ -118,6 +153,7 @@ Empty body. Returns the execution result plus the freshly projected row, so the 
 | every candidate denied, or nothing economically worthwhile | 200, `no_action` (the row explains which) |
 | another attempt is in flight, or this already ran | 409 |
 | a previous attempt's provider result is unknown | 409, never auto-retried |
+| this attempt's provider result is unknown | 200, `execution_failed` with `outcome.state = PROVIDER_RESULT_UNKNOWN`; the claim is kept, so every later attempt is 409 |
 | the client supplied authority | 422, nothing executed |
 | no classification | 422, nothing executed |
 | unknown event | 404 |
