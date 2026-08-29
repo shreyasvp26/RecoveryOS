@@ -113,11 +113,37 @@ class AllowedCandidates:
             value = getattr(self, name)
             if not isinstance(value, (list, tuple)):
                 raise OptimizerError(f"{name} must be a sequence")
-            object.__setattr__(self, name, tuple(value))
+            value = tuple(value)
+            # The same input-integrity rules the factory applies, applied here
+            # too: the two construction paths must be indistinguishable, or the
+            # weaker one becomes the contract.
+            seen: set[str] = set()
+            for candidate in value:
+                if (
+                    not isinstance(candidate, str)
+                    or candidate not in CANDIDATE_INTERVENTIONS
+                ):
+                    raise OptimizerError(
+                        f"{name} intervention {candidate!r} is not one of "
+                        f"{sorted(CANDIDATE_INTERVENTIONS)}"
+                    )
+                if candidate in seen:
+                    raise OptimizerError(
+                        f"duplicate {name} intervention {candidate!r}"
+                    )
+                seen.add(candidate)
+            object.__setattr__(self, name, value)
         if not isinstance(self.decisions, Mapping):
             raise OptimizerError("decisions must be a mapping")
 
         for candidate in self.allowed:
+            if candidate == NO_ACTION:
+                # no_action is not executable, so it is never an authorized
+                # economic option; it is the absence of one.
+                raise OptimizerError(
+                    f"{NO_ACTION!r} is not executable and can never be an "
+                    "allowed candidate"
+                )
             if candidate not in self.considered:
                 raise OptimizerError(
                     f"allowed candidate {candidate!r} was never considered"
