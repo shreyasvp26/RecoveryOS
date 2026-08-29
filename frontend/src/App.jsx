@@ -4,18 +4,24 @@ import CommandCenter from './components/CommandCenter.jsx'
 import EventTrace from './components/EventTrace.jsx'
 import PolicyBlocks from './components/PolicyBlocks.jsx'
 import PolicyLab from './components/PolicyLab.jsx'
+import RevenueHealth from './components/RevenueHealth.jsx'
 
 const NAV = [
   { key: 'command', label: 'Command Center', icon: '◧', Component: CommandCenter },
+  { key: 'health', label: 'Revenue Health', icon: '◉', Component: RevenueHealth },
   { key: 'trace', label: 'Event Decision Trace', icon: '◈', Component: EventTrace },
   { key: 'blocks', label: 'Policy & Blocks', icon: '⛔', Component: PolicyBlocks },
   { key: 'lab', label: 'Policy Lab', icon: '⚗', Component: PolicyLab },
 ]
 
 function App() {
-  const [tab, setTab] = useState('command')
-  const active = NAV.find((n) => n.key === tab) || NAV[0]
+  // A screen can hand the operator to another screen with context: Revenue
+  // Health opens an affected payment in the EXISTING Event Decision Trace
+  // rather than growing a second event view of its own.
+  const [route, setRoute] = useState({ tab: 'command', params: {} })
+  const active = NAV.find((n) => n.key === route.tab) || NAV[0]
   const Active = active.Component
+  const navigate = (tab, params = {}) => setRoute({ tab, params })
 
   return (
     <div className="app">
@@ -31,8 +37,8 @@ function App() {
           {NAV.map((n) => (
             <button
               key={n.key}
-              className={`nav__item ${tab === n.key ? 'nav__item--active' : ''}`}
-              onClick={() => setTab(n.key)}
+              className={`nav__item ${route.tab === n.key ? 'nav__item--active' : ''}`}
+              onClick={() => navigate(n.key)}
             >
               <span className="nav__icon">{n.icon}</span>
               <span>{n.label}</span>
@@ -52,7 +58,7 @@ function App() {
       </aside>
 
       <main className="content">
-        <Active />
+        <Active key={active.key} onNavigate={navigate} {...route.params} />
       </main>
     </div>
   )

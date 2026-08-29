@@ -1350,3 +1350,94 @@ button:focus-visible {
   color: var(--text-dim);
   font-size: 11.5px;
 }
+
+/* ===== Revenue Health (Phase 20) ===== */
+.revenue-health {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.incident-list {
+  display: grid;
+  gap: 10px;
+}
+.incident-card {
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+  text-align: left;
+  cursor: pointer;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+}
+.incident-card:hover {
+  background: var(--bg-card-hover);
+}
+.incident-card--active {
+  border-color: var(--brand);
+}
+.incident-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.incident-card__status {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+}
+.incident-card__segment {
+  color: var(--text-hi);
+  font-size: 14px;
+  font-weight: 600;
+}
+.incident-card__metric {
+  font-size: 12.5px;
+}
+.incident-card__money {
+  color: var(--warn);
+  font-size: 17px;
+  font-weight: 600;
+}
+.incident-card__note {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.incident-detail {
+  display: grid;
+  gap: 16px;
+}
+.incident-detail__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.incident-evidence,
+.affected,
+.investigation {
+  display: grid;
+  gap: 14px;
+}
+.tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.tab--active {
+  color: var(--text-hi);
+  border-bottom-color: var(--brand);
+}
