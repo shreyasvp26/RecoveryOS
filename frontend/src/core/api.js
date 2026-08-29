@@ -31,6 +31,36 @@ export async function get(path, params) {
 }
 
 /**
+ * Thin write wrapper for the Policy Lab. Mirrors `get`'s error contract so a
+ * rejected scenario surfaces the server's validation detail verbatim rather
+ * than a generic failure — the server is the only authority on what policy is
+ * valid, and the operator needs to read its actual reason.
+ */
+export async function post(path, body) {
+  let res
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    throw new Error(`Network error reaching the RecoveryOS API at ${API_BASE}${path}`)
+  }
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`
+    try {
+      const payload = await res.json()
+      if (payload && payload.detail) detail = payload.detail
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+/**
  * Generic data-fetching hook exposing the three states every view needs:
  * loading, error, and data (which may itself represent an "empty" result —
  * the view distinguishes empty from failed, and a failed fetch is a real
@@ -66,3 +96,5 @@ export const dashboardSummary = () => get('/dashboard/summary')
 export const listEvents = (params) => get('/events', params)
 export const eventTrace = (eventId) => get(`/events/${encodeURIComponent(eventId)}/trace`)
 export const blockedDecisions = (params) => get('/decisions/blocked', params)
+export const replayScenarios = () => get('/replay/scenarios')
+export const compareReplays = (body) => post('/replay/compare', body)

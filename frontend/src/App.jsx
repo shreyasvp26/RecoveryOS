@@ -3,11 +3,13 @@ import './App.css'
 import CommandCenter from './components/CommandCenter.jsx'
 import EventTrace from './components/EventTrace.jsx'
 import PolicyBlocks from './components/PolicyBlocks.jsx'
+import PolicyLab from './components/PolicyLab.jsx'
 
 const NAV = [
   { key: 'command', label: 'Command Center', icon: '◧', Component: CommandCenter },
   { key: 'trace', label: 'Event Decision Trace', icon: '◈', Component: EventTrace },
   { key: 'blocks', label: 'Policy & Blocks', icon: '⛔', Component: PolicyBlocks },
+  { key: 'lab', label: 'Policy Lab', icon: '⚗', Component: PolicyLab },
 ]
 
 function App() {
