@@ -312,11 +312,17 @@ def build_event_trace(conn, event_id: str) -> dict[str, Any] | None:
     decisions = db.get_policy_decisions_for_event(conn, event_id)
     executions = db.get_execution_outcomes_for_event(conn, event_id)
     attempts = db.get_intervention_attempts_for_event(conn, event_id)
+    # Phase 18: the economic stage between policy and execution. These are the
+    # optimizer's own persisted MODEL ESTIMATES — never benchmark ground truth,
+    # and never recomputed here. An empty list means no V2 economic decision is
+    # recorded for this event, which is reported as such rather than invented.
+    optimizer_decisions = db.get_optimizer_decisions_for_event(conn, event_id)
 
     return {
         "event": event.to_dict(),
         "classification": classification,
         "policy_decisions": decisions,
+        "optimizer_decisions": optimizer_decisions,
         "executions": executions,
         "attempts": attempts,
         "phase12": _summarize_phase12(conn, executions),

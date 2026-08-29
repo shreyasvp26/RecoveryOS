@@ -37,6 +37,118 @@ function KeyVal({ k, v }) {
   )
 }
 
+/**
+ * Format an integer basis-point probability for display (3200 -> "32.00%").
+ *
+ * Display only. The authoritative value is the integer basis points the
+ * backend persisted; nothing here recomputes an economic figure.
+ */
+function formatBps(bps) {
+  if (bps === null || bps === undefined || Number.isNaN(Number(bps))) return '—'
+  const value = Number(bps)
+  const whole = Math.floor(value / 100)
+  const fraction = Math.abs(value % 100)
+  return `${whole}.${String(fraction).padStart(2, '0')}%`
+}
+
+const SELECTION_REASON_TEXT = {
+  max_expected_value:
+    'Highest estimated expected value among the policy-approved candidates. Exact ties fall back to the V1 fixed-priority order, then to alphabetical order, so the choice is deterministic.',
+  no_allowed_candidate:
+    'The deterministic policy gate denied every candidate, so there was no permitted action to evaluate economically.',
+  no_candidates:
+    'The AI diagnosis produced no actionable candidate intervention to evaluate.',
+}
+
+/**
+ * The economic optimization stage: the model estimates the backend persisted
+ * for each policy-approved candidate, and which one it selected.
+ *
+ * Every number is read from the persisted optimizer decision. Nothing is
+ * hardcoded, nothing is recalculated here, and no benchmark ground truth is
+ * available on this surface.
+ */
+function EconomicOptimizationStage({ optimizerDecisions }) {
+  const decisions = Array.isArray(optimizerDecisions) ? optimizerDecisions : []
+
+  if (decisions.length === 0) {
+    return (
+      <Stage title="Economic Optimization" tone="neutral">
+        <EmptyState
+          title="No economic decision recorded"
+          message="No V2 economic optimizer decision is persisted for this event. That is reported as absent rather than reconstructed: the event may predate economic selection, or it may have been decided by the V1 fixed-priority baseline."
+        />
+      </Stage>
+    )
+  }
+
+  const decision = decisions[decisions.length - 1]
+  const evaluations = Array.isArray(decision.evaluations) ? decision.evaluations : []
+  const selected = decision.selected_intervention
+  const actionable = selected && selected !== 'no_action'
+
+  return (
+    <Stage title="Economic Optimization" tone={actionable ? 'info' : 'warn'}>
+      <div className="meta-row">
+        <Badge tone="info">MODEL ESTIMATE</Badge>
+        <span className="meta-line">decided {formatTime(decision.decided_at)}</span>
+      </div>
+
+      {evaluations.length === 0 ? (
+        <EmptyState
+          title="No candidate was economically evaluated"
+          message="The policy gate approved no candidate, so the optimizer had nothing to price. It never evaluates or resurrects a denied intervention."
+        />
+      ) : (
+        <table className="econ-table">
+          <thead>
+            <tr>
+              <th>Candidate</th>
+              <th>Est. recovery p</th>
+              <th>Est. recovered</th>
+              <th>Est. cost</th>
+              <th>Modeled friction</th>
+              <th>Est. expected value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {evaluations.map((row) => (
+              <tr
+                key={row.intervention}
+                className={row.intervention === selected ? 'econ-table__row--selected' : ''}
+              >
+                <td className="mono">{row.intervention}</td>
+                <td className="mono">{formatBps(row.estimated_probability_bps)}</td>
+                <td className="mono">{formatINR(row.expected_recovered_value_paise)}</td>
+                <td className="mono">{formatINR(row.intervention_cost_paise)}</td>
+                <td className="mono">{formatINR(row.friction_cost_paise)}</td>
+                <td className="mono">{formatINR(row.expected_value_paise)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="kv-grid">
+        <KeyVal k="Selected" v={selected} />
+        <KeyVal
+          k="Considered / policy-approved"
+          v={`${(decision.candidates_considered || []).length} / ${(decision.allowed_candidates || []).length}`}
+        />
+      </div>
+      <p className="stage__text">
+        Why: {SELECTION_REASON_TEXT[decision.selection_reason] || decision.selection_reason}
+      </p>
+      <p className="stage__text">
+        These are RecoveryOS model estimates computed from modeled costs and
+        modeled friction, not measured recovery rates and not a simulated
+        benchmark outcome. Expected value = estimated recovered amount −
+        estimated intervention cost − modeled friction.
+      </p>
+    </Stage>
+  )
+}
+
 function ExecutionStage({ executions, summary }) {
   const state = summary.execution_state
 
@@ -184,6 +296,7 @@ function TraceTimeline({ trace }) {
     event = {},
     classification,
     policy_decisions = [],
+    optimizer_decisions = [],
     executions = [],
     attempts = [],
     summary = {},
@@ -281,6 +394,7 @@ function TraceTimeline({ trace }) {
           ))}
         </Stage>
 
+        <EconomicOptimizationStage optimizerDecisions={optimizer_decisions} />
         <ExecutionStage executions={executions} summary={summary} />
         <OutcomeStage executions={executions} summary={summary} />
         <Phase12Stage phase12={trace.phase12} />
