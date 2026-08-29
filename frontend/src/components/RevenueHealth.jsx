@@ -118,7 +118,7 @@ function WhatChanged({ incident }) {
   )
 }
 
-function AffectedEvents({ incidentId, onOpenTrace }) {
+function AffectedEvents({ incidentId, onOpenTrace, onOpenOperations }) {
   const { status, data, error } = useAsync((_signal) => incidentEvents(incidentId), [incidentId])
 
   if (status === 'loading') return <LoadingBlock label="Loading affected payments…" />
@@ -133,6 +133,9 @@ function AffectedEvents({ incidentId, onOpenTrace }) {
         {data.count} payments in {data.segment.label} stayed unrecovered in the
         observation window. Selecting one opens its existing Event Decision Trace.
       </p>
+      <button className="btn btn--ghost" onClick={onOpenOperations}>
+        Open Recovery Operations
+      </button>
       <div className="table-wrap">
         <table className="data-table">
         <thead>
@@ -235,7 +238,7 @@ function PolicyInvestigation({ incidentId }) {
   )
 }
 
-function IncidentDetail({ incident, onOpenTrace }) {
+function IncidentDetail({ incident, onOpenTrace, onOpenOperations }) {
   const [tab, setTab] = useState('evidence')
   const contributor = incident.evidence.leading_observed_contributor
 
@@ -384,7 +387,11 @@ function IncidentDetail({ incident, onOpenTrace }) {
       )}
 
       {tab === 'events' && (
-        <AffectedEvents incidentId={incident.incident_id} onOpenTrace={onOpenTrace} />
+        <AffectedEvents
+          incidentId={incident.incident_id}
+          onOpenTrace={onOpenTrace}
+          onOpenOperations={onOpenOperations}
+        />
       )}
       {tab === 'policy' && <PolicyInvestigation incidentId={incident.incident_id} />}
     </div>
@@ -406,6 +413,12 @@ export default function RevenueHealth({ onNavigate }) {
 
   const openTrace = (eventId) => {
     if (onNavigate) onNavigate('trace', { eventId })
+  }
+
+  // "What is going wrong?" hands over to "what needs attention?". Revenue
+  // Health stays analytical; the operational work happens in its own screen.
+  const openOperations = () => {
+    if (onNavigate) onNavigate('ops')
   }
 
   return (
@@ -450,7 +463,13 @@ export default function RevenueHealth({ onNavigate }) {
             ))}
           </div>
           <Card className="incident-shell">
-            {selected && <IncidentDetail incident={selected} onOpenTrace={openTrace} />}
+            {selected && (
+              <IncidentDetail
+                incident={selected}
+                onOpenTrace={openTrace}
+                onOpenOperations={openOperations}
+              />
+            )}
           </Card>
         </div>
       )}

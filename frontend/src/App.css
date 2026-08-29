@@ -1441,3 +1441,61 @@ button:focus-visible {
   color: var(--text-hi);
   border-bottom-color: var(--brand);
 }
+
+/* --- Recovery Operations Center (Phase 21) --- */
+.ops-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.ops-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ops-count {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+  font-size: 11px;
+}
+.ops-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+.ops-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.ops-linkish {
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.ops-linkish:hover {
+  color: var(--brand);
+}
+.ops-waiting {
+  color: var(--warn);
+  font-size: 12px;
+}
+.ops-recovered {
+  color: var(--success);
+  font-size: 12px;
+  font-weight: 600;
+}
+.ops-detail-row td {
+  background: rgba(255, 255, 255, 0.02);
+}
+.ops-notice--error {
+  color: var(--danger);
+}
