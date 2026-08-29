@@ -339,6 +339,95 @@ def test_the_optimizer_refuses_a_candidate_set_not_derived_from_policy() -> None
         )
 
 
+# ---------------------------------------------------------------------------
+# The authorization invariant holds on EVERY construction path
+#
+# Regression coverage for the Phase 16 repair: AllowedCandidates used to be a
+# plain frozen dataclass, so bypassing from_policy_decisions and constructing
+# it directly with a fabricated `allowed` tuple let a policy-denied candidate
+# reach the optimizer and be selected. The invariant was enforced by the single
+# call site, not by the type. It is now re-validated on construction.
+# ---------------------------------------------------------------------------
+
+
+def test_a_fabricated_allowed_set_with_no_decisions_is_rejected() -> None:
+    with pytest.raises(OptimizerError, match="no authoritative"):
+        AllowedCandidates(
+            considered=("payment_link",), allowed=("payment_link",), decisions={}
+        )
+
+
+def test_a_fabricated_allowed_set_backed_by_a_denial_is_rejected() -> None:
+    """The exact bypass: hand-build the gate around a DENIED candidate."""
+    with pytest.raises(OptimizerError, match="not authorized by policy"):
+        AllowedCandidates(
+            considered=("payment_link",),
+            allowed=("payment_link",),
+            decisions={"payment_link": _deny("payment_link", RULE_FRAUD)},
+        )
+
+
+def test_an_allow_for_one_intervention_cannot_authorize_another() -> None:
+    with pytest.raises(OptimizerError, match="unrelated intervention"):
+        AllowedCandidates(
+            considered=("payment_link",),
+            allowed=("payment_link",),
+            decisions={"payment_link": _allow("retry_delayed")},
+        )
+
+
+def test_an_allowed_candidate_must_also_have_been_considered() -> None:
+    with pytest.raises(OptimizerError, match="never considered"):
+        AllowedCandidates(
+            considered=("reminder",),
+            allowed=("payment_link",),
+            decisions={"payment_link": _allow("payment_link")},
+        )
+
+
+def test_an_allow_bound_to_a_different_event_authorizes_nothing() -> None:
+    """Authorization is per (event, intervention), never transferable."""
+    other_event_allow = PolicyDecision(
+        event_id="evt_someone_else",
+        proposed_intervention="payment_link",
+        allowed=True,
+        denial_reason=None,
+        policy_rules_applied=("fraud_check_passed",),
+        evaluated_at=EVALUATED_AT,
+    )
+    allowed = AllowedCandidates(
+        considered=("payment_link",),
+        allowed=("payment_link",),
+        decisions={"payment_link": other_event_allow},
+    )
+    with pytest.raises(OptimizerError, match="belongs to event"):
+        _optimizer(StubEstimator({"payment_link": 9_000})).select(
+            _event(), _classification(("payment_link",)), allowed
+        )
+
+
+def test_the_authorizing_decision_is_carried_and_retrievable() -> None:
+    allowed = AllowedCandidates.from_policy_decisions(
+        ("retry_delayed", "payment_link"),
+        {
+            "retry_delayed": _allow("retry_delayed"),
+            "payment_link": _deny("payment_link", RULE_FRAUD),
+        },
+    )
+    assert allowed.authorizing_decision("retry_delayed").allowed is True
+    with pytest.raises(OptimizerError, match="no authoritative ALLOW"):
+        allowed.authorizing_decision("payment_link")
+
+
+def test_the_carried_decisions_cannot_be_mutated_after_construction() -> None:
+    """A caller must not be able to widen authorization post hoc."""
+    allowed = AllowedCandidates.from_policy_decisions(
+        ("retry_delayed",), {"retry_delayed": _allow("retry_delayed")}
+    )
+    with pytest.raises(TypeError):
+        allowed.decisions["payment_link"] = _allow("payment_link")  # type: ignore[index]
+
+
 def test_mixed_allowed_and_denied_selects_only_from_the_allowed() -> None:
     decision = _select(
         ("retry_immediate", "retry_delayed", "payment_link", "reminder"),

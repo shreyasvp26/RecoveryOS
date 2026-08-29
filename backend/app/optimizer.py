@@ -44,6 +44,7 @@ executor call, and no import of the benchmark or hidden outcome model.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from .classification import CANDIDATE_INTERVENTIONS, ClassificationResult
@@ -88,14 +89,65 @@ class OptimizerError(Exception):
 class AllowedCandidates:
     """The policy-authorized candidate set — the optimizer's only input gate.
 
-    Constructed exclusively from authoritative ``PolicyDecision`` objects,
-    which this type filters itself. A denied candidate, a candidate with no
-    decision, a decision authorizing a different intervention, and
-    ``no_action`` are all excluded here, before the optimizer ever runs.
+    The authorized set is derived from authoritative ``PolicyDecision``
+    objects, which this type filters itself. A denied candidate, a candidate
+    with no decision, a decision authorizing a different intervention, and
+    ``no_action`` are all excluded before the optimizer ever runs.
+
+    The invariant is enforced on EVERY construction path, not just on the
+    ``from_policy_decisions`` convenience path: the authorizing decisions are
+    carried on the value and re-validated in ``__post_init__``. Constructing
+    this type directly with a fabricated ``allowed`` tuple therefore fails
+    unless the caller can also present a genuine ALLOW decision bound to that
+    exact intervention — at which point the candidate is authorized by
+    definition. There is no way to present the optimizer with a candidate that
+    policy did not authorize.
     """
 
     considered: tuple[str, ...]
     allowed: tuple[str, ...]
+    decisions: Mapping[str, PolicyDecision]
+
+    def __post_init__(self) -> None:
+        for name in ("considered", "allowed"):
+            value = getattr(self, name)
+            if not isinstance(value, (list, tuple)):
+                raise OptimizerError(f"{name} must be a sequence")
+            object.__setattr__(self, name, tuple(value))
+        if not isinstance(self.decisions, Mapping):
+            raise OptimizerError("decisions must be a mapping")
+
+        for candidate in self.allowed:
+            if candidate not in self.considered:
+                raise OptimizerError(
+                    f"allowed candidate {candidate!r} was never considered"
+                )
+            decision = self.decisions.get(candidate)
+            if not isinstance(decision, PolicyDecision):
+                raise OptimizerError(
+                    f"allowed candidate {candidate!r} carries no authoritative "
+                    "PolicyDecision"
+                )
+            if decision.proposed_intervention != candidate:
+                raise OptimizerError(
+                    f"decision for {candidate!r} authorizes an unrelated "
+                    f"intervention {decision.proposed_intervention!r}"
+                )
+            if decision.allowed is not True:
+                raise OptimizerError(
+                    f"candidate {candidate!r} is not authorized by policy "
+                    "and can never be offered to the optimizer"
+                )
+        object.__setattr__(self, "decisions", MappingProxyType(dict(self.decisions)))
+
+    def authorizing_decision(self, intervention: str) -> PolicyDecision:
+        """Return the ALLOW decision backing an authorized intervention."""
+        decision = self.decisions.get(intervention)
+        if not isinstance(decision, PolicyDecision) or decision.allowed is not True:
+            raise OptimizerError(
+                f"no authoritative ALLOW decision exists for {intervention!r}"
+            )
+        return decision
 
     @classmethod
     def from_policy_decisions(
@@ -154,7 +206,11 @@ class AllowedCandidates:
             if decision.allowed:
                 allowed.append(candidate)
 
-        return cls(considered=tuple(considered), allowed=tuple(allowed))
+        return cls(
+            considered=tuple(considered),
+            allowed=tuple(allowed),
+            decisions=decisions,
+        )
 
 
 @dataclass(frozen=True)
@@ -250,6 +306,14 @@ class EconomicInterventionOptimizer:
 
         evaluations: list[CandidateEvaluation] = []
         for intervention in allowed_candidates.allowed:
+            # An ALLOW is authorization for ONE intervention on ONE event; a
+            # decision issued for a different event authorizes nothing here.
+            decision = allowed_candidates.authorizing_decision(intervention)
+            if decision.event_id != event.event_id:
+                raise OptimizerError(
+                    f"decision authorizing {intervention!r} belongs to event "
+                    f"{decision.event_id!r}, not {event.event_id!r}"
+                )
             probability = self._estimator.estimate(
                 event, classification, intervention
             )
