@@ -275,7 +275,11 @@ export default function CommandCenter() {
 
       <Card
         title="Simulated Benchmark Comparison"
-        subtitle="Phase 9 three-strategy evaluation across the same event set"
+        subtitle={
+          String(bench?.methodology || '').startsWith('phase17')
+            ? 'Phase 17 five-arm signal-bearing V2 validation across the same event set'
+            : 'Phase 9 three-strategy evaluation across the same event set'
+        }
         action={<Badge tone="warn">SIMULATED</Badge>}
       >
         <BenchmarkPanel bench={bench} />
