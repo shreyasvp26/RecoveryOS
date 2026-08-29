@@ -220,7 +220,15 @@ replay metrics, scenario comparison, event-level decision deltas
 
 This is deliberately **not** a simulator. `app/replay.py` re-implements no decision: classification comes from the benchmark's deterministic classifier, authorization from the same `PolicyEngine`, selection from the same `select_for_strategy` the production execution service calls, execution from the benchmark's `SimulatedExecutor`, and outcomes from the same `HiddenWorld`. A scenario (`app/policy_scenario.py`) is a validated `PolicyConfig` plus identity — *data*, not a branch. There is no `if scenario == "aggressive"` in the decision path.
 
-Four properties make it trustworthy:
+Three policies are kept strictly apart, because conflating them produces confidently wrong answers:
+
+- the **active runtime policy** (`config.build_policy_config()`) is what this deployment gates real payments with, and the lab's **Current** scenario is a read-only snapshot of it — if an operator has set a `POLICY_*` override, the lab reports it, because a what-if answer built on the shipped defaults would describe a system nobody is running;
+- the **canonical benchmark policy** (`benchmark_config.frozen_policy_config`) stays pinned to those defaults, since a benchmark whose safety configuration depends on the launching shell is not reproducible;
+- a **replay scenario policy** exists only for the duration of a simulation.
+
+The first two coincide on an unconfigured install and are permitted to diverge, so each scenario carries a `source` (`active_runtime`, `derived_from_active_runtime`, `operator_defined`) and the UI shows it. Reproducibility comes from identity rather than from ignoring the environment: the `policy_fingerprint` digests the parameters actually used.
+
+Four further properties make it trustworthy:
 
 - **Simulation only, structurally.** Replay does not import the Razorpay client, the production executor or the execution service, and `SimulatedExecutor` has no provider dependency — both verified by AST inspection of imports rather than by grepping prose. Razorpay call count, Payment Link creations and database writes are all asserted to be zero. The active policy, historical audit records and canonical benchmark records are never mutated.
 - **Safety is not configurable.** Fraud, terminal-failure and duplicate protection have no setting at all; a custom scenario naming them is rejected with a 422. "Aggressive" means more permissive bounded thresholds, never less safety.
