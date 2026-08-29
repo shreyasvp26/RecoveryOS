@@ -356,3 +356,25 @@ The naive baseline loses badly here for two compounding reasons: `retry_immediat
 ## 18. Reporting rule
 
 Any revenue figure produced by either benchmark **must be labeled as a simulated evaluation result** and never presented as production Razorpay revenue. The batch benchmark and the live Razorpay Test Mode verification described in the README are entirely separate exercises and their numbers must never be combined.
+
+## 19. Phase 20 uses this evidence; it is not a benchmark arm
+
+The Phase 20 Revenue Health detector (`docs/REVENUE_HEALTH.md`) is a **consumer**
+of simulated evaluation evidence, not a new strategy, world or metric family:
+
+- **Where its recovery evidence comes from.** The durable pipeline records
+  execution, not per-event recovery, so the detector reads outcomes from the
+  Phase 19 replay of the **active** policy over the persisted events. Nothing
+  about the Phase 17 canonical run, the hidden world, the seeds or the frozen
+  configuration is changed, read for tuning, or re-published by it.
+- **What it may read.** Only the observed outcome — recovered (boolean) and the
+  recovered amount (paise). `true_probability_bps`, `true_ev_paise`, the oracle
+  option tables and hidden-world parameters are never read by detection and
+  never appear in an incident.
+- **Metric compatibility.** It reuses the canonical recovery-rate definition
+  (recovered ÷ scored events), expressed in integer basis points, and defines no
+  competing recovery metric. Its one new figure, **simulated revenue at risk**,
+  is explicitly a *modelled* estimate — the observed recovery-rate gap applied
+  to the current window's payment value — and falls under §18: it is a simulated
+  evaluation figure and must never be presented as production revenue, merchant
+  loss, or confirmed recoverable money.

@@ -239,6 +239,34 @@ Because the configurable rules are history-dependent, replay accumulates policy 
 
 Exposed additively as `GET /replay/scenarios` and `POST /replay/compare`, and rendered by a new read-only **Policy Lab** screen. Nothing is persisted; no table was added. Every figure is labelled `SIMULATED`. See `docs/POLICY_REPLAY.md` for the scenario derivations, the metric definitions and the honest limitations — notably that on the canonical workload the spend cap never binds and the cooldown rarely does, which the lab reports rather than disguises.
 
+### The Phase 20 revenue-degradation detector
+
+Phases 1–19 answer *what should RecoveryOS do about this failed payment?* Phase 20 adds the system-level question above that loop — *where is recovery performance itself degrading, what is that worth, and which payment decisions does it cover?* — as an **analytical layer** that never enters the classifier, the policy engine, the optimizer or the executor.
+
+```
+persisted PaymentEvents + observed evaluated outcomes
+     ↓
+two equal-width windows (current vs the immediately preceding 28 days)
+     ↓
+deterministic aggregation per segment → minimum-sample gate
+     ↓
+recovery-rate degradation threshold → modelled impact → severity
+     ↓
+INCIDENT → affected events → existing Event Decision Trace
+                           → existing Phase 19 Policy Lab replay
+```
+
+The methodology is intentionally simple and stated in full: the baseline is the immediately preceding window of the same width, anchored on the **latest observed event timestamp** rather than the wall clock. There is no forecasting, no EWMA, no learned baseline and no anomaly model, and no LLM participates in whether an incident exists, its metrics, its severity or its contributor.
+
+Four properties make it defensible:
+
+- **Pure and reproducible.** `app/incidents.py` is a pure function of (events, evaluated outcomes, configuration) — no database, no HTTP, no clock, no randomness. Incident ids are blake2b digests of the methodology, the configuration, both windows, the segment and the observed metrics, so the same dataset always produces the same incidents in the same order. Incidents are **derived, never stored**: no incidents table, no duplicated events, no schema change.
+- **Honest denominators and integer money.** Recovery rate reuses the canonical definition (recovered ÷ *scored* events) in integer basis points; events with no evaluated outcome are excluded rather than counted as misses. Simulated revenue at risk is `max(0, degradation) × current-window payment value ÷ 10,000` in integer paise — a **modelled** estimate, labelled as such everywhere, never production revenue or merchant loss.
+- **Deviation proposes, impact confirms.** Severity is `min(deviation level, highest impact-qualified level)`, so a large percentage swing over a handful of low-value payments stays LOW instead of becoming CRITICAL on a tiny denominator. The minimum-sample rule (5 evaluated outcomes in each window) is an eligibility gate and never a score.
+- **Ground truth stays out, and nothing executes.** Recovery evidence comes from the Phase 19 replay of the *active* policy over the persisted events, projected onto a contract that carries only an event id, a boolean and an amount — there is no field a hidden probability could travel in. No Phase 20 module imports the Razorpay client or any HTTP client, writes to the database, or mutates the active policy or the benchmark records.
+
+Exposed additively as `GET /incidents`, `GET /incidents/{id}`, `GET /incidents/{id}/events` and `POST /incidents/{id}/replay`, and rendered by a read-only **Revenue Health** screen. The affected-events view returns the locked `PaymentEvent` contract plus a pointer into the existing `GET /events/{id}/trace`, and the replay endpoint hands the affected subset to the frozen Phase 19 `replay_scenarios` — so Phase 20 adds neither a second event view nor a second replay engine. See `docs/REVENUE_HEALTH.md` for the boundary semantics, the severity table and the honest limitations.
+
 ### The bounded executor (Phase 7)
 
 The executor's API is effectively `execute(event, intervention, policy_decision, razorpay_client)`. It is not a second policy engine:

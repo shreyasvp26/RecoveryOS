@@ -39,7 +39,7 @@ recoveryos/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, PITCH_NOTES.md, V1_BASELINE.md
+├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
 ├── README.md
 └── .gitignore
 ```
@@ -120,7 +120,7 @@ The offline demo needs no Razorpay credentials and is fully deterministic:
 
 ```bash
 cd backend
-python -m app.populate --seed 42 --count 60          # deterministic demo dataset (SIMULATED execution)
+python -m app.populate --seed 42 --count 500         # deterministic demo dataset (SIMULATED execution)
 python -m app.benchmark_store --seed 42 --count 500  # persist the canonical benchmark run summary
 uvicorn app.main:app                                 # start the API on :8000
 
@@ -129,6 +129,8 @@ npm run dev                                          # Vite dev server (proxies 
 ```
 
 To reset, stop the API, delete the SQLite file, and re-run the same two commands — `app.populate` is deterministic and idempotent, so the persisted chain reproduces exactly.
+
+**Why `--count 500`.** The Phase 20 Revenue Health screen compares the last 28 days of the dataset against the preceding 28 days per segment, and only compares a segment with at least five evaluated outcomes in each window. A smaller workload is legitimate but will mostly fail that sample gate, and the screen will honestly report that no degradation was detected rather than lowering the bar.
 
 The **live** Razorpay loop additionally requires Test Mode credentials, a webhook secret, a public tunnel whose hostname is registered in the Razorpay Dashboard, and a manual browser payment. See the limitations below before attempting it.
 
@@ -218,6 +220,20 @@ uvicorn app.main:app                              # start the API
 ## Phase history
 
 The sections below are a **historical record** of how each capability was built, retained for provenance and audit. They describe the phase in which a capability landed, not the current status of the repository — for current status see the top of this file.
+
+### Phase 20 — Revenue Health: incident-level degradation detection
+
+```bash
+cd backend
+python -m pytest                                     # full suite (Phase 20 tests included)
+curl -s localhost:8000/incidents | head              # detected incidents, worst modelled impact first
+```
+
+- **The system-level question, answered deterministically** — where recovery performance itself is degrading, what the modelled impact is, and which payment decisions it covers. `app/incidents.py` compares the last 28 days of the persisted workload against the immediately preceding 28 days per segment (`bank`, `payment_method`, `failure_reason`, `bank + payment_method`), requires at least 5 evaluated outcomes in each window, and raises an incident at a **15 percentage-point** recovery-rate fall. No forecasting, no anomaly model, no LLM, and no alerting or incident-workflow system.
+- **Pure, derived, reproducible** — detection is a pure function of (events, evaluated outcomes, configuration) with no clock and no randomness; incident ids are deterministic digests. Incidents are **derived on every request, never stored**: no incidents table, no duplicated events, no schema change.
+- **Honest money** — recovery rate reuses the canonical definition (recovered ÷ *scored* events) in integer basis points, and **simulated revenue at risk** is the observed gap applied to the current window's payment value in integer paise. It is a **modelled estimate** of simulated evaluation evidence — never merchant loss, provider loss, or production revenue, and labelled as such in the API and the UI.
+- **Reuses the existing control plane** — recovery evidence comes from the Phase 19 replay of the *active* policy (the durable pipeline records execution, not per-event recovery); affected payments link into the existing Event Decision Trace; and `POST /incidents/{id}/replay` hands that exact subset to the frozen Phase 19 `replay_scenarios`. No second event view and no second replay engine.
+- **Safe by construction** — no Phase 20 module imports the Razorpay client or an HTTP client, writes to the database, or mutates the active policy or benchmark records; no hidden ground truth reaches detection or any response. See `docs/REVENUE_HEALTH.md` for the methodology, the severity table and the limitations.
 
 ### Phase 10 — Recovery Command Center & Decision Trace
 
