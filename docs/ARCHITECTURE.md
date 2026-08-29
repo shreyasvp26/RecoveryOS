@@ -24,7 +24,7 @@ Razorpay Test Mode
   → Event Context + Customer History
   → AI Reasoning
   → Deterministic Policy Gate
-  → Intervention Selection
+  → Intervention Selection (V1 fixed priority; V2 economic optimizer since Phase 16)
   → Real Razorpay Test Action OR Controlled Simulation
   → Outcome Engine
   → Append-only Audit Trail
@@ -135,6 +135,28 @@ retry_delayed  >  payment_link  >  reminder  >  alternate_method_prompt  >  retr
 
 When no actionable candidate is authorized, the explicit result is `no_action` — which is never executed and never simulated. The selector uses no LLM reasoning, no randomness, no recovery predictions, and no economic optimization.
 
+### The V2 economic optimizer (Phase 16)
+
+Phase 16 replaced fixed-priority selection **in production** with expected-value selection. `app/selector.py` is unchanged and still used, both as the pinned benchmark strategy and as the V2 tie-breaker.
+
+```
+Allowed Candidates  →  Recovery Probability Estimator  →  Economic Scoring  →  Best Candidate
+```
+
+The policy gate still runs first and remains authoritative. `AllowedCandidates.from_policy_decisions` derives the authorized set from the authoritative `PolicyDecision` objects, and `EconomicInterventionOptimizer.select` accepts nothing else — so a policy-denied candidate is **structurally** unable to reach economic evaluation, however valuable it looks. The optimizer reads only `decision.allowed`; it never sees a denial reason and never re-implements a policy rule.
+
+For each allowed candidate, using integer paise and integer basis points throughout:
+
+```
+expected_value = probability × amount − intervention_cost − friction_cost
+```
+
+Selection is `argmax(expected_value)`, with the V1 priority ordering used only to break exact ties and the intervention name as a final stable term. The result is invariant under candidate reordering, and `no_action` semantics are preserved unchanged.
+
+The optimizer selects; the existing bounded executor still executes. It performs no execution, no persistence, no LLM call, no network access, and has no benchmark or hidden-ground-truth dependency.
+
+Full specification, coefficients, assumptions, and limitations: [ECONOMIC_MODEL.md](ECONOMIC_MODEL.md). Note that V2 probabilities, costs, and friction are RecoveryOS controlled evaluation assumptions, and **Phase 16 does not claim improved recovery performance**.
+
 ### The bounded executor (Phase 7)
 
 The executor's API is effectively `execute(event, intervention, policy_decision, razorpay_client)`. It is not a second policy engine:
@@ -199,7 +221,7 @@ This is a financial safety boundary; it never fails open. Malformed input, an in
 
 ### Policy vs selection boundary
 
-Policy asks *"is this candidate permitted?"* The V1 selector then asks *"which authorized candidate has the highest locked priority?"* Neither computes expected value, recovery probability, or cost/recovery ranking, and neither chooses the "best" intervention economically — that is a later rescue but is intentionally out of scope for V1.
+Policy asks *"is this candidate permitted?"* Selection then asks *"which authorized candidate should we run?"* — answered by locked priority in V1, and by expected value in V2 (Phase 16). Policy itself never computes expected value, recovery probability, or cost ranking, and selection never authorizes: it can only ever narrow the set policy already approved.
 
 ### Time handling
 
