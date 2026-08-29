@@ -8,6 +8,7 @@ Phase 7, updated in Phase 16 — wires the chain for one event:
         -> policy-allowed candidate set
         -> deterministic economic selection (highest expected value)
         -> persist the economic decision (Phase 18 audit record)
+        -> durable execution claim (Phase 21 concurrency boundary)
         -> bounded execution
         -> persist outcome + attempt
         -> explicit result
@@ -23,17 +24,27 @@ system state completely determines whether, and what, executes. No policy
 decision is fabricated, and a denied candidate can never be selected or
 executed. This service never calls the LLM, never benchmarks, and never
 decides recoverability.
+
+Phase 21 added one thing only: a durable claim taken immediately before the
+executor runs. The deterministic gate blocks sequential duplicates from
+persisted history, but two simultaneous requests can both read that history
+before either writes its attempt, so both would be authorized and both would
+reach the provider. The claim is a concurrency primitive, not authorization:
+it decides WHICH of several already-authorized attempts may cross the external
+side-effect boundary, and it can never make a denied candidate executable.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Mapping
 
 from .db import (
+    claim_execution,
     get_classification_result,
+    get_execution_claim,
     get_optimizer_decision,
     get_payment_event,
     get_policy_decision,
@@ -42,6 +53,8 @@ from .db import (
     insert_intervention_attempt,
     insert_optimizer_decision,
     insert_policy_decision,
+    release_execution_claim,
+    resolve_execution_claim,
 )
 from .classification import ClassificationResult
 from .executor import BoundedExecutor, ExecutionOutcome
@@ -68,6 +81,25 @@ STATUS_MISSING_CLASSIFICATION = "missing_classification"
 STATUS_NO_ACTION = "no_action"
 STATUS_EXECUTION_SUCCESS = "execution_success"
 STATUS_EXECUTION_FAILED = "execution_failed"
+
+# Phase 21 concurrency outcomes. None of these is a decision: each reports that
+# the single permitted attempt for this logical action belongs to someone else,
+# has already happened, or ended in a state RecoveryOS cannot confirm.
+STATUS_EXECUTION_IN_PROGRESS = "execution_in_progress"
+STATUS_ALREADY_EXECUTED = "already_executed"
+STATUS_PROVIDER_RESULT_UNKNOWN = "provider_result_unknown"
+
+CLAIM_STATUS_HELD = "claimed"
+CLAIM_STATUS_COMPLETED = "completed"
+CLAIM_STATUS_PROVIDER_RESULT_UNKNOWN = "provider_result_unknown"
+
+# Recorded when the provider was called but RecoveryOS could not record what
+# came back. The side effect may exist, so the claim is never released.
+PROVIDER_RESULT_UNKNOWN_DETAIL = (
+    "the provider was called but the result could not be confirmed or "
+    "persisted; a side effect may exist, so this action is never retried "
+    "automatically"
+)
 
 # Which selection mechanism decides among the policy-allowed candidates.
 # Both run strictly AFTER the policy gate and both choose only from candidates
@@ -145,6 +177,54 @@ def _persist_optimizer_decision(
             raise
         return existing
     return record
+
+
+def _claim_conflict_result(
+    conn: sqlite3.Connection,
+    event_id: str,
+    intervention: str,
+    optimizer_decision: OptimizerDecision | None,
+) -> ExecutionServiceResult:
+    """Report why this attempt must not proceed, from the existing claim.
+
+    Nothing is executed and nothing is written: another attempt owns the single
+    permitted crossing of the side-effect boundary for this logical action.
+    """
+    existing = get_execution_claim(conn, event_id, intervention)
+    if existing is not None and existing["status"] == CLAIM_STATUS_PROVIDER_RESULT_UNKNOWN:
+        status = STATUS_PROVIDER_RESULT_UNKNOWN
+    elif existing is not None and existing["status"] == CLAIM_STATUS_HELD:
+        status = STATUS_EXECUTION_IN_PROGRESS
+    else:
+        status = STATUS_ALREADY_EXECUTED
+    return ExecutionServiceResult(
+        status=status,
+        event_id=event_id,
+        selected_intervention=intervention,
+        optimizer_decision=optimizer_decision,
+    )
+
+
+def _park_claim_as_unknown(
+    conn: sqlite3.Connection, event_id: str, intervention: str, resolved_at: str
+) -> None:
+    """Mark a claim unknown, never masking the original failure.
+
+    Recording the uncertainty must not replace the exception that caused it, so
+    a failure to write the claim status is deliberately swallowed here and the
+    original error continues to propagate.
+    """
+    try:
+        resolve_execution_claim(
+            conn,
+            event_id,
+            intervention,
+            CLAIM_STATUS_PROVIDER_RESULT_UNKNOWN,
+            resolved_at,
+            PROVIDER_RESULT_UNKNOWN_DETAIL,
+        )
+    except sqlite3.Error:
+        pass
 
 
 def select_for_strategy(
@@ -252,20 +332,54 @@ def execute_event(
         )
 
     decision = decisions[selected]
-    outcome = BoundedExecutor().execute(event, selected, decision, razorpay_client)
 
-    insert_execution_outcome(conn, outcome)
-    insert_intervention_attempt(
-        conn,
-        InterventionAttempt(
-            event_id=event.event_id,
-            intervention=selected,
-            customer_id=event.customer_id,
-            cost_paise=config.intervention_cost(selected),
-            attempted_at=outcome.reported_at,
-            status="successful" if outcome.status == "SUCCESS" else "failed",
-        ),
-    )
+    # The concurrency boundary, and the LAST thing before the external side
+    # effect. Policy has already authorized this candidate; the claim decides
+    # only WHICH of several simultaneous authorized attempts may proceed.
+    claimed_at = evaluation_time.astimezone(timezone.utc).isoformat()
+    if not claim_execution(conn, event.event_id, selected, claimed_at):
+        return _claim_conflict_result(conn, event_id, selected, optimizer_decision)
+
+    try:
+        outcome = BoundedExecutor().execute(event, selected, decision, razorpay_client)
+    except BaseException:
+        # The executor maps controlled provider failures to an explicit FAILED
+        # outcome, so reaching here means something escaped it entirely and the
+        # provider state is genuinely unknown. Park the claim rather than guess.
+        _park_claim_as_unknown(conn, event.event_id, selected, claimed_at)
+        raise
+
+    try:
+        insert_execution_outcome(conn, outcome)
+        insert_intervention_attempt(
+            conn,
+            InterventionAttempt(
+                event_id=event.event_id,
+                intervention=selected,
+                customer_id=event.customer_id,
+                cost_paise=config.intervention_cost(selected),
+                attempted_at=outcome.reported_at,
+                status="successful" if outcome.status == "SUCCESS" else "failed",
+            ),
+        )
+    except BaseException:
+        _park_claim_as_unknown(conn, event.event_id, selected, claimed_at)
+        raise
+
+    if outcome.status == "SUCCESS":
+        resolve_execution_claim(
+            conn,
+            event.event_id,
+            selected,
+            CLAIM_STATUS_COMPLETED,
+            outcome.reported_at,
+            None,
+        )
+    else:
+        # An explicit FAILED outcome means the attempt produced no lasting
+        # side effect, so the action stays retryable exactly as it was before
+        # Phase 21. The claim existed only for the duration of the attempt.
+        release_execution_claim(conn, event.event_id, selected)
 
     status = (
         STATUS_EXECUTION_SUCCESS

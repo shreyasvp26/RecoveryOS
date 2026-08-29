@@ -172,6 +172,30 @@ CREATE TABLE IF NOT EXISTS optimizer_decisions (
 """
 
 
+# Phase 21: the durable execution claim. The Phase 6 policy gate already
+# blocks SEQUENTIAL duplicates from persisted history, but two requests that
+# both read that history before either writes its attempt can both be
+# authorized and both reach the provider. This table closes that window and
+# nothing else: (event_id, intervention) is the logical action identity and is
+# the PRIMARY KEY, so SQLite — not application state — decides which single
+# attempt may cross the external side-effect boundary.
+#
+# It is NOT a policy engine, NOT an authorization record, and NOT a second
+# execution history: holding a claim confers no permission to execute, and the
+# authoritative execution evidence remains execution_outcomes.
+_EXECUTION_CLAIMS_DDL = """
+CREATE TABLE IF NOT EXISTS execution_claims (
+    event_id     TEXT NOT NULL,
+    intervention TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    claimed_at   TEXT NOT NULL,
+    resolved_at  TEXT,
+    detail       TEXT,
+    PRIMARY KEY (event_id, intervention)
+)
+"""
+
+
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection to the given database path.
 
@@ -203,6 +227,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_WEBHOOK_DELIVERIES_DDL)
         conn.execute(_WEBHOOK_RECOVERY_OUTCOMES_DDL)
         conn.execute(_OPTIMIZER_DECISIONS_DDL)
+        conn.execute(_EXECUTION_CLAIMS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
@@ -520,6 +545,106 @@ def get_execution_outcome_by_payment_link_id(
         reported_at=row["reported_at"],
         payment_link_id=row["payment_link_id"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 21 execution claim (concurrency/idempotency boundary).
+# The claim is taken immediately before the executor runs and resolved
+# immediately after. It stores no decision and no authorization.
+# ---------------------------------------------------------------------------
+
+
+def claim_execution(
+    conn: sqlite3.Connection,
+    event_id: str,
+    intervention: str,
+    claimed_at: str,
+) -> bool:
+    """Atomically claim one (event, intervention), returning whether we won.
+
+    The PRIMARY KEY makes this a database-level compare-and-set: exactly one
+    concurrent caller receives True, and every other caller receives False
+    without any side effect. Any other sqlite3.Error propagates, because a
+    claim that cannot be recorded must stop the execution (fail-closed) rather
+    than proceed unprotected.
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO execution_claims (
+                event_id, intervention, status, claimed_at, resolved_at, detail
+            ) VALUES (?, ?, 'claimed', ?, NULL, NULL)
+            """,
+            (event_id, intervention, claimed_at),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_execution_claim(
+    conn: sqlite3.Connection, event_id: str, intervention: str
+) -> dict[str, Any] | None:
+    """Retrieve a persisted execution claim, or None when none is held."""
+    row = conn.execute(
+        """
+        SELECT * FROM execution_claims
+        WHERE event_id = ? AND intervention = ?
+        """,
+        (event_id, intervention),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def resolve_execution_claim(
+    conn: sqlite3.Connection,
+    event_id: str,
+    intervention: str,
+    status: str,
+    resolved_at: str,
+    detail: str | None,
+) -> None:
+    """Move a held claim to a terminal status (never deleting the evidence)."""
+    try:
+        conn.execute(
+            """
+            UPDATE execution_claims
+            SET status = ?, resolved_at = ?, detail = ?
+            WHERE event_id = ? AND intervention = ?
+            """,
+            (status, resolved_at, detail, event_id, intervention),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def release_execution_claim(
+    conn: sqlite3.Connection, event_id: str, intervention: str
+) -> None:
+    """Drop a claim so the action can be attempted again.
+
+    Used only when the attempt provably produced no lasting side effect (the
+    executor reported an explicit FAILED outcome), which keeps the Phase 11
+    retry-after-failure semantics exactly as they were.
+    """
+    try:
+        conn.execute(
+            "DELETE FROM execution_claims WHERE event_id = ? AND intervention = ?",
+            (event_id, intervention),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
 
 
 def get_policy_history(
