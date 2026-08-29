@@ -29,6 +29,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Mapping
 
 from .db import (
     get_classification_result,
@@ -115,10 +116,10 @@ def _persist_decision(
     return decision
 
 
-def _select(
+def select_for_strategy(
     event: PaymentEvent,
     classification: ClassificationResult,
-    decisions: dict[str, PolicyDecision],
+    decisions: Mapping[str, PolicyDecision],
     strategy: str,
 ) -> tuple[str, OptimizerDecision | None]:
     """Choose one intervention from the policy-authorized candidates.
@@ -126,6 +127,12 @@ def _select(
     Both strategies consume the SAME authoritative policy decisions and can
     only ever return a candidate that carries an ALLOW. The V2 path additionally
     returns its economic trace; the V1 path has no economics to report.
+
+    Public because the Phase 17 benchmark evaluates the V1 and V2 arms through
+    THIS function rather than reimplementing either decision path. Selection is
+    pure — no database, no execution, no provider — so the benchmark can reuse
+    it without borrowing the persistence and Razorpay boundary that
+    ``execute_event`` necessarily carries.
     """
     if strategy == SELECTION_V2_ECONOMIC:
         # The optimizer only ever sees candidates the policy gate authorized:
@@ -196,7 +203,7 @@ def execute_event(
         )
         decisions[candidate] = _persist_decision(conn, decision)
 
-    selected, optimizer_decision = _select(
+    selected, optimizer_decision = select_for_strategy(
         event, classification, decisions, selection_strategy
     )
     if selected == NO_ACTION:
