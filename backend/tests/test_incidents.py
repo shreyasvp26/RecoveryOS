@@ -12,10 +12,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.incidents import (
+    BPS,
     DIMENSION_BANK,
     DIMENSION_PAYMENT_METHOD,
     SEVERITY_LOW,
     STATUS_OPEN,
+    STATUS_RESOLVED,
     DetectionConfig,
     EvaluatedOutcome,
     Incident,
@@ -23,7 +25,9 @@ from app.incidents import (
     Segment,
     detect_incidents,
     observation_windows,
+    observed_failure_rate_bps,
     order_incidents,
+    reconcile_incidents,
     segments_for,
 )
 from app.models import CustomerHistory, PaymentEvent
@@ -536,3 +540,102 @@ def test_an_incident_is_always_a_simulated_reading():
                 "result_mode": "REAL_RAZORPAY",
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Status: OPEN now, RESOLVED only against a previous set
+# ---------------------------------------------------------------------------
+
+
+def test_every_detected_incident_is_open():
+    """A stateless run knows only what the dataset says right now."""
+    incidents = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))
+    assert incidents
+    assert {incident.status for incident in incidents} == {STATUS_OPEN}
+
+
+def test_incidents_still_present_stay_open():
+    events, evaluated = dataset(current_recovered=2, baseline_recovered=8)
+    previous = detect_incidents(events, evaluated)
+    current = detect_incidents(events, evaluated)
+    reconciled = reconcile_incidents(previous, current)
+    assert {incident.status for incident in reconciled} == {STATUS_OPEN}
+    assert [i.incident_id for i in reconciled] == [i.incident_id for i in previous]
+
+
+def test_an_incident_absent_from_the_current_set_becomes_resolved():
+    """The degradation is gone from the data, so its identity is RESOLVED."""
+    previous = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))
+    current = detect_incidents(*dataset(current_recovered=8, baseline_recovered=8))
+    assert previous
+    assert current == ()
+    reconciled = reconcile_incidents(previous, current)
+    assert {incident.status for incident in reconciled} == {STATUS_RESOLVED}
+    assert {i.incident_id for i in reconciled} == {i.incident_id for i in previous}
+    assert reconciled[0].to_dict()["status"] == STATUS_RESOLVED
+
+
+def test_a_newly_appearing_incident_is_open():
+    current = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))
+    reconciled = reconcile_incidents((), current)
+    assert {incident.status for incident in reconciled} == {STATUS_OPEN}
+    assert len(reconciled) == len(current)
+
+
+def test_reconciling_empty_sets_is_deterministic_and_empty():
+    assert reconcile_incidents((), ()) == ()
+
+
+def test_open_incidents_precede_resolved_ones_in_canonical_order():
+    gone = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))
+    still_here = detect_incidents(
+        *dataset(current_recovered=1, baseline_recovered=9, count=12)
+    )
+    reconciled = reconcile_incidents(gone, still_here)
+    statuses = [incident.status for incident in reconciled]
+    assert set(statuses) == {STATUS_OPEN, STATUS_RESOLVED}
+    assert statuses == sorted(statuses, key=lambda s: s != STATUS_OPEN)
+    open_now = [i for i in reconciled if i.status == STATUS_OPEN]
+    assert open_now == list(order_incidents(open_now))
+
+
+def test_reconciliation_is_idempotent_and_regenerates_no_identity():
+    previous = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))
+    once = reconcile_incidents(previous, ())
+    twice = reconcile_incidents(previous, ())
+    assert once == twice
+    assert {i.incident_id for i in once} == {i.incident_id for i in previous}
+    assert once == reconcile_incidents(once, ())
+
+
+def test_reconciliation_mutates_neither_input_nor_the_incidents():
+    previous = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))
+    reconcile_incidents(previous, ())
+    assert all(incident.status == STATUS_OPEN for incident in previous)
+
+
+def test_a_repeated_previous_identity_is_resolved_once():
+    previous = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))
+    reconciled = reconcile_incidents([*previous, *previous], ())
+    assert len(reconciled) == len(previous)
+    assert len({i.incident_id for i in reconciled}) == len(reconciled)
+
+
+# ---------------------------------------------------------------------------
+# The classic failure rate is present and inert
+# ---------------------------------------------------------------------------
+
+
+def test_the_failure_rate_is_published_on_both_windows_and_never_moves():
+    incident = detect_incidents(*dataset(current_recovered=2, baseline_recovered=8))[0]
+    payload = incident.to_dict()
+    assert payload["baseline"]["observed_failure_rate_bps"] == BPS
+    assert payload["current"]["observed_failure_rate_bps"] == BPS
+    assert payload["deltas"]["observed_failure_rate_delta_bps"] == 0
+
+
+def test_the_failure_rate_alone_raises_no_incident():
+    """Every segment is 100% failure-selected; only recovery degradation detects."""
+    events, evaluated = dataset(current_recovered=8, baseline_recovered=8)
+    assert observed_failure_rate_bps(len(events)) == BPS
+    assert detect_incidents(events, evaluated) == ()

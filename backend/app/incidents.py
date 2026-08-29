@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -166,6 +166,30 @@ TOP_FAILURE_REASONS = 5
 
 class IncidentError(Exception):
     """Incident detection cannot proceed honestly."""
+
+
+def observed_failure_rate_bps(event_count: int) -> int:
+    """The classic failure rate over a RecoveryOS payment population, in bps.
+
+    failed payments / total payments, stated explicitly so the classic metric is
+    present rather than quietly skipped. Every PaymentEvent RecoveryOS ingests is
+    a payment that ALREADY failed — the population is failure-selected at the
+    door — so this is 10000 bps (100%) for any non-empty population, by
+    construction and not by measurement.
+
+    That makes it non-discriminating: it is identical in the baseline and the
+    current window, identical across every segment, and cannot move. It is
+    reported for completeness and is deliberately never an input to detection;
+    the failure-side metric that actually carries information here is
+    ``WindowMetrics.unrecovered_rate_bps``, the share of that failed volume the
+    control plane did not recover.
+
+    An empty population has no payments to fail, so it reads 0 rather than
+    dividing by zero or claiming a rate it did not observe.
+    """
+    if event_count <= 0:
+        return 0
+    return BPS
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +429,16 @@ class WindowMetrics:
         rate = self.recovery_rate_bps
         return None if rate is None else BPS - rate
 
+    @property
+    def observed_failure_rate_bps(self) -> int:
+        """The classic failure rate of this window: see ``observed_failure_rate_bps``.
+
+        100% for any non-empty window because RecoveryOS only ingests already
+        failed payments. Carried so the metric is visible and visibly constant,
+        never so that it can be mistaken for a signal.
+        """
+        return observed_failure_rate_bps(self.events)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the window aggregate, including its denominators."""
         return {
@@ -415,6 +449,7 @@ class WindowMetrics:
             "simulated_recovered_amount_paise": self.recovered_amount_paise,
             "recovery_rate_bps": self.recovery_rate_bps,
             "unrecovered_rate_bps": self.unrecovered_rate_bps,
+            "observed_failure_rate_bps": self.observed_failure_rate_bps,
         }
 
 
@@ -760,6 +795,15 @@ class Incident:
                 "recovery_rate_delta_bps": -self.degradation_bps,
                 "degradation_bps": self.degradation_bps,
                 "unrecovered_rate_delta_bps": self.unrecovered_rate_delta_bps,
+                "observed_failure_rate_delta_bps": (
+                    self.current.observed_failure_rate_bps
+                    - self.baseline.observed_failure_rate_bps
+                ),
+                "observed_failure_rate_note": (
+                    "the payment population is failure-selected, so the classic "
+                    "failure rate is 100% in both windows and cannot move; "
+                    "recovery degradation is the signal"
+                ),
             },
             "impact": {
                 "affected_event_count": self.affected_event_count,
@@ -947,6 +991,40 @@ def order_incidents(incidents: Sequence[Incident]) -> tuple[Incident, ...]:
             ),
         )
     )
+
+
+def reconcile_incidents(
+    previous: Sequence[Incident], current: Sequence[Incident]
+) -> tuple[Incident, ...]:
+    """Reconcile a previously observed incident set against a newer one.
+
+    This is the whole of RESOLVED in RecoveryOS, and it is deliberately a pure
+    function rather than a lifecycle:
+
+        OPEN      the incident is in the current detection result
+        RESOLVED  its identity was in the previous result and is not in the
+                  current one, so the dataset no longer satisfies the rule
+
+    Phase 20 derives incidents and stores nothing, so a stateless detection run
+    cannot know what was seen before and can only honestly report OPEN. RESOLVED
+    exists exactly when a caller supplies the earlier set to compare against —
+    that is why this takes ``previous`` as an argument instead of reading it from
+    anywhere. Nothing here persists, mutates events, or touches a policy.
+
+    Ordering stays canonical: open incidents first, worst modelled impact first,
+    then the resolved ones under the same rule. Running it again on its own
+    inputs yields exactly the same tuple.
+    """
+    current_ids = {incident.incident_id for incident in current}
+    seen: set[str] = set()
+    resolved: list[Incident] = []
+    for incident in previous:
+        if incident.incident_id in current_ids or incident.incident_id in seen:
+            continue
+        seen.add(incident.incident_id)
+        resolved.append(replace(incident, status=STATUS_RESOLVED))
+    open_now = tuple(replace(incident, status=STATUS_OPEN) for incident in current)
+    return order_incidents(open_now) + order_incidents(resolved)
 
 
 def _outcome_map(

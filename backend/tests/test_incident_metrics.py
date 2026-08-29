@@ -20,6 +20,7 @@ from app.incidents import (
     IncidentError,
     WindowMetrics,
     leading_contributor,
+    observed_failure_rate_bps,
     severity_for,
     simulated_revenue_at_risk_paise,
     top_failure_reasons,
@@ -75,6 +76,39 @@ def test_unrecovered_rate_is_the_complement_of_the_recovery_rate():
 def test_recovery_rate_floors_rather_than_rounding_up():
     """1/3 is 33.33%; the reported rate never overstates recovery."""
     assert metrics(scored=3, recovered=1).recovery_rate_bps == 3333
+
+
+# ---------------------------------------------------------------------------
+# The classic failure rate
+# ---------------------------------------------------------------------------
+
+
+def test_the_classic_failure_rate_is_total_over_a_failure_selected_population():
+    """failed / total is 100% because every ingested payment already failed."""
+    assert observed_failure_rate_bps(1) == BPS
+    assert observed_failure_rate_bps(503) == BPS
+
+
+def test_an_empty_population_has_no_failure_rate_rather_than_a_division():
+    assert observed_failure_rate_bps(0) == 0
+    assert observed_failure_rate_bps(-1) == 0
+
+
+def test_the_window_failure_rate_reads_the_window_event_count():
+    assert metrics(events=40).observed_failure_rate_bps == BPS
+    assert metrics(events=0, scored=0, recovered=0).observed_failure_rate_bps == 0
+
+
+def test_the_failure_rate_cannot_discriminate_between_two_windows():
+    """It is identical on both sides, which is exactly why it is not a signal."""
+    baseline = metrics(events=40, scored=40, recovered=30)
+    current = metrics(events=25, scored=25, recovered=5)
+    assert baseline.observed_failure_rate_bps == current.observed_failure_rate_bps
+    assert current.recovery_rate_bps != baseline.recovery_rate_bps
+
+
+def test_the_window_payload_publishes_the_failure_rate():
+    assert metrics().to_dict()["observed_failure_rate_bps"] == BPS
 
 
 # ---------------------------------------------------------------------------

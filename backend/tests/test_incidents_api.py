@@ -81,6 +81,26 @@ def test_listing_on_an_empty_database_is_honest(monkeypatch, tmp_path):
     assert payload["incidents"] == []
     assert payload["evaluation"] is None
     assert payload["windows"] is None
+    assert payload["population"]["observed_failure_rate_bps"] == 0
+
+
+def test_listing_publishes_the_classic_failure_rate_as_non_discriminating(listing):
+    """The metric is stated, and stated to be constant, so it cannot mislead."""
+    population = listing["population"]
+    assert population["observed_failure_rate_bps"] == 10_000
+    assert "never an input to detection" in population["basis"]
+    for incident in listing["incidents"]:
+        assert incident["baseline"]["observed_failure_rate_bps"] == 10_000
+        assert incident["current"]["observed_failure_rate_bps"] == 10_000
+        assert incident["deltas"]["observed_failure_rate_delta_bps"] == 0
+
+
+def test_listing_states_the_derived_status_contract(listing):
+    """The API must not imply a persisted incident lifecycle."""
+    contract = listing["status_contract"]
+    assert contract["OPEN"] == "in the current detection result"
+    assert "does not persist incident history" in contract["RESOLVED"]
+    assert {incident["status"] for incident in listing["incidents"]} == {"OPEN"}
 
 
 def test_every_incident_carries_complete_computed_evidence(listing):

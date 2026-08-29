@@ -81,16 +81,26 @@ Rates are integer **basis points** (10,000 bps = 100%, one percentage point =
 | --- | --- |
 | Recovery rate | recovered events ÷ scored events — the canonical RecoveryOS definition, identical to `replay_metrics.recovery_rate` |
 | Unrecovered rate | 1 − recovery rate |
+| Observed payment-event failure rate | failed payments ÷ total payments — the classic metric, stated explicitly |
 | Degradation | `baseline recovery rate − current recovery rate` (positive = worse) |
 | Simulated revenue at risk | `max(0, degradation) × current-window payment value ÷ 10,000`, in integer paise |
 
-**On "failure rate".** RecoveryOS only ever ingests payments that have ALREADY
-failed, so a classic failure rate (failed ÷ total) is 100% by construction and
-carries no information. The meaningful failure-side reading is the
-**unrecovered rate**: how much of that failed volume the control plane did not
-recover. It is the exact complement of the recovery rate, is reported as
-supporting evidence, and can never raise an incident of its own — every
-incident is revenue-oriented and comes from the recovery-rate rule.
+**On "failure rate".** The classic failure rate is calculated and published —
+`observed_failure_rate_bps`, on the analysed population in `GET /incidents` and
+on both windows of every incident — but it is **non-discriminating here, by
+construction rather than by measurement**. RecoveryOS only ever ingests payments
+that have ALREADY failed, so the population is failure-selected at the door and
+the rate is 10000 bps (100%) for any non-empty population: identical in the
+baseline and the current window, identical in every segment, unable to move. The
+published delta between the two windows is therefore always 0. An empty
+population reads 0 rather than dividing by zero. It is never an input to
+detection, and it cannot raise an incident.
+
+The meaningful failure-side reading is the **unrecovered rate**: how much of that
+failed volume the control plane did not recover. It is the exact complement of
+the recovery rate, is reported as supporting evidence, and can never raise an
+incident of its own either — every incident is revenue-oriented and comes from
+the recovery-rate rule.
 
 ### Detection threshold
 
@@ -150,9 +160,28 @@ generator. `detected_at` is the **latest observed event timestamp**, not a
 production detection time.
 
 Incidents are **derived, never stored**: no incidents table, no duplicated
-events, no schema change. The only status a derived detector can honestly report
-is `OPEN`; an incident that no longer meets the rule simply stops being
-returned, which is what `RESOLVED` means here.
+events, no schema change.
+
+Status follows from that directly:
+
+| Status | Meaning |
+| --- | --- |
+| `OPEN` | The incident is in the current detection result. |
+| `RESOLVED` | The identity was in a previously observed result and is absent from the current one. |
+
+Phase 20 incidents are derived from the observed dataset. Current detections are
+`OPEN`. `RESOLVED` is a **reconciliation state** available when comparing a
+previously observed incident set with a newer detection result; **Phase 20 does
+not persist incident history**. A stateless `GET /incidents` therefore returns
+only `OPEN` incidents — it has nothing earlier to compare against, and inventing
+a lifecycle it does not track would be a lie about the system.
+
+Reconciliation is the pure function `incidents.reconcile_incidents(previous,
+current)`: current incidents stay `OPEN`, previous identities missing from the
+current set become `RESOLVED`, ordering stays canonical (open first), and the
+same inputs always produce the same output. It stores nothing, mutates nothing,
+executes nothing, and changes no policy. RecoveryOS deliberately implements no
+acknowledgement, assignment, escalation or incident workflow.
 
 Listing order is simulated revenue at risk descending, then degradation
 descending, then incident id ascending — a total order fixed by the data.

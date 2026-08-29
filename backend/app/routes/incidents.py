@@ -48,7 +48,7 @@ from ..incident_analysis import (
     incident_evidence,
     replay_incident,
 )
-from ..incidents import INCIDENT_RESULT_MODE
+from ..incidents import INCIDENT_RESULT_MODE, observed_failure_rate_bps
 from ..policy_scenario import (
     BUILT_IN_SCENARIO_IDS,
     SCENARIO_CURRENT,
@@ -115,6 +115,26 @@ def list_incidents(conn: sqlite3.Connection = Depends(get_db)) -> dict[str, Any]
             else evaluation_identity(analysis["result"])
         ),
         "analysed_event_count": len(analysis["events"]),
+        "population": {
+            "observed_failure_rate_bps": observed_failure_rate_bps(
+                len(analysis["events"])
+            ),
+            "basis": (
+                "failed payments / total payments over the analysed population; "
+                "RecoveryOS only ingests already-failed payments, so this is "
+                "100% by construction, is identical in every window and segment, "
+                "and is never an input to detection"
+            ),
+        },
+        "status_contract": {
+            "OPEN": "in the current detection result",
+            "RESOLVED": (
+                "absent from the current result when reconciling against a "
+                "previously observed set; Phase 20 derives incidents and does "
+                "not persist incident history, so a stateless request returns "
+                "only OPEN incidents"
+            ),
+        },
         "count": len(incidents),
         "incidents": [incident.to_dict() for incident in incidents],
     }

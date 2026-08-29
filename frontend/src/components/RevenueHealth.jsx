@@ -79,6 +79,12 @@ function WhatChanged({ incident }) {
       current: formatBps(incident.current.unrecovered_rate_bps),
       delta: formatPpDelta(incident.deltas.unrecovered_rate_delta_bps),
     },
+    {
+      label: 'Payment-event failure rate',
+      baseline: formatBps(incident.baseline.observed_failure_rate_bps),
+      current: formatBps(incident.current.observed_failure_rate_bps),
+      delta: formatPpDelta(incident.deltas.observed_failure_rate_delta_bps),
+    },
   ]
   return (
     <div className="table-wrap">
@@ -102,6 +108,12 @@ function WhatChanged({ incident }) {
         ))}
       </tbody>
       </table>
+      <p className="panel-note">
+        Every payment RecoveryOS ingests has already failed, so the payment-event
+        failure rate is 100% on both sides by construction and cannot move. It is
+        shown for completeness and is never what detects an incident — the
+        recovery-rate fall is.
+      </p>
     </div>
   )
 }
@@ -327,6 +339,13 @@ function IncidentDetail({ incident, onOpenTrace }) {
             <div className="kv">
               <span className="kv__k">Detected at</span>
               <span className="kv__v">{formatTime(incident.detected_at)}</span>
+            </div>
+            <div className="kv">
+              <span className="kv__k">Status</span>
+              <span className="kv__v">
+                {incident.status} — present in the current detection result.
+                Incidents are derived on each request; no incident history is kept.
+              </span>
             </div>
           </div>
 
