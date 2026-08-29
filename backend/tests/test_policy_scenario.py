@@ -39,6 +39,13 @@ from app.policy_scenario import (
 )
 
 
+_POLICY_ENV = (
+    "POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H",
+    "POLICY_EVENT_COOLDOWN_MINUTES",
+    "POLICY_DAILY_SPEND_CAP_PAISE",
+)
+
+
 def _valid_custom(**overrides) -> dict[str, int]:
     parameters = dict(current_scenario().parameters)
     parameters.update(overrides)
@@ -50,7 +57,13 @@ def _valid_custom(**overrides) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def test_current_scenario_matches_the_shipped_policy_defaults():
+def test_current_scenario_matches_the_shipped_defaults_when_unconfigured(
+    monkeypatch,
+):
+    """With no POLICY_* override the active policy IS the shipped default."""
+    for name in _POLICY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
     scenario = current_scenario()
 
     assert scenario.scenario_id == SCENARIO_CURRENT
@@ -68,9 +81,18 @@ def test_current_scenario_carries_a_real_policy_config():
     assert isinstance(current_scenario().policy_config, PolicyConfig)
 
 
-def test_current_scenario_agrees_with_the_frozen_benchmark_policy():
-    """The lab's reference arm and the benchmark pin the identical policy."""
+def test_current_scenario_agrees_with_the_benchmark_policy_when_unconfigured(
+    monkeypatch,
+):
+    """Unconfigured, the two coincide — which is why they can be confused.
+
+    They are nevertheless resolved through separate paths, and the tests below
+    prove they are permitted to diverge.
+    """
     from app.benchmark_config import frozen_policy_config
+
+    for name in _POLICY_ENV:
+        monkeypatch.delenv(name, raising=False)
 
     benchmark = frozen_policy_config()
     current = current_scenario().policy_config
