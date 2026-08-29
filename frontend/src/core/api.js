@@ -98,3 +98,8 @@ export const eventTrace = (eventId) => get(`/events/${encodeURIComponent(eventId
 export const blockedDecisions = (params) => get('/decisions/blocked', params)
 export const replayScenarios = () => get('/replay/scenarios')
 export const compareReplays = (body) => post('/replay/compare', body)
+export const listIncidents = () => get('/incidents')
+export const incidentEvents = (incidentId) =>
+  get(`/incidents/${encodeURIComponent(incidentId)}/events`)
+export const replayIncident = (incidentId, body) =>
+  post(`/incidents/${encodeURIComponent(incidentId)}/replay`, body ?? {})

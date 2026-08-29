@@ -441,11 +441,14 @@ function EventRow({ event, selected, onSelect }) {
   )
 }
 
-export default function EventTrace() {
-  const [query, setQuery] = useState('')
+export default function EventTrace({ eventId = null }) {
+  // `eventId` lets another screen (Revenue Health) hand an operator straight to
+  // one payment's trace. It seeds the initial selection and search filter only;
+  // this screen keeps owning the list and the selection from then on.
+  const [query, setQuery] = useState(eventId ?? '')
   const [riskFlag, setRiskFlag] = useState('')
-  const [selectedId, setSelectedId] = useState(null)
-  const [debouncedQuery, setDebouncedQuery] = useState('')
+  const [selectedId, setSelectedId] = useState(eventId)
+  const [debouncedQuery, setDebouncedQuery] = useState(eventId ?? '')
 
   const list = useAsync((_signal) => {
     const params = { query: debouncedQuery || undefined, risk_flag: riskFlag || undefined }
