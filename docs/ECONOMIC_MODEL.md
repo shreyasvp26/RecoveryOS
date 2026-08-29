@@ -306,6 +306,52 @@ There is **no silent exception handling anywhere in the decision engine** — a
 test asserts the modules contain no exception handler at all — and no silent
 fallback from V2 to V1.
 
+## Auditing the decision (Phase 18)
+
+Everything above describes a decision that, until Phase 18, was made and then
+discarded. Phase 18 records it. **No optimizer mathematics, coefficient, tie-break
+rule or benchmark parameter changed** — the equation, the estimator and the
+ranking are exactly as specified above.
+
+Each V2 decision is written to the append-only `optimizer_decisions` table as an
+`OptimizerDecisionRecord` (`app/optimizer_audit.py`) holding:
+
+| Field | Meaning |
+| --- | --- |
+| `event_id`, `decided_at` | the decision's identity; `decided_at` is the execution service's authoritative evaluation time, because the optimizer itself never reads a clock |
+| `candidates_considered` | what the AI proposed |
+| `allowed_candidates` | what the policy gate authorized |
+| `evaluations` | one `CandidateEvaluation` per authorized candidate, in ranked order |
+| `selected_intervention`, `selection_reason` | the choice and why |
+
+Given an event id, the trace therefore reconstructs the whole chain: event → AI
+classification → AI candidates → per-candidate policy decision → allowed
+candidates → economic evaluation of each allowed candidate → selected
+intervention → expected value → rationale → execution outcome → attempts →
+Razorpay closed-loop evidence where applicable.
+
+Four invariants hold:
+
+- **One economic implementation.** The record copies the optimizer's output
+  verbatim. `app/optimizer_audit.py` contains no arithmetic operator anywhere
+  (asserted by an AST test) and imports no economic function, so the audit trail
+  cannot disagree with the decision it describes. The frontend likewise only
+  formats persisted integers.
+- **The record cannot describe a policy violation.** An evaluated candidate
+  outside `allowed_candidates`, or an allowed candidate that was never
+  considered, is rejected at construction.
+- **Audit precedes action.** The decision is persisted before the executor is
+  invoked, because the decision exists whether or not execution succeeds. An
+  audit-write failure stops the flow instead of proceeding unaudited.
+- **No ground truth.** A record holds only decision-time model estimates. Hidden
+  probabilities, outcome draws, oracle options and realized benchmark values are
+  evaluation-layer state and are structurally unreachable from the audit module,
+  the trace payload and the dashboard.
+
+An estimator failure, an optimizer failure or an audit-persistence failure each
+surface as an explicit `economic_selection_failure` at the HTTP boundary with
+nothing executed and nothing recorded.
+
 ## Benchmark isolation
 
 The decision engine is completely independent of benchmark ground truth, and
@@ -417,3 +463,9 @@ re-checks authorization before acting. Phase 16 does not change that boundary.
 - **`payment_link` is the only intervention with a real provider path.** The
   other four are `SIMULATED`, so their modelled costs and probabilities cannot be
   reconciled against provider behaviour.
+- **The audit trail proves what was decided, not that the decision was right.**
+  A persisted expected value is a model estimate under modelled costs and
+  modelled friction. It is not measured revenue, not a production recovery
+  guarantee, and not a benchmark outcome — the simulated benchmark remains the
+  only thing that judges whether the decision created value, and it does so
+  only after the decision has been made.

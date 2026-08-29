@@ -182,6 +182,26 @@ Four things distinguish it from Phase 9:
 
 Ground truth remains structurally unreachable from the classifier, policy, selector, estimator, optimizer, executor and dashboard. Methodology, frozen coefficients, metric formulas, the canonical result and the limitations: [BENCHMARK.md](BENCHMARK.md).
 
+### The Phase 18 economic decision audit trail
+
+Phase 16 built the economic decision and Phase 17 built the experiment that tests it, but the decision itself existed only in memory: an operator could see that `retry_delayed` ran and could see that policy permitted it, and could not see *why economics chose it over the four other permitted options*. Phase 18 closes that gap. It adds **no** optimizer logic, changes no coefficient, and changes no benchmark methodology.
+
+```
+AI Diagnosis  →  Policy  →  Economic Optimization  →  Execution  →  Outcome
+                                     │
+                          optimizer_decisions (append-only)
+```
+
+`app/optimizer_audit.py` defines the narrow `OptimizerDecisionRecord` contract, and `db.optimizer_decisions` stores it. A record carries the candidate set considered, the policy-approved subset, the per-candidate estimated economics, the selected intervention and the selection reason — copied verbatim from the `OptimizerDecision` the optimizer produced. The audit layer performs **no arithmetic at all** (asserted by an AST test), so `app/economics.py` remains the single implementation of the expected-value equation.
+
+Three properties make it defensible:
+
+- **Audit before action.** `execute_event` persists the decision *before* invoking the executor, so a failed, unconfigured or rejected execution still leaves evidence of what RecoveryOS decided. A failure to write the audit record stops the flow rather than proceeding into an unaudited action.
+- **The record cannot describe an illegal decision.** Construction fails if an evaluated candidate is outside the policy-approved set, or if an approved candidate was never considered. A denied intervention cannot be selected, and cannot even appear as an evaluated candidate.
+- **Determinism makes it idempotent.** Re-deciding the same event at the same evaluation time re-derives an identical record, which is reused; a *different* decision at the same timestamp is a contradiction and is raised.
+
+The record is exposed additively on the existing `GET /events/{event_id}/trace` response as `optimizer_decisions`, and the Event Decision Trace renders an **Economic Optimization** stage between Policy and Execution showing, per candidate, the estimated recovery probability, estimated recovered amount, estimated intervention cost, modeled friction and estimated expected value, plus the selection and its rationale. Every figure is a persisted backend value labelled `MODEL ESTIMATE`; none is hardcoded, none is recomputed in the frontend, and no benchmark ground truth reaches the operator surface. The V1 arm records nothing, because no economic decision occurred — an absent stage is reported as absent rather than reconstructed.
+
 ### The bounded executor (Phase 7)
 
 The executor's API is effectively `execute(event, intervention, policy_decision, razorpay_client)`. It is not a second policy engine:
