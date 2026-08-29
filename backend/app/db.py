@@ -814,6 +814,166 @@ def get_intervention_attempt_summary(
     return summary
 
 
+# ---------------------------------------------------------------------------
+# Phase 21 batched read queries (Recovery Operations projection).
+# The Recovery Operations Center is a READ MODEL over the records the
+# existing decision path already persists, so these helpers only fetch those
+# rows for a set of events in one query each (no N+1, no new source of truth).
+# They derive nothing: state derivation lives in recovery_operations.py.
+# ---------------------------------------------------------------------------
+
+
+def list_events_for_recovery_queue(
+    conn: sqlite3.Connection,
+    *,
+    risk_flag: str | None = None,
+    failure_reason: str | None = None,
+    scan_limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Return candidate events (newest first) for the operations projection.
+
+    Only event-level columns can be filtered here; every derived operational
+    state is filtered after projection, because it is not a stored column.
+    ``scan_limit`` bounds the working set so the projection stays a bounded
+    read rather than an unbounded query engine.
+    """
+    sql = "SELECT * FROM payment_events WHERE 1 = 1"
+    params: list[Any] = []
+    if risk_flag:
+        sql += " AND risk_flag = ?"
+        params.append(risk_flag)
+    if failure_reason:
+        sql += " AND failure_reason = ?"
+        params.append(failure_reason)
+    sql += " ORDER BY timestamp DESC, event_id DESC LIMIT ?"
+    params.append(int(scan_limit))
+    return [_row_to_event(row).to_dict() for row in conn.execute(sql, params)]
+
+
+def _chunked_in_query(
+    conn: sqlite3.Connection, sql_template: str, event_ids: list[str]
+) -> list[sqlite3.Row]:
+    """Run an ``IN (...)`` query over event ids, chunked below SQLite's limit."""
+    rows: list[sqlite3.Row] = []
+    chunk_size = 400
+    for start in range(0, len(event_ids), chunk_size):
+        chunk = event_ids[start : start + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        rows.extend(conn.execute(sql_template.format(ids=placeholders), chunk))
+    return rows
+
+
+def get_classification_results_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return event_id -> persisted classification for the given events."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM classification_results WHERE event_id IN ({ids})",
+        event_ids,
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        data = dict(row)
+        data["candidate_interventions"] = json.loads(data["candidate_interventions"])
+        out[data["event_id"]] = data
+    return out
+
+
+def get_policy_decisions_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return event_id -> every persisted policy decision, oldest first."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM policy_decisions WHERE event_id IN ({ids}) "
+        "ORDER BY evaluated_at ASC",
+        event_ids,
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        data = dict(row)
+        data["allowed"] = bool(data["allowed"])
+        data["policy_rules_applied"] = json.loads(data["policy_rules_applied"])
+        out.setdefault(data["event_id"], []).append(data)
+    return out
+
+
+def get_optimizer_decisions_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return event_id -> every persisted optimizer decision, oldest first."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM optimizer_decisions WHERE event_id IN ({ids}) "
+        "ORDER BY decided_at ASC",
+        event_ids,
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        data = _row_to_optimizer_decision(row)
+        out.setdefault(data["event_id"], []).append(data)
+    return out
+
+
+def get_execution_outcomes_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return event_id -> every persisted execution outcome, oldest first."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM execution_outcomes WHERE event_id IN ({ids}) "
+        "ORDER BY reported_at ASC",
+        event_ids,
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        data = dict(row)
+        out.setdefault(data["event_id"], []).append(data)
+    return out
+
+
+def get_webhook_recovery_outcomes_for_payment_links(
+    conn: sqlite3.Connection, payment_link_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return payment_link_id -> its most recent verified recovery outcome.
+
+    Verified recovery is the ONLY evidence that a real Payment Link was paid;
+    an absent entry means the link has not been observed as paid, never that
+    it failed.
+    """
+    if not payment_link_ids:
+        return {}
+    rows: list[sqlite3.Row] = []
+    chunk_size = 400
+    for start in range(0, len(payment_link_ids), chunk_size):
+        chunk = payment_link_ids[start : start + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT * FROM webhook_recovery_outcomes
+                WHERE payment_link_id IN ({placeholders})
+                ORDER BY recovered_at ASC
+                """,
+                chunk,
+            )
+        )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        data = dict(row)
+        out[data["payment_link_id"]] = data
+    return out
+
+
 def get_policy_decision_stats(conn: sqlite3.Connection) -> dict[str, int]:
     """Total and denied persisted policy decisions."""
     row = conn.execute(
