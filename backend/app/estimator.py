@@ -42,7 +42,8 @@ the benchmark's hidden outcome model. See docs/ECONOMIC_MODEL.md.
 
 from __future__ import annotations
 
-from typing import Mapping
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from .classification import ClassificationResult
 from .economics import (
@@ -53,24 +54,41 @@ from .economics import (
 )
 from .models import PaymentEvent
 
+def _frozen(table: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Read-only view of a coefficient table, including its nested tables.
+
+    The tables below are RecoveryOS evaluation constants, not configuration.
+    Exposing them as read-only views keeps the estimator deterministic:
+    nothing holding a module reference can retune the model at runtime.
+    """
+    return MappingProxyType(
+        {
+            key: MappingProxyType(dict(value)) if isinstance(value, Mapping) else value
+            for key, value in table.items()
+        }
+    )
+
+
 # Modelled baseline recovery likelihood per intervention, before any event
 # feature is considered. Ordering reflects the causal story that automated
 # re-attempts succeed more often than actions requiring customer effort, and
 # that a delayed re-attempt beats an immediate one because most payment
 # failures are transient.
-BASE_RECOVERY_BPS: Mapping[str, int] = {
-    "retry_immediate": 1800,
-    "retry_delayed": 3200,
-    "payment_link": 2800,
-    "reminder": 2000,
-    "alternate_method_prompt": 2200,
-}
+BASE_RECOVERY_BPS: Mapping[str, int] = _frozen(
+    {
+        "retry_immediate": 1800,
+        "retry_delayed": 3200,
+        "payment_link": 2800,
+        "reminder": 2000,
+        "alternate_method_prompt": 2200,
+    }
+)
 
 # Adjustment by the classifier's advisory root-cause category. A transient
 # fault rewards re-attempting; a fault needing the customer to act rewards
 # reaching the customer; fraud and terminal categories suppress everything
 # (those events are separately and authoritatively denied by policy).
-ROOT_CAUSE_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = {
+ROOT_CAUSE_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = _frozen({
     "transient": {
         "retry_immediate": 600,
         "retry_delayed": 1600,
@@ -99,13 +117,13 @@ ROOT_CAUSE_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = {
         "reminder": -1800,
         "alternate_method_prompt": -1800,
     },
-}
+})
 
 # Adjustment by the observed failure reason. ``failure_reason`` is a free
 # string in the locked domain contract, so an unrecognized value contributes
 # nothing rather than being guessed at. The keys below cover the values the
 # repository's event generator produces.
-FAILURE_REASON_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = {
+FAILURE_REASON_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = _frozen({
     # The bank was unreachable: retrying straight away hits the same outage,
     # retrying later does not, and routing around the bank helps.
     "bank_timeout": {
@@ -154,19 +172,21 @@ FAILURE_REASON_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = {
     },
     # A generic provider message carries no actionable signal.
     "payment_failed": {},
-}
+})
 
 # Adjustment by payment rail.
-PAYMENT_METHOD_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = {
-    "upi": {
-        "retry_immediate": 300,
-        "retry_delayed": 300,
-        "alternate_method_prompt": 300,
-    },
-    "card": {"payment_link": 200, "alternate_method_prompt": 200},
-    "netbanking": {"retry_delayed": 200, "payment_link": 200},
-    "wallet": {"alternate_method_prompt": 300, "reminder": 100},
-}
+PAYMENT_METHOD_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = _frozen(
+    {
+        "upi": {
+            "retry_immediate": 300,
+            "retry_delayed": 300,
+            "alternate_method_prompt": 300,
+        },
+        "card": {"payment_link": 200, "alternate_method_prompt": 200},
+        "netbanking": {"retry_delayed": 200, "payment_link": 200},
+        "wallet": {"alternate_method_prompt": 300, "reminder": 100},
+    }
+)
 
 # Customer reliability bands, applied uniformly across interventions: a payer
 # with a long successful history is more likely to complete any recovery path,
@@ -184,11 +204,13 @@ STRUGGLING_CUSTOMER_BPS = -300
 
 # An active subscription implies a stored mandate, so an automated re-attempt
 # can succeed without the customer doing anything.
-SUBSCRIPTION_ADJUSTMENT_BPS: Mapping[str, int] = {
-    "retry_immediate": 200,
-    "retry_delayed": 400,
-    "reminder": 100,
-}
+SUBSCRIPTION_ADJUSTMENT_BPS: Mapping[str, int] = _frozen(
+    {
+        "retry_immediate": 200,
+        "retry_delayed": 400,
+        "reminder": 100,
+    }
+)
 
 
 class EstimationError(Exception):

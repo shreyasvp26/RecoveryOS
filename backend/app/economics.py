@@ -38,6 +38,7 @@ are NOT observed customer behaviour. See docs/ECONOMIC_MODEL.md.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from .classification import CANDIDATE_INTERVENTIONS
@@ -182,7 +183,12 @@ class EconomicModel:
                     f"assumption for {intervention!r} must be an "
                     "InterventionEconomics"
                 )
-        object.__setattr__(self, "assumptions", dict(self.assumptions))
+        # A read-only view, not a copy of a mutable dict: the model is a frozen
+        # deterministic contract, so its assumptions must not be swappable at
+        # runtime by anything holding a reference to it.
+        object.__setattr__(
+            self, "assumptions", MappingProxyType(dict(self.assumptions))
+        )
 
     def for_intervention(self, intervention: str) -> InterventionEconomics:
         """Return the assumptions for an intervention, or fail explicitly."""
