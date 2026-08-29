@@ -90,6 +90,11 @@ function RowActions({ row, busy, onExecute, onOpenTrace, onExplain }) {
         </button>
       )}
       {state === 'PENDING_OUTCOME' && <span className="ops-waiting">Waiting for payment</span>}
+      {row.outcome.state === 'PROVIDER_RESULT_UNKNOWN' && (
+        // Not an error and not a success: the provider was called and never
+        // said what it did. Offering Execute here could create a second link.
+        <span className="ops-waiting">Execution uncertain</span>
+      )}
       {state === 'RECOVERED' && (
         <span className="ops-recovered">
           Recovered {formatINR(row.outcome.recovered_amount_paise)}
@@ -388,6 +393,9 @@ function describeResult(body) {
     return `${humanize(body.selected_intervention)} was executed for ${body.event_id} in SIMULATED mode. No provider was contacted and no revenue is claimed.`
   }
   if (body.status === 'execution_failed') {
+    if (body.row?.outcome?.state === 'PROVIDER_RESULT_UNKNOWN') {
+      return `The provider was called for ${body.event_id} and did not return a result RecoveryOS could read. A real Payment Link may exist, so this action will not be attempted again.`
+    }
     return `The execution attempt for ${body.event_id} failed: ${body.execution?.detail || 'no detail was reported'}.`
   }
   if (body.status === 'no_action') {

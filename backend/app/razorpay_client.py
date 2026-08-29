@@ -8,6 +8,11 @@ unboundedly (no automatic retries at all), and maps every controlled failure —
 missing configuration, API/network failure, or an unexpected response — to an
 explicit error. The client answers only "did the provider-side operation
 succeed?"; it never estimates revenue recovery.
+
+A failure is additionally classified on the only axis that can duplicate real
+money movement: a proven provider refusal (no Payment Link exists) versus a
+result RecoveryOS cannot determine (a Payment Link may exist). The caller uses
+that distinction to decide whether the action may be attempted again.
 """
 
 from __future__ import annotations
@@ -28,8 +33,63 @@ class RazorpayExecutionError(RazorpayError):
     """The Razorpay provider rejected or failed the Payment Link request."""
 
 
-class RazorpayUnexpectedResponseError(RazorpayError):
-    """The provider response did not contain the required Payment Link data."""
+# Marks a failure after which RecoveryOS cannot say whether the provider
+# performed the side effect. It is carried in the error message (and therefore
+# in the ExecutionOutcome detail, which is how this codebase already conveys
+# machine-readable failure identifiers such as "configuration_missing") so the
+# distinction survives persistence without a schema change.
+PROVIDER_RESULT_UNKNOWN = "provider_result_unknown"
+
+
+class RazorpayResultUnknownError(RazorpayExecutionError):
+    """The request may have reached the provider and its result is unknown.
+
+    A subclass of RazorpayExecutionError so every existing caller keeps
+    treating it as an explicit provider failure; what it adds is the admission
+    that a Payment Link may nevertheless exist. Retrying such a request could
+    create a second real one, so the caller must not release its claim.
+    """
+
+    def __init__(self, message: str = "") -> None:
+        text = str(message).strip()
+        if not text:
+            text = PROVIDER_RESULT_UNKNOWN
+        elif not text.startswith(PROVIDER_RESULT_UNKNOWN):
+            text = f"{PROVIDER_RESULT_UNKNOWN}: {text}"
+        super().__init__(text)
+
+
+class RazorpayUnexpectedResponseError(RazorpayResultUnknownError):
+    """The provider response did not contain the required Payment Link data.
+
+    The provider answered, so it may well have created the link; RecoveryOS
+    just cannot read which one. That is an unknown result, not a rejection.
+    """
+
+
+def marks_provider_result_unknown(detail: str | None) -> bool:
+    """Whether a persisted failure detail records an unknown provider result."""
+    return isinstance(detail, str) and detail.strip().startswith(
+        PROVIDER_RESULT_UNKNOWN
+    )
+
+
+def _is_definitive_provider_rejection(exc: BaseException) -> bool:
+    """Whether the provider is known to have refused the request.
+
+    The Razorpay SDK raises ``BadRequestError`` only after receiving an HTTP
+    response carrying Razorpay's own BAD_REQUEST_ERROR code: the request was
+    evaluated and refused, so no Payment Link exists. Every other SDK error
+    (GatewayError, ServerError) and every transport error (requests'
+    ConnectionError/Timeout, which the SDK re-raises unchanged) leaves open the
+    possibility that the request was processed. The class is matched by name
+    across the MRO so this module still never imports the SDK eagerly.
+    """
+    return any(
+        klass.__name__ == "BadRequestError"
+        and klass.__module__.split(".")[0] == "razorpay"
+        for klass in type(exc).__mro__
+    )
 
 
 @dataclass(frozen=True)
@@ -149,7 +209,14 @@ class RazorpayPaymentLinkClient:
             # user/audit-facing data channel). The original exception is kept on
             # the chain (from exc) for internal debugging, but its text is not
             # surfaced in the message.
-            raise RazorpayExecutionError("razorpay_api_error") from exc
+            #
+            # Fail conservatively on the one axis that moves money: only a
+            # proven refusal is reported as a plain failure. Anything else —
+            # timeout, connection reset, 5xx, an exception this boundary does
+            # not recognize — may have created a real Payment Link.
+            if _is_definitive_provider_rejection(exc):
+                raise RazorpayExecutionError("razorpay_api_error") from exc
+            raise RazorpayResultUnknownError("razorpay_api_error") from exc
 
         if not isinstance(response, dict):
             raise RazorpayUnexpectedResponseError(

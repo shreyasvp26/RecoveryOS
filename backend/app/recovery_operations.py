@@ -28,6 +28,10 @@ Two rules govern the derived states:
 2. Simulated is not real. A SIMULATED intervention can reach EXECUTED and
    stops there. It never produces a recovered amount, because no provider
    observed any money.
+3. Failed is not always retryable. When a real Payment Link attempt ended
+   without a result RecoveryOS could interpret, the row reports the outcome as
+   PROVIDER_RESULT_UNKNOWN and is not offered for execution again: the link may
+   exist, and a retry could create a second real one.
 
 Nothing here evaluates policy, ranks candidates, executes, or fabricates a
 missing value: an absent record is reported as absent.
@@ -39,6 +43,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import db
 from .dashboard import rule_label
+from .razorpay_client import marks_provider_result_unknown
 from .selector import NO_ACTION
 
 # Derived decision states, in pipeline order.
@@ -52,6 +57,9 @@ STATE_EXECUTED = "EXECUTED"
 STATE_PENDING_OUTCOME = "PENDING_OUTCOME"
 STATE_RECOVERED = "RECOVERED"
 STATE_FAILED = "FAILED"
+# An outcome state only, never a lifecycle state: the row still reads FAILED
+# because no recovery exists, but the execution cannot be attempted again.
+STATE_PROVIDER_RESULT_UNKNOWN = "PROVIDER_RESULT_UNKNOWN"
 
 LIFECYCLE_STATES: tuple[str, ...] = (
     STATE_NOT_CLASSIFIED,
@@ -204,6 +212,21 @@ def _outcome_view(
     if execution is None:
         return empty
     if execution["status"] != "SUCCESS":
+        if execution["execution_mode"] == "REAL_RAZORPAY" and (
+            marks_provider_result_unknown(execution.get("detail"))
+        ):
+            return {
+                "state": STATE_PROVIDER_RESULT_UNKNOWN,
+                "recovered_amount_paise": None,
+                "recovered_at": None,
+                "payment_id": None,
+                "note": (
+                    "the provider was called and did not return a result "
+                    "RecoveryOS could interpret; a real Payment Link may exist, "
+                    "so this action is not attempted again and no recovery is "
+                    "claimed"
+                ),
+            }
         return {
             "state": STATE_FAILED,
             "recovered_amount_paise": None,
@@ -327,8 +350,12 @@ def build_queue_row(
         # An operator can only act where the authoritative state leaves room to
         # act. This is a UI affordance derived from persisted evidence — it is
         # NOT an authorization: the server re-derives policy on every execute.
+        # A failed attempt whose provider result is unknown is deliberately NOT
+        # actionable: the durable claim would refuse a second execution anyway,
+        # and offering the operator a button that cannot fire would be a lie.
         "actionable": lifecycle_state
-        in (STATE_RECOMMENDED, STATE_POLICY_ALLOWED, STATE_SELECTED, STATE_FAILED),
+        in (STATE_RECOMMENDED, STATE_POLICY_ALLOWED, STATE_SELECTED, STATE_FAILED)
+        and outcome["state"] != STATE_PROVIDER_RESULT_UNKNOWN,
     }
 
 

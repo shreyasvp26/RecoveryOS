@@ -32,6 +32,11 @@ before either writes its attempt, so both would be authorized and both would
 reach the provider. The claim is a concurrency primitive, not authorization:
 it decides WHICH of several already-authorized attempts may cross the external
 side-effect boundary, and it can never make a denied candidate executable.
+
+Whether the claim survives the attempt depends on what the boundary reported.
+A success or an unknown provider result keeps it, so the action is never
+attempted again; only a known failure — one that proves nothing happened
+provider-side — releases it and leaves the Phase 11 retry path intact.
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ from .optimizer import (
     OptimizerDecision,
 )
 from .optimizer_audit import OptimizerDecisionRecord
+from .razorpay_client import marks_provider_result_unknown
 from .selector import NO_ACTION, select_intervention
 
 STATUS_NOT_FOUND = "not_found"
@@ -99,6 +105,14 @@ PROVIDER_RESULT_UNKNOWN_DETAIL = (
     "the provider was called but the result could not be confirmed or "
     "persisted; a side effect may exist, so this action is never retried "
     "automatically"
+)
+
+# Recorded when the provider boundary itself reported a failure it could not
+# attribute — a timeout, a lost response, an unreadable reply. The outcome is
+# persisted as FAILED, but a real Payment Link may exist, so the claim stays.
+AMBIGUOUS_PROVIDER_RESULT_DETAIL = (
+    "the provider did not return a result RecoveryOS could interpret; a real "
+    "Payment Link may exist, so this action is not attempted again"
 )
 
 # Which selection mechanism decides among the policy-allowed candidates.
@@ -202,6 +216,20 @@ def _claim_conflict_result(
         event_id=event_id,
         selected_intervention=intervention,
         optimizer_decision=optimizer_decision,
+    )
+
+
+def _provider_result_is_unknown(outcome: ExecutionOutcome) -> bool:
+    """Whether the executor reported a failure it could not attribute.
+
+    Only a REAL_RAZORPAY attempt can leave a side effect behind, so only that
+    mode can be ambiguous; a SIMULATED failure contacted nobody and keeps its
+    existing retry semantics untouched.
+    """
+    return (
+        outcome.status == "FAILED"
+        and outcome.execution_mode == "REAL_RAZORPAY"
+        and marks_provider_result_unknown(outcome.detail)
     )
 
 
@@ -375,10 +403,23 @@ def execute_event(
             outcome.reported_at,
             None,
         )
+    elif _provider_result_is_unknown(outcome):
+        # The provider may have created a real Payment Link that RecoveryOS
+        # never saw. Releasing the claim here would invite a second one, so the
+        # claim is kept and this action is not attempted again.
+        resolve_execution_claim(
+            conn,
+            event.event_id,
+            selected,
+            CLAIM_STATUS_PROVIDER_RESULT_UNKNOWN,
+            outcome.reported_at,
+            AMBIGUOUS_PROVIDER_RESULT_DETAIL,
+        )
     else:
-        # An explicit FAILED outcome means the attempt produced no lasting
-        # side effect, so the action stays retryable exactly as it was before
-        # Phase 21. The claim existed only for the duration of the attempt.
+        # A known failure: the provider proved it did not act, or nothing ever
+        # reached it. The attempt produced no lasting side effect, so the action
+        # stays retryable exactly as it was before Phase 21. The claim existed
+        # only for the duration of the attempt.
         release_execution_claim(conn, event.event_id, selected)
 
     status = (
