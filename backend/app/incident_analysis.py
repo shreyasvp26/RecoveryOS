@@ -34,6 +34,8 @@ payment event, and no stored incident state that could drift from the data.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from typing import Any, Sequence
 
@@ -46,8 +48,18 @@ from .incidents import (
     detect_incidents,
 )
 from .models import PaymentEvent
-from .policy_scenario import PolicyScenario, current_scenario
-from .replay import ReplayResult, replay_scenario
+from .policy_scenario import (
+    SCENARIO_CURRENT,
+    PolicyScenario,
+    current_scenario,
+)
+from .replay import (
+    REPLAY_METHODOLOGY_VERSION,
+    ReplayResult,
+    replay_scenario,
+    replay_scenarios,
+)
+from .replay_metrics import compare_replays
 
 
 class IncidentAnalysisError(Exception):
@@ -195,6 +207,83 @@ def incident_evidence(
     payload = incident.to_dict()
     payload["evaluation"] = None if result is None else evaluation_identity(result)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Incident -> Policy Lab
+# ---------------------------------------------------------------------------
+
+# Bumping this identifies a deliberate change to how an incident subset is
+# assembled for replay. It is Phase 20's own version and does not touch the
+# canonical Phase 19 replay identity.
+INCIDENT_REPLAY_VERSION = "phase20-incident-subset-replay-v1"
+
+
+def incident_replay_id(
+    incident: Incident, scenarios: Sequence[PolicyScenario]
+) -> str:
+    """The deterministic identity of one incident's policy comparison.
+
+    The canonical Phase 19 replay id identifies a scenario against a benchmark
+    CONFIGURATION, which does not distinguish one incident's event subset from
+    another's. Phase 20 therefore adds its own small identity around the
+    incident, the exact events replayed and the policies compared, and leaves
+    the Phase 19 identity untouched — every underlying ReplayResult still
+    carries its own canonical id.
+    """
+    payload = {
+        "incident_replay_version": INCIDENT_REPLAY_VERSION,
+        "replay_methodology": REPLAY_METHODOLOGY_VERSION,
+        "incident_id": incident.incident_id,
+        "event_ids": sorted(incident.affected_event_ids),
+        "policy_fingerprints": sorted(
+            f"{scenario.scenario_id}:{scenario.fingerprint()}"
+            for scenario in scenarios
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.blake2b(encoded.encode("utf-8"), digest_size=12).hexdigest()
+    return f"incident-replay:{INCIDENT_REPLAY_VERSION}:{digest}"
+
+
+def replay_incident(
+    incident: Incident,
+    events: Sequence[PaymentEvent],
+    scenarios: Sequence[PolicyScenario],
+    *,
+    reference_scenario_id: str = SCENARIO_CURRENT,
+) -> dict[str, Any]:
+    """Compare policy scenarios over ONE incident's affected payments.
+
+    This is wiring, not a second replay engine: the affected ids are resolved
+    to their existing ``PaymentEvent`` records and handed to the Phase 19
+    ``replay_scenarios`` — which already accepts an explicit event subset — and
+    the comparison is produced by the Phase 19 ``compare_replays``. Phase 20
+    adds an identity for the subset and nothing else.
+
+    The result is SIMULATED throughout. No Razorpay call, no Payment Link, no
+    customer-facing action, no database write, and no change to the active
+    policy: the scenarios are values passed to the frozen engine, and the
+    active policy is only ever READ.
+    """
+    subset = affected_events(incident, events)
+    if not subset:
+        raise IncidentAnalysisError(
+            f"incident {incident.incident_id!r} covers no payments to replay"
+        )
+    scenarios = tuple(scenarios)
+    results = replay_scenarios(
+        scenarios, config=evaluation_config(subset), events=subset
+    )
+    comparison = compare_replays(results, reference_scenario_id)
+    return {
+        "incident_id": incident.incident_id,
+        "incident_replay_id": incident_replay_id(incident, scenarios),
+        "incident_replay_version": INCIDENT_REPLAY_VERSION,
+        "segment": incident.segment.to_dict(),
+        "affected_event_ids": list(incident.affected_event_ids),
+        **comparison,
+    }
 
 
 def evaluation_identity(result: ReplayResult) -> dict[str, Any]:

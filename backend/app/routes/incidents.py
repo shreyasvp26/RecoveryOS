@@ -4,9 +4,10 @@ Three read endpoints, because the Revenue Health screen needs exactly three
 things: which incidents exist, the full evidence for one of them, and the
 payments one covers.
 
-    GET /incidents                  every currently detected incident
-    GET /incidents/{id}             one incident's complete evidence
-    GET /incidents/{id}/events      the payments that incident covers
+    GET  /incidents                 every currently detected incident
+    GET  /incidents/{id}            one incident's complete evidence
+    GET  /incidents/{id}/events     the payments that incident covers
+    POST /incidents/{id}/replay     the Policy Lab, run on that exact subset
 
 These routes hold no detection logic, no metric and no threshold. They wire
 HTTP to ``incident_analysis`` (evidence) and ``incidents`` (detection), exactly
@@ -19,10 +20,12 @@ to the EXISTING ``/events/{id}/trace`` decision trace. It deliberately does not
 restate diagnosis, policy, optimizer or execution detail: there is one Event
 Decision Trace in RecoveryOS and this is a link to it, not a copy of it.
 
-READ ONLY
----------
-Incidents are derived on demand and persisted nowhere. Nothing in this module
-writes to the database, mutates a policy, or performs a payment action.
+NOTHING EXECUTES, NOTHING IS WRITTEN
+-----------------------------------
+Incidents are derived on demand and persisted nowhere. The replay endpoint runs
+the existing Phase 19 engine over the incident's affected events: it is
+simulated throughout, contacts no provider, creates no Payment Link, writes
+nothing, and cannot change the policy the live system runs on.
 """
 
 from __future__ import annotations
@@ -32,17 +35,28 @@ from collections.abc import Iterator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 
 from .. import db
 from ..incident_analysis import (
+    IncidentAnalysisError,
     affected_events,
     analyse_workload,
     evaluated_outcomes,
     evaluation_identity,
     find_incident,
     incident_evidence,
+    replay_incident,
 )
 from ..incidents import INCIDENT_RESULT_MODE
+from ..policy_scenario import (
+    BUILT_IN_SCENARIO_IDS,
+    SCENARIO_CURRENT,
+    PolicyScenario,
+    PolicyScenarioError,
+    resolve_scenario,
+)
+from ..replay import ReplayError
 
 router = APIRouter(tags=["revenue-health"])
 
@@ -54,6 +68,16 @@ INCIDENT_DISCLAIMER = (
     "evaluation results and simulated revenue at risk is a modelled estimate, "
     "not production revenue, merchant loss, or confirmed recoverable money. "
     "Detection performs no execution and changes no policy."
+)
+
+# The same ceiling the Policy Lab applies, for the same reason: one request
+# replays the subset once per scenario and must stay bounded.
+MAX_SCENARIOS_PER_INCIDENT_REPLAY = 6
+
+# Replaying an incident with no scenarios named compares the active policy
+# against its two derived alternatives — the Policy Lab's own default arms.
+DEFAULT_INCIDENT_REPLAY_SCENARIOS: tuple[dict[str, str], ...] = tuple(
+    {"scenario_id": scenario_id} for scenario_id in BUILT_IN_SCENARIO_IDS
 )
 
 
@@ -160,3 +184,104 @@ def get_incident_events(
         "count": len(events),
         "events": events,
     }
+
+
+@router.post("/incidents/{incident_id}/replay")
+def replay_incident_events(
+    incident_id: str,
+    payload: dict[str, Any] | None = None,
+    conn: sqlite3.Connection = Depends(get_db),
+) -> Any:
+    """Replay policy scenarios over one incident's affected payments.
+
+    Request (both fields optional)::
+
+        {
+          "scenarios": [{"scenario_id": "current"}, {"scenario_id": "custom", ...}],
+          "reference_scenario_id": "current"
+        }
+
+    Answers the only question worth asking about an incident: would a different
+    policy have done better on exactly these payments? The comparison is
+    produced by the existing Phase 19 machinery over the affected subset, is
+    SIMULATED throughout, and changes nothing about the running system.
+    """
+    payload = payload or {}
+    if not isinstance(payload, dict):
+        return _invalid("request body must be an object")
+
+    analysis = analyse_workload(conn)
+    incident = find_incident(analysis["incidents"], incident_id)
+    if incident is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"incident {incident_id} is not present in the current analysis",
+        )
+
+    definitions = payload.get("scenarios", list(DEFAULT_INCIDENT_REPLAY_SCENARIOS))
+    if not isinstance(definitions, list) or not definitions:
+        return _invalid("scenarios must be a non-empty list")
+    if len(definitions) > MAX_SCENARIOS_PER_INCIDENT_REPLAY:
+        return _invalid(
+            f"at most {MAX_SCENARIOS_PER_INCIDENT_REPLAY} scenarios can be "
+            f"compared in one request, got {len(definitions)}"
+        )
+
+    reference_id = payload.get("reference_scenario_id", SCENARIO_CURRENT)
+    if not isinstance(reference_id, str) or not reference_id.strip():
+        return _invalid("reference_scenario_id must be a non-empty string")
+
+    scenarios: list[PolicyScenario] = []
+    for index, definition in enumerate(definitions):
+        try:
+            scenarios.append(resolve_scenario(definition))
+        except PolicyScenarioError as exc:
+            # A malformed policy is refused before anything is evaluated.
+            return _invalid(str(exc), index=index)
+
+    identifiers = [scenario.scenario_id for scenario in scenarios]
+    if len(set(identifiers)) != len(identifiers):
+        return _invalid(
+            f"each scenario may appear at most once in a comparison; got "
+            f"{identifiers}"
+        )
+    if reference_id not in identifiers:
+        return _invalid(
+            f"reference_scenario_id {reference_id!r} must be one of the "
+            f"requested scenarios {identifiers}"
+        )
+
+    try:
+        comparison = replay_incident(
+            incident,
+            analysis["events"],
+            scenarios,
+            reference_scenario_id=reference_id,
+        )
+    except (ReplayError, PolicyScenarioError, IncidentAnalysisError) as exc:
+        return _invalid(str(exc))
+    except ValueError as exc:
+        # A comparison that cannot be shown fair is refused, not caveated.
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"status": "replay_comparison_failure", "detail": str(exc)},
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "status": "incident_replay_success",
+            "disclaimer": INCIDENT_DISCLAIMER,
+            **comparison,
+        },
+    )
+
+
+def _invalid(detail: str, *, index: int | None = None) -> JSONResponse:
+    """Refuse a request explicitly; nothing is evaluated."""
+    content: dict[str, Any] = {"status": "invalid_scenario", "detail": detail}
+    if index is not None:
+        content["scenario_index"] = index
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content=content
+    )
