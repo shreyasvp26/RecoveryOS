@@ -7,6 +7,9 @@ import { formatINR, formatRate } from '../core/format.js'
 
 const STRATEGY_META = {
   recovery_os: { label: 'RecoveryOS', tone: 'brand', desc: 'AI-guided recovery pipeline' },
+  recoveryos_v1: { label: 'RecoveryOS V1', tone: 'info', desc: 'Fixed-priority selection' },
+  recoveryos_v2: { label: 'RecoveryOS V2', tone: 'brand', desc: 'Economic optimizer' },
+  oracle: { label: 'Oracle', tone: 'warn', desc: 'Evaluation-only upper bound' },
   naive_retry: { label: 'Naive retry', tone: 'info', desc: 'Blind retry on every failure' },
   no_action: { label: 'No action', tone: 'neutral', desc: 'Do nothing baseline' },
 }
@@ -28,18 +31,25 @@ function BenchmarkPanel({ bench }) {
     return (
       <EmptyState
         title="Benchmark comparison unavailable"
-        message="No persisted benchmark run is on record. Run the Phase 9 simulated benchmark (e.g. `python -m app.benchmark_store --seed 42 --count 500` from backend/) to populate a comparison. Until then the dashboard will not invent or guess recovery numbers."
+        message="No persisted benchmark run is on record. Run the simulated benchmark (e.g. `python -m app.benchmark_store --seed 42 --count 500` from backend/) to populate a comparison. Until then the dashboard will not invent or guess recovery numbers."
       />
     )
   }
+  const isPhase17 = String(bench.methodology || '').startsWith('phase17')
   return (
     <div className="benchmark">
       <div className="benchmark__meta">
-        <Badge tone="warn">SIMULATED BENCHMARK — evaluation, not production revenue</Badge>
+        <Badge tone="warn">SIMULATED EVALUATION — synthetic benchmark, not production revenue</Badge>
         <span className="meta-line">
           Run {bench.run_id} · seed {bench.seed} · {bench.event_count} events ·{' '}
           {bench.evaluation_mode}
+          {isPhase17 ? ` · ${bench.methodology} · result: ${bench.verdict}` : ''}
         </span>
+        <p className="panel-note">
+          These figures are produced by RecoveryOS&rsquo;s controlled synthetic
+          benchmark against a hidden model of the world. They are not claims of
+          production Razorpay recovery performance.
+        </p>
       </div>
       <div className="strategy-grid">
         {(bench.strategies || []).map((s) => {
@@ -55,9 +65,20 @@ function BenchmarkPanel({ bench }) {
               </div>
               <div className="strategy__label">SIMULATED revenue recovered</div>
               <dl className="strategy__details">
-                <div><dt>Recovery rate</dt><dd>{formatRate(s.recovery_rate)}</dd></div>
-                <div><dt>Efficiency</dt><dd>{formatINR(s.efficiency_paise_per_intervention)}/action</dd></div>
-                <div><dt>Interventions</dt><dd>{s.successful_interventions}/{s.interventions_attempted}</dd></div>
+                {s.recovery_rate === undefined ? (
+                  <>
+                    <div><dt>vs No Action</dt><dd>{formatINR(s.incremental_vs_no_action_paise)}</dd></div>
+                    <div><dt>Regret</dt><dd>{formatINR(s.total_regret_paise)}</dd></div>
+                    <div><dt>Optimal</dt><dd>{formatRate(s.optimal_selection_rate)}</dd></div>
+                    <div><dt>Interventions</dt><dd>{s.interventions_attempted}</dd></div>
+                  </>
+                ) : (
+                  <>
+                    <div><dt>Recovery rate</dt><dd>{formatRate(s.recovery_rate)}</dd></div>
+                    <div><dt>Efficiency</dt><dd>{formatINR(s.efficiency_paise_per_intervention)}/action</dd></div>
+                    <div><dt>Interventions</dt><dd>{s.successful_interventions}/{s.interventions_attempted}</dd></div>
+                  </>
+                )}
               </dl>
             </div>
           )
@@ -72,11 +93,35 @@ function BenchmarkPanel({ bench }) {
             <span className="delta-value">{formatINR(bench.incremental_over_no_action_paise)}</span>
             <span className="delta-note">incremental SIMULATED recovered revenue</span>
           </div>
-          <div className="delta-card">
-            <span className="delta-label">RecoveryOS vs Naive Retry</span>
-            <span className="delta-value">{formatINR(bench.recoveryos_vs_naive_retry_paise)}</span>
-            <span className="delta-note">incremental SIMULATED recovered revenue</span>
-          </div>
+          {isPhase17 ? (
+            <>
+              <div className="delta-card">
+                <span className="delta-label">V2 vs V1</span>
+                <span className="delta-value">{formatINR(bench.v2_vs_v1_paise)}</span>
+                <span className="delta-note">incremental SIMULATED recovered revenue</span>
+              </div>
+              <div className="delta-card">
+                <span className="delta-label">V2 Oracle value capture</span>
+                <span className="delta-value">{formatRate(bench.v2_oracle_value_capture)}</span>
+                <span className="delta-note">
+                  share of the decision value the Oracle could add
+                </span>
+              </div>
+              <div className="delta-card">
+                <span className="delta-label">Economic regret</span>
+                <span className="delta-value">{formatINR(bench.v2_total_regret_paise)}</span>
+                <span className="delta-note">
+                  V2 total; V1 {formatINR(bench.v1_total_regret_paise)}
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="delta-card">
+              <span className="delta-label">RecoveryOS vs Naive Retry</span>
+              <span className="delta-value">{formatINR(bench.recoveryos_vs_naive_retry_paise)}</span>
+              <span className="delta-note">incremental SIMULATED recovered revenue</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

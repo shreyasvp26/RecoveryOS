@@ -152,10 +152,25 @@ def test_the_sut_never_names_hidden_ground_truth(module: str) -> None:
 
 def test_the_oracle_is_benchmark_only() -> None:
     """The Oracle is an upper bound to measure against, never a strategy."""
-    for module in (*SUT_MODULES, "dashboard", "main", "ingestion", "webhook_service"):
+    for module in (*SUT_MODULES, "main", "ingestion", "webhook_service"):
         source = _code_only(module)
         for term in ("Oracle", "oracle"):
             assert term not in source, f"{module} references the Oracle: {term}"
+
+
+def test_the_dashboard_can_render_an_oracle_figure_but_never_compute_one() -> None:
+    """The benchmark view shows the Oracle column; it cannot run an Oracle.
+
+    The dashboard reads a persisted summary and projects it. It has no path to
+    the module that owns the Oracle, so it cannot evaluate hidden truth even if
+    a future change asked it to.
+    """
+    reachable = {"dashboard"} | _transitive_app_imports("dashboard")
+    assert "benchmark_phase17" not in reachable
+    assert "hidden_world" not in reachable
+    source = _code_only("dashboard")
+    for term in ("evaluate_oracle", "OracleEvaluation", "HiddenWorld"):
+        assert term not in source
 
 
 def test_the_production_api_never_exposes_hidden_truth() -> None:
@@ -248,24 +263,35 @@ def test_production_result_types_carry_no_hidden_fields() -> None:
         )
 
 
-def test_the_dashboard_payload_contains_no_hidden_truth() -> None:
+def test_the_dashboard_never_serves_per_event_ground_truth() -> None:
+    """Even with a full Phase 17 run persisted, no hidden probability escapes.
+
+    The benchmark view is allowed aggregate evaluation figures — that is what a
+    benchmark view is for — but the per-event probabilities, coin draws and
+    oracle option tables must stay inside the in-memory report.
+    """
     import json
 
     from app import db
+    from app.benchmark_store import persist_phase17_benchmark
     from app.dashboard import build_dashboard_summary
 
     conn = db.connect(":memory:")
     db.init_db(conn)
     try:
+        persist_phase17_benchmark(conn, seed=42, event_count=40)
         payload = json.dumps(build_dashboard_summary(conn))
     finally:
         conn.close()
+
+    assert "phase17" in payload, "the Phase 17 run should be the one displayed"
     for term in (
         "true_probability_bps",
-        "true_ev_paise",
-        "oracle",
-        "hidden_probability",
         "draw_bps",
+        "hidden_probability",
+        "option_true_ev_paise",
+        "oracle_true_ev_paise",
+        "evt_",
     ):
         assert term not in payload, f"the operator dashboard exposes {term}"
 
