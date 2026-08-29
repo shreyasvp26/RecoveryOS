@@ -103,3 +103,11 @@ export const incidentEvents = (incidentId) =>
   get(`/incidents/${encodeURIComponent(incidentId)}/events`)
 export const replayIncident = (incidentId, body) =>
   post(`/incidents/${encodeURIComponent(incidentId)}/replay`, body ?? {})
+export const recoveryQueue = (params) => get('/recovery/queue', params)
+/**
+ * Ask the server to execute for one event. The body is deliberately empty:
+ * the intervention, the authorization and the evaluation time are the
+ * server's to derive, and it rejects a request that tries to supply them.
+ */
+export const executeRecovery = (eventId) =>
+  post(`/recovery/${encodeURIComponent(eventId)}/execute`, {})

@@ -39,7 +39,7 @@ recoveryos/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
+├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, RECOVERY_OPERATIONS.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
 ├── README.md
 └── .gitignore
 ```
@@ -220,6 +220,23 @@ uvicorn app.main:app                              # start the API
 ## Phase history
 
 The sections below are a **historical record** of how each capability was built, retained for provenance and audit. They describe the phase in which a capability landed, not the current status of the repository — for current status see the top of this file.
+
+### Phase 21 — Recovery Operations Center
+
+```bash
+cd backend
+python -m pytest                                          # full suite (Phase 21 tests included)
+curl -s localhost:8000/recovery/queue | head              # the operational queue
+curl -s -X POST localhost:8000/recovery/<event_id>/execute -d '{}' \
+     -H 'Content-Type: application/json'                  # operator execution (server decides what)
+```
+
+- **The operational question, answered from persisted state** — which failed payments need attention, what RecoveryOS diagnosed, whether policy allowed it, what was selected, whether it executed, and whether the money came back. The queue is a **projection** over `payment_events`, `classification_results`, `policy_decisions`, `optimizer_decisions`, `execution_outcomes` and `webhook_recovery_outcomes`. No `recovery_queue` table and no second lifecycle store, so a row cannot disagree with the authoritative records.
+- **Execution is not recovery** — a successfully created real Payment Link is `PENDING_OUTCOME` and reads "Waiting for payment". It becomes `RECOVERED` only when the Phase 12 webhook path verifies and correlates a payment to that exact link, and the amount shown is the provider's trusted `amount_paid`.
+- **Simulated is not real** — `SIMULATED` interventions reach `EXECUTED` and stop. They never carry a recovered amount, and every actionable row states its execution mode so a demo viewer cannot mistake one for the other. `payment_link` remains the only real Razorpay action, Test Mode only.
+- **The operator chooses whether, never what** — `POST /recovery/{id}/execute` reuses the existing execution service, which re-derives the classification, the deterministic policy decisions and the economic selection from server state. A request supplying an intervention, an authorization, an execution mode or an evaluation time is refused with 422; nothing executes.
+- **Concurrent duplicates are impossible** — the policy gate blocks sequential duplicates from persisted history, but two simultaneous requests can both read that history before either writes. A durable claim on `(event_id, intervention)` makes SQLite decide which single attempt reaches the provider. It grants no authorization and cannot make a denied candidate executable.
+- **Provider uncertainty is stated, not guessed** — if the provider was called and the result could not be confirmed, the claim is parked as `PROVIDER_RESULT_UNKNOWN` and never retried automatically, because a retry could create a second real Payment Link. See `docs/RECOVERY_OPERATIONS.md` for the state table, the safety invariants and the limitations.
 
 ### Phase 20 — Revenue Health: incident-level degradation detection
 

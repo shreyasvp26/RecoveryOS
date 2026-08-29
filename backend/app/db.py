@@ -172,6 +172,30 @@ CREATE TABLE IF NOT EXISTS optimizer_decisions (
 """
 
 
+# Phase 21: the durable execution claim. The Phase 6 policy gate already
+# blocks SEQUENTIAL duplicates from persisted history, but two requests that
+# both read that history before either writes its attempt can both be
+# authorized and both reach the provider. This table closes that window and
+# nothing else: (event_id, intervention) is the logical action identity and is
+# the PRIMARY KEY, so SQLite — not application state — decides which single
+# attempt may cross the external side-effect boundary.
+#
+# It is NOT a policy engine, NOT an authorization record, and NOT a second
+# execution history: holding a claim confers no permission to execute, and the
+# authoritative execution evidence remains execution_outcomes.
+_EXECUTION_CLAIMS_DDL = """
+CREATE TABLE IF NOT EXISTS execution_claims (
+    event_id     TEXT NOT NULL,
+    intervention TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    claimed_at   TEXT NOT NULL,
+    resolved_at  TEXT,
+    detail       TEXT,
+    PRIMARY KEY (event_id, intervention)
+)
+"""
+
+
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection to the given database path.
 
@@ -203,6 +227,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_WEBHOOK_DELIVERIES_DDL)
         conn.execute(_WEBHOOK_RECOVERY_OUTCOMES_DDL)
         conn.execute(_OPTIMIZER_DECISIONS_DDL)
+        conn.execute(_EXECUTION_CLAIMS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
@@ -522,6 +547,106 @@ def get_execution_outcome_by_payment_link_id(
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 21 execution claim (concurrency/idempotency boundary).
+# The claim is taken immediately before the executor runs and resolved
+# immediately after. It stores no decision and no authorization.
+# ---------------------------------------------------------------------------
+
+
+def claim_execution(
+    conn: sqlite3.Connection,
+    event_id: str,
+    intervention: str,
+    claimed_at: str,
+) -> bool:
+    """Atomically claim one (event, intervention), returning whether we won.
+
+    The PRIMARY KEY makes this a database-level compare-and-set: exactly one
+    concurrent caller receives True, and every other caller receives False
+    without any side effect. Any other sqlite3.Error propagates, because a
+    claim that cannot be recorded must stop the execution (fail-closed) rather
+    than proceed unprotected.
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO execution_claims (
+                event_id, intervention, status, claimed_at, resolved_at, detail
+            ) VALUES (?, ?, 'claimed', ?, NULL, NULL)
+            """,
+            (event_id, intervention, claimed_at),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_execution_claim(
+    conn: sqlite3.Connection, event_id: str, intervention: str
+) -> dict[str, Any] | None:
+    """Retrieve a persisted execution claim, or None when none is held."""
+    row = conn.execute(
+        """
+        SELECT * FROM execution_claims
+        WHERE event_id = ? AND intervention = ?
+        """,
+        (event_id, intervention),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def resolve_execution_claim(
+    conn: sqlite3.Connection,
+    event_id: str,
+    intervention: str,
+    status: str,
+    resolved_at: str,
+    detail: str | None,
+) -> None:
+    """Move a held claim to a terminal status (never deleting the evidence)."""
+    try:
+        conn.execute(
+            """
+            UPDATE execution_claims
+            SET status = ?, resolved_at = ?, detail = ?
+            WHERE event_id = ? AND intervention = ?
+            """,
+            (status, resolved_at, detail, event_id, intervention),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def release_execution_claim(
+    conn: sqlite3.Connection, event_id: str, intervention: str
+) -> None:
+    """Drop a claim so the action can be attempted again.
+
+    Used only when the attempt provably produced no lasting side effect (the
+    executor reported an explicit FAILED outcome), which keeps the Phase 11
+    retry-after-failure semantics exactly as they were.
+    """
+    try:
+        conn.execute(
+            "DELETE FROM execution_claims WHERE event_id = ? AND intervention = ?",
+            (event_id, intervention),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
 def get_policy_history(
     conn: sqlite3.Connection, event: PaymentEvent, evaluation_time: datetime
 ) -> PolicyHistory:
@@ -812,6 +937,166 @@ def get_intervention_attempt_summary(
             summary[r["event_id"]]["last_intervention"] = r["intervention"]
             summary[r["event_id"]]["last_attempt_status"] = r["status"]
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Phase 21 batched read queries (Recovery Operations projection).
+# The Recovery Operations Center is a READ MODEL over the records the
+# existing decision path already persists, so these helpers only fetch those
+# rows for a set of events in one query each (no N+1, no new source of truth).
+# They derive nothing: state derivation lives in recovery_operations.py.
+# ---------------------------------------------------------------------------
+
+
+def list_events_for_recovery_queue(
+    conn: sqlite3.Connection,
+    *,
+    risk_flag: str | None = None,
+    failure_reason: str | None = None,
+    scan_limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Return candidate events (newest first) for the operations projection.
+
+    Only event-level columns can be filtered here; every derived operational
+    state is filtered after projection, because it is not a stored column.
+    ``scan_limit`` bounds the working set so the projection stays a bounded
+    read rather than an unbounded query engine.
+    """
+    sql = "SELECT * FROM payment_events WHERE 1 = 1"
+    params: list[Any] = []
+    if risk_flag:
+        sql += " AND risk_flag = ?"
+        params.append(risk_flag)
+    if failure_reason:
+        sql += " AND failure_reason = ?"
+        params.append(failure_reason)
+    sql += " ORDER BY timestamp DESC, event_id DESC LIMIT ?"
+    params.append(int(scan_limit))
+    return [_row_to_event(row).to_dict() for row in conn.execute(sql, params)]
+
+
+def _chunked_in_query(
+    conn: sqlite3.Connection, sql_template: str, event_ids: list[str]
+) -> list[sqlite3.Row]:
+    """Run an ``IN (...)`` query over event ids, chunked below SQLite's limit."""
+    rows: list[sqlite3.Row] = []
+    chunk_size = 400
+    for start in range(0, len(event_ids), chunk_size):
+        chunk = event_ids[start : start + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        rows.extend(conn.execute(sql_template.format(ids=placeholders), chunk))
+    return rows
+
+
+def get_classification_results_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return event_id -> persisted classification for the given events."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM classification_results WHERE event_id IN ({ids})",
+        event_ids,
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        data = dict(row)
+        data["candidate_interventions"] = json.loads(data["candidate_interventions"])
+        out[data["event_id"]] = data
+    return out
+
+
+def get_policy_decisions_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return event_id -> every persisted policy decision, oldest first."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM policy_decisions WHERE event_id IN ({ids}) "
+        "ORDER BY evaluated_at ASC",
+        event_ids,
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        data = dict(row)
+        data["allowed"] = bool(data["allowed"])
+        data["policy_rules_applied"] = json.loads(data["policy_rules_applied"])
+        out.setdefault(data["event_id"], []).append(data)
+    return out
+
+
+def get_optimizer_decisions_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return event_id -> every persisted optimizer decision, oldest first."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM optimizer_decisions WHERE event_id IN ({ids}) "
+        "ORDER BY decided_at ASC",
+        event_ids,
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        data = _row_to_optimizer_decision(row)
+        out.setdefault(data["event_id"], []).append(data)
+    return out
+
+
+def get_execution_outcomes_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return event_id -> every persisted execution outcome, oldest first."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM execution_outcomes WHERE event_id IN ({ids}) "
+        "ORDER BY reported_at ASC",
+        event_ids,
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        data = dict(row)
+        out.setdefault(data["event_id"], []).append(data)
+    return out
+
+
+def get_webhook_recovery_outcomes_for_payment_links(
+    conn: sqlite3.Connection, payment_link_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return payment_link_id -> its most recent verified recovery outcome.
+
+    Verified recovery is the ONLY evidence that a real Payment Link was paid;
+    an absent entry means the link has not been observed as paid, never that
+    it failed.
+    """
+    if not payment_link_ids:
+        return {}
+    rows: list[sqlite3.Row] = []
+    chunk_size = 400
+    for start in range(0, len(payment_link_ids), chunk_size):
+        chunk = payment_link_ids[start : start + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT * FROM webhook_recovery_outcomes
+                WHERE payment_link_id IN ({placeholders})
+                ORDER BY recovered_at ASC
+                """,
+                chunk,
+            )
+        )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        data = dict(row)
+        out[data["payment_link_id"]] = data
+    return out
 
 
 def get_policy_decision_stats(conn: sqlite3.Connection) -> dict[str, int]:
