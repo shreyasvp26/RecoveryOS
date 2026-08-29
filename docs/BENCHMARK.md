@@ -308,6 +308,22 @@ Configuration fingerprint `788e79ad98728b0d713dda5c19da1d84`. **All figures SIMU
 
 The criterion is **total true economic value**, not realized revenue: realized revenue is a sum of 500 Bernoulli draws and moves on luck alone, whereas true EV is what the decision actually controlled. Materiality is **1% of `(Oracle total true EV − No Action total true EV)`** — the value genuinely at stake in the decisions. A difference below that is reported as a tie, not spun as a win. `test_benchmark_phase17.py` proves the same rule returns `V2 LOST` when fed an inverted comparison.
 
+### Robustness seeds (all declared in advance, all reported)
+
+500 events each, `event_seed = outcome_seed`. Every seed in `ROBUSTNESS_SEEDS` is listed; none was added or dropped after the fact.
+
+| Seed | Verdict | V2 − V1 true EV | V2 − V1 realized revenue | V1 capture | V2 capture |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| **42** (canonical) | V2 WON | +₹100,006.72 | +₹76,855 | 79.4% | 93.1% |
+| 7 | V2 WON | +₹114,604.83 | +₹153,178 | 79.4% | 94.7% |
+| 1337 | V2 WON | +₹118,257.40 | **−₹121,281** | 77.4% | 93.2% |
+| 2024 | V2 WON | +₹137,916.92 | +₹89,810 | 78.1% | 94.5% |
+| 31415 | V2 WON | +₹98,737.26 | +₹311,114 | 80.6% | 93.4% |
+
+Fraud intervention rate 0%, unauthorized executions 0 and exceptions 0 for V1 and V2 on every seed.
+
+**Seed 1337 is the most instructive row and is reported rather than buried.** V2 made materially better decisions (+₹118,257.40 of true EV, 93.2% vs 77.4% Oracle capture) and still recovered **₹121,281 less simulated revenue than V1**, purely through Bernoulli luck. Realized revenue over 500 coin flips is a noisy statistic; this is exactly why the frozen verdict criterion is true economic value, and it is also a warning against quoting a single realized-revenue delta as evidence of anything.
+
 ### Interpretation
 
 V2's gain is a **targeting** gain, not an **effort** gain: both arms intervened on exactly the same 180 events. V1's frozen priority puts `retry_delayed` first, so it selects `retry_delayed` on every actionable event; V2 re-ranks by expected value and moves 129 of them to `payment_link`. On `expired_card`, `authentication_failed` and `declined_by_bank` events the world genuinely rewards a customer-facing path over a silent retry, and that is where the ₹100,006.72 comes from.
