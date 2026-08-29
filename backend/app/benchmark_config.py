@@ -40,7 +40,15 @@ from .config import (
     DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H,
 )
 from .economics import DEFAULT_ECONOMIC_MODEL, EconomicModel
-from .hidden_world import RANDOMIZATION_VERSION
+from .generator import (
+    EVENT_GENERATOR_METHODOLOGY_VERSION,
+    event_generator_fingerprint,
+)
+from .hidden_world import (
+    HIDDEN_WORLD_METHODOLOGY_VERSION,
+    RANDOMIZATION_VERSION,
+    hidden_world_fingerprint,
+)
 from .policy import PolicyConfig
 
 
@@ -216,6 +224,12 @@ class Phase17BenchmarkConfig:
             "randomization_version": self.randomization_version,
             "false_intervention_rule": self.false_intervention_rule,
             "estimator_fingerprint": _estimator_fingerprint(),
+            "hidden_world_methodology_version": HIDDEN_WORLD_METHODOLOGY_VERSION,
+            "hidden_world_fingerprint": hidden_world_fingerprint(),
+            "event_generator_methodology_version": (
+                EVENT_GENERATOR_METHODOLOGY_VERSION
+            ),
+            "event_generator_fingerprint": event_generator_fingerprint(),
             "policy_config": {
                 "max_interventions_per_customer_24h": (
                     self.policy_config.max_interventions_per_customer_24h
