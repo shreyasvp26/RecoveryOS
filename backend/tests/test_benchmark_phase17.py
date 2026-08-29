@@ -19,24 +19,35 @@ from app.benchmark_config import (
 from app.benchmark_phase17 import (
     CANONICAL_STRATEGY_ORDER,
     EXCEPTION_CATEGORIES,
+    EXCEPTION_SIMULATION,
     POLICY_BOUNDED_STRATEGIES,
+    SOURCE_V2_ECONOMIC,
     STRATEGY_NAIVE_RETRY,
     STRATEGY_NO_ACTION,
     STRATEGY_ORACLE,
     STRATEGY_V1,
     STRATEGY_V2,
     Phase17BenchmarkError,
+    arm_recoveryos_v2,
+    build_event_context,
     evaluate_oracle,
     run_phase17_benchmark,
 )
 from app.benchmark_phase17_metrics import (
     all_strategy_metrics,
+    exception_counts,
+    false_intervention_rate,
     interventions_attempted,
+    intervention_mix,
     recovered_revenue_paise,
+    scoreable_interventions,
     selection_disagreements,
     strategy_metrics,
     total_true_ev_paise,
+    unauthorized_attempts,
 )
+from app.benchmark_simulation import SimulatedExecutor
+from app.benchmark import DeterministicClassifier
 from app.benchmark_phase17_report import (
     VERDICT_NOT_YET,
     VERDICT_V2_LOST,
@@ -249,6 +260,85 @@ def test_exceptions_are_categorized_and_never_become_outcomes(small_report) -> N
                 assert not record.recovered
                 assert record.recovered_amount_paise == 0
                 assert record.exception_category in EXCEPTION_CATEGORIES
+
+
+def test_a_failure_after_execution_preserves_the_execution_that_ran() -> None:
+    """An execution that really happened is never erased by a later failure.
+
+    Outcome realization is monkeypatched to raise *after* the simulated
+    execution has already succeeded. The record must still show the attempt,
+    its authorization and its simulated execution, while claiming no recovery.
+    """
+    world = HiddenWorld(outcome_seed=42, model=DEFAULT_ECONOMIC_MODEL)
+
+    def exploding_realize(event, intervention):
+        raise RuntimeError("the world failed to report an outcome")
+
+    world.realize = exploding_realize  # type: ignore[method-assign]
+
+    config = Phase17BenchmarkConfig(event_count=60)
+    events = generate_events(seed=config.event_seed, count=config.event_count)
+    executor = SimulatedExecutor()
+    contexts = [
+        build_event_context(event, DeterministicClassifier(), config, world)
+        for event in events
+    ]
+
+    acted = []
+    for context in contexts:
+        record = arm_recoveryos_v2(context, world, executor)
+        if record.selected_intervention != NO_ACTION:
+            acted.append(record)
+
+    assert acted, "the fixture must exercise at least one real intervention"
+    for record in acted:
+        assert record.exception is not None
+        assert record.exception_category == EXCEPTION_SIMULATION
+        assert record.attempted is True
+        assert record.authorized is True
+        assert record.execution is not None
+        assert record.execution.execution_mode == "SIMULATED"
+        assert record.execution.intervention == record.selected_intervention
+        assert record.selection_source == SOURCE_V2_ECONOMIC
+        assert record.recovered is False
+        assert record.recovered_amount_paise == 0
+
+    assert interventions_attempted(acted) == len(acted)
+    assert scoreable_interventions(acted) == 0
+    assert recovered_revenue_paise(acted) == 0
+    assert unauthorized_attempts(acted) == 0
+    assert false_intervention_rate(acted) is None
+    assert sum(exception_counts(acted).values()) == len(acted)
+    assert intervention_mix(acted) == {
+        record.selected_intervention: sum(
+            1 for other in acted if other.selected_intervention
+            == record.selected_intervention
+        )
+        for record in acted
+    }
+
+
+def test_a_failure_before_execution_still_records_nothing_attempted() -> None:
+    """The pre-execution semantics are unchanged: nothing ran, nothing claimed."""
+
+    class BrokenClassifier:
+        def generate(self, prompt: str) -> str:
+            raise RuntimeError("classifier unavailable")
+
+    report = run_phase17_benchmark(
+        Phase17BenchmarkConfig(event_count=20), classifier=BrokenClassifier()
+    )
+    for strategy in CANONICAL_STRATEGY_ORDER:
+        records = report.for_strategy(strategy)
+        assert len(records) == 20
+        for record in records:
+            assert record.exception is not None
+            assert record.attempted is False
+            assert record.authorized is False
+            assert record.execution is None
+            assert record.selected_intervention == NO_ACTION
+            assert record.recovered_amount_paise == 0
+        assert interventions_attempted(records) == 0
 
 
 def test_a_broken_classifier_surfaces_as_a_visible_exception() -> None:

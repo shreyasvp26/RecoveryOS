@@ -455,9 +455,25 @@ class StrategyEventRecord:
 
 
 def _exception_record(
-    context: EventWorldContext, strategy: str, detail: str, category: str
+    context: EventWorldContext,
+    strategy: str,
+    detail: str,
+    category: str,
+    *,
+    selected: str = NO_ACTION,
+    source: str = SOURCE_CONTROL,
+    attempted: bool = False,
+    authorized: bool = False,
+    execution: SimulatedExecution | None = None,
 ) -> StrategyEventRecord:
-    """Build a visible, categorized failure record that claims nothing."""
+    """Build a visible, categorized failure record that claims nothing.
+
+    A failure claims no recovery, but it must not erase what already happened.
+    The caller passes whatever state the pipeline had genuinely reached, so a
+    failure during outcome realization still records the intervention that was
+    selected and the simulated execution that really ran. Defaults describe a
+    failure before any decision was reached.
+    """
     return StrategyEventRecord(
         event_id=context.event.event_id,
         strategy=strategy,
@@ -472,11 +488,11 @@ def _exception_record(
             else tuple(context.classification.candidate_interventions)
         ),
         allowed_candidates=context.allowed,
-        selected_intervention=NO_ACTION,
-        selection_source=SOURCE_CONTROL,
-        attempted=False,
-        authorized=False,
-        execution=None,
+        selected_intervention=selected,
+        selection_source=source,
+        attempted=attempted,
+        authorized=authorized,
+        execution=execution,
         recovered=False,
         recovered_amount_paise=0,
         true_probability_bps=None,
@@ -510,12 +526,31 @@ def _finalize(
     The order is load bearing and mirrors reality: the action is decided, then
     performed, and only then does the world decide whether money came back.
     Execution success never implies recovery.
+
+    State accumulates as the pipeline advances, and a failure at any stage
+    reports the state actually reached rather than resetting to the beginning.
+    An execution that genuinely ran stays on the record even if the world then
+    fails to tell us the outcome, because the benchmark's accounting must not
+    lose an intervention it really performed.
     """
     assert context.classification is not None and context.oracle is not None
     event = context.event
     execution: SimulatedExecution | None = None
     attempted = selected != NO_ACTION
     authorized = False
+
+    def failure(detail: str, category: str) -> StrategyEventRecord:
+        return _exception_record(
+            context,
+            strategy,
+            detail,
+            category,
+            selected=selected,
+            source=source,
+            attempted=attempted and execution is not None,
+            authorized=authorized,
+            execution=execution,
+        )
 
     if attempted:
         try:
@@ -526,13 +561,14 @@ def _finalize(
                 require_authorization=require_authorization,
             )
         except SimulatedExecutionError as exc:
-            return _exception_record(context, strategy, str(exc), EXCEPTION_SIMULATION)
+            return failure(str(exc), EXCEPTION_SIMULATION)
         authorized = execution.authorized
 
     try:
         outcome = world.realize(event, selected)
+        true_ev_paise = world.true_ev_paise(event, selected)
     except Exception as exc:
-        return _exception_record(context, strategy, str(exc), EXCEPTION_SIMULATION)
+        return failure(str(exc), EXCEPTION_SIMULATION)
 
     return StrategyEventRecord(
         event_id=event.event_id,
@@ -548,7 +584,7 @@ def _finalize(
         recovered=outcome.recovered,
         recovered_amount_paise=outcome.recovered_amount_paise,
         true_probability_bps=outcome.true_probability_bps,
-        true_ev_paise=world.true_ev_paise(event, selected),
+        true_ev_paise=true_ev_paise,
         oracle_intervention=context.oracle.selected_intervention,
         oracle_true_ev_paise=context.oracle.true_ev_paise,
         no_action_true_ev_paise=context.oracle.no_action_true_ev_paise,

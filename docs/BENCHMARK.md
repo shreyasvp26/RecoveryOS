@@ -199,7 +199,13 @@ The draw is a **pure function of that key**. No shared mutable RNG stream, no `r
 
 ## 10. Frozen parameters (`app/benchmark_config.py`)
 
-One serializable `Phase17BenchmarkConfig` holds every parameter that can move a number: `methodology`, `event_count`, `event_seed`, `outcome_seed`, `hidden_model_seed`, `replication`, `evaluation_time`, `evaluation_mode`, `randomization_version`, `false_intervention_rule`, the full `policy_config`, the full `economic_model`, and an `estimator_fingerprint` digest of V2's coefficient tables. `fingerprint()` digests the whole thing; two runs with the same fingerprint must produce identical results.
+One serializable `Phase17BenchmarkConfig` holds every parameter that can move a number: `methodology`, `event_count`, `event_seed`, `outcome_seed`, `hidden_model_seed`, `replication`, `evaluation_time`, `evaluation_mode`, `randomization_version`, `false_intervention_rule`, the full `policy_config`, the full `economic_model`, and three methodology digests — `estimator_fingerprint` (V2's coefficient tables), `hidden_world_fingerprint`, and `event_generator_fingerprint`. `fingerprint()` digests the whole thing; two runs with the same fingerprint must produce identical results.
+
+Each methodology digest lives in the module it describes, next to the values themselves rather than duplicated into the configuration, so it cannot drift away from what the code actually does. Each is a canonical JSON serialization with sorted keys digested by blake2b — deterministic across processes, machines and dictionary ordering. Python's built-in `hash` is deliberately not used: it is randomized per process and therefore useless as a persistent experiment identity. A test runs two interpreters with different `PYTHONHASHSEED` values and asserts the digests agree.
+
+Both modules also carry a `*_METHODOLOGY_VERSION` string. The digest catches a changed *value*; the version catches a changed *structure* — a new term in the score, or a reordered draw in the generator — which a hash over the existing tables cannot see.
+
+This closes a real reproducibility gap. Before it, retuning a hidden-world coefficient would have changed every benchmark number while leaving the configuration fingerprint identical, which is precisely the failure mode an experiment claiming a frozen world must not have.
 
 `hidden_model_seed` is recorded but **deliberately unused**: the Phase 17 world is a pure function of event features and needs no randomness to define its probabilities. Only the Bernoulli realization is seeded, via `outcome_seed`. Keeping the field makes that auditable.
 
@@ -255,6 +261,10 @@ Integer paise, floor division, everywhere.
 
 **Exceptions are never outcomes.** Categories: `classification_failure`, `policy_failure`, `selection_failure`, `simulation_failure`, `malformed_strategy_result`, `benchmark_configuration_failure`. A failed event never reports recovery.
 
+**A failure never erases what already happened.** State accumulates as the pipeline advances, so a failure records the stage actually reached rather than resetting to the beginning. A failure before any decision reports `attempted = False`, `authorized = False`, `execution = None`. A failure *after* a simulated execution genuinely ran preserves `attempted = True`, the authorization, and the execution result, while still reporting `recovered = False` and zero recovered amount. The action was taken and its cost was incurred; losing it from the count would understate what a strategy did.
+
+That gives metric D two honest denominators, both reported. **`interventions_attempted`** counts every intervention actually performed, and is what the safety metrics (fraud rate, unauthorized executions) and the efficiency ratio use — a conservative choice, since an action whose outcome is unknown still counts against safety. **`scoreable_interventions`** is the narrower subset carrying a true EV, and is the denominator for the false-intervention and negative-EV rates, because a record with no true EV can be neither judged false nor assumed sound. The two are equal whenever there are no exceptions, which is the case for every run reported here.
+
 ## 13. Isolation
 
 Hidden truth never enters `classifier.py`, `classification.py`, `policy.py`, `selector.py`, `estimator.py`, `economics.py`, `optimizer.py`, `executor.py` or `execution_service.py`, and the Oracle is unreachable from all of them. Hidden per-event probabilities, draws and true expected values live only on benchmark-only record types; they are never added to production API models, never persisted into the operational tables, and never served by the operator dashboard. `test_phase17_isolation.py` asserts all of this against the code (AST and transitive import graph), because behavioural evidence that the optimizer currently does not read ground truth is much weaker than proof that it structurally cannot.
@@ -286,7 +296,9 @@ The default classifier is the project-owned deterministic `DeterministicClassifi
 
 ## 16. Canonical result — seed 42, 500 events, `phase17_signal_bearing_v1`
 
-Configuration fingerprint `788e79ad98728b0d713dda5c19da1d84`. **All figures SIMULATED.**
+Configuration fingerprint `7fc1f4349ba8c0eeeecb92ff47509d5d`, over hidden world `a88e096d412fc0dff92e6bdc09fe3335` and event generator `893a5d49ca249215e8f6ecb3748eab42`. **All figures SIMULATED.**
+
+> The configuration fingerprint was `788e79ad98728b0d713dda5c19da1d84` when Phase 17 was first published. It changed when the hidden-world and event-generator digests were added to the configuration identity, **not** because any parameter moved. Every benchmark number below is byte-identical to the original run, on the canonical seed and on all five robustness seeds.
 
 | Arm | Revenue | vs No Action | Attempts | Total true EV | Total regret | Optimal |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

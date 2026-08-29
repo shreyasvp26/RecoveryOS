@@ -58,6 +58,7 @@ figure derived from them is a claim about production Razorpay performance.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -275,6 +276,58 @@ HIGH_VALUE_TRUE_BPS: Mapping[str, int] = _frozen(
         "alternate_method_prompt": 200,
     }
 )
+
+
+# Bumping this identifies a deliberate change of the hidden model's STRUCTURE
+# (which terms exist and how they combine). A coefficient change is caught by
+# the fingerprint below without needing a version bump; a structural change is
+# not, because a hash cannot see a new term that no table describes.
+HIDDEN_WORLD_METHODOLOGY_VERSION = "phase17-signal-bearing-world-v1"
+
+
+def hidden_world_fingerprint() -> str:
+    """A stable digest of every static parameter that can move ``P_true``.
+
+    Recorded in the benchmark configuration so a published number is tied to
+    the exact ground-truth world that produced it. Without this, retuning a
+    coefficient would silently change every benchmark result while leaving the
+    configuration fingerprint unchanged — precisely the reproducibility gap an
+    experiment claiming a frozen world must not have.
+
+    Deterministic across processes and machines: the payload is canonically
+    serialized with sorted keys and digested with blake2b, matching the
+    convention used elsewhere in the benchmark. Python's ``hash`` is unusable
+    here because it is randomized per process.
+    """
+    payload = {
+        "methodology_version": HIDDEN_WORLD_METHODOLOGY_VERSION,
+        "randomization_version": RANDOMIZATION_VERSION,
+        "probability_scale": PROBABILITY_SCALE,
+        "high_value_threshold_paise": HIGH_VALUE_THRESHOLD_PAISE,
+        "interventions": list(_INTERVENTIONS),
+        "base": dict(BASE_TRUE_BPS),
+        "failure_reason": {
+            key: dict(value) for key, value in FAILURE_REASON_TRUE_BPS.items()
+        },
+        "payment_method": {
+            key: dict(value) for key, value in PAYMENT_METHOD_TRUE_BPS.items()
+        },
+        "subscription": dict(SUBSCRIPTION_TRUE_BPS),
+        "high_value": dict(HIGH_VALUE_TRUE_BPS),
+        "customer_history": {
+            "reliable_min_successes": WORLD_RELIABLE_MIN_SUCCESSES,
+            "established_min_successes": WORLD_ESTABLISHED_MIN_SUCCESSES,
+            "unreliable_min_failures": WORLD_UNRELIABLE_MIN_FAILURES,
+            "struggling_min_failures": WORLD_STRUGGLING_MIN_FAILURES,
+            "reliable_bps": WORLD_RELIABLE_BPS,
+            "established_bps": WORLD_ESTABLISHED_BPS,
+            "new_customer_bps": WORLD_NEW_CUSTOMER_BPS,
+            "unreliable_bps": WORLD_UNRELIABLE_BPS,
+            "struggling_bps": WORLD_STRUGGLING_BPS,
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()
 
 
 def _saturate_bps(value: int) -> int:

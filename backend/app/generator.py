@@ -11,6 +11,7 @@ model.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,54 @@ _WINDOW_SECONDS = int((_WINDOW_END - _WINDOW_START).total_seconds())
 _MIN_AMOUNT_PAISE = 500  # ₹5
 _MAX_AMOUNT_PAISE = 20000  # ₹20,000
 
+# Customer-history draw parameters, named rather than inlined so the
+# methodology fingerprint below describes the same numbers the generator
+# actually uses and cannot drift away from them.
+_MAX_PRIOR_SUCCESSES = 40
+_MAX_PRIOR_FAILURES = 6
+_SUBSCRIPTION_RATE = 0.35
+_EVENTS_PER_CUSTOMER = 3
+
+# Bumping this identifies a deliberate change to the generation ALGORITHM --
+# the order of draws, the identifier scheme, the customer-pool rule. A change
+# to a distribution or range is caught by the fingerprint without a bump; a
+# restructured algorithm is not, because a hash cannot see a reordered draw.
+EVENT_GENERATOR_METHODOLOGY_VERSION = "phase4-seeded-uniform-v1"
+
+
+def event_generator_fingerprint() -> str:
+    """A stable digest of the frozen event-generation methodology.
+
+    Recorded in the Phase 17 benchmark configuration so a published result is
+    tied to the exact dataset methodology that produced it: changing a bank
+    list, an amount range or a subscription rate changes which events exist,
+    and therefore changes every benchmark number.
+
+    Deterministic across processes and machines -- canonical JSON with sorted
+    keys, digested with blake2b. Python's ``hash`` is randomized per process
+    and is unusable for a persistent experiment identity. Seed and count are
+    deliberately excluded: they are per-run configuration recorded separately,
+    not methodology.
+    """
+    payload = {
+        "methodology_version": EVENT_GENERATOR_METHODOLOGY_VERSION,
+        "currency": _CURRENCY,
+        "payment_methods": list(_PAYMENT_METHODS),
+        "risk_flags": list(_RISK_FLAGS),
+        "banks": list(_BANKS),
+        "failure_reasons": list(_FAILURE_REASONS),
+        "window_start": _WINDOW_START.isoformat(),
+        "window_end": _WINDOW_END.isoformat(),
+        "min_amount_paise": _MIN_AMOUNT_PAISE,
+        "max_amount_paise": _MAX_AMOUNT_PAISE,
+        "max_prior_successes": _MAX_PRIOR_SUCCESSES,
+        "max_prior_failures": _MAX_PRIOR_FAILURES,
+        "subscription_rate": _SUBSCRIPTION_RATE,
+        "events_per_customer": _EVENTS_PER_CUSTOMER,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()
+
 
 def _generate_timestamp(rng: random.Random) -> str:
     """Draw a valid ISO8601 date-time within the fixed reference window."""
@@ -78,9 +127,9 @@ def _generate_amount_paise(rng: random.Random) -> int:
 def _generate_customer_history(rng: random.Random) -> CustomerHistory:
     """Draw a CustomerHistory that satisfies the locked contract validation."""
     return CustomerHistory(
-        prior_successful_payments=rng.randint(0, 40),
-        prior_failed_payments=rng.randint(0, 6),
-        has_active_subscription=rng.random() < 0.35,
+        prior_successful_payments=rng.randint(0, _MAX_PRIOR_SUCCESSES),
+        prior_failed_payments=rng.randint(0, _MAX_PRIOR_FAILURES),
+        has_active_subscription=rng.random() < _SUBSCRIPTION_RATE,
     )
 
 
@@ -88,7 +137,7 @@ def _customer_pool(
     rng: random.Random, count: int
 ) -> list[tuple[str, CustomerHistory]]:
     """Build a deterministic pool of synthetic customers for the dataset."""
-    pool_size = max(1, (count + 2) // 3)
+    pool_size = max(1, (count + _EVENTS_PER_CUSTOMER - 1) // _EVENTS_PER_CUSTOMER)
     return [
         (f"cust_{index + 1:04d}", _generate_customer_history(rng))
         for index in range(pool_size)

@@ -39,8 +39,24 @@ def _scored(records: Sequence[StrategyEventRecord]) -> list[StrategyEventRecord]
     return [record for record in records if record.exception is None]
 
 
+def _performed(records: Sequence[StrategyEventRecord]) -> list[StrategyEventRecord]:
+    """Records on which the arm really performed an intervention.
+
+    Includes an attempt that succeeded and was then followed by a failure in
+    outcome realization. The action was taken and its cost was incurred; the
+    benchmark must not lose it from the intervention count merely because the
+    world subsequently failed to report whether it worked.
+    """
+    return [record for record in records if record.attempted]
+
+
 def _attempts(records: Sequence[StrategyEventRecord]) -> list[StrategyEventRecord]:
-    """Records on which the arm actually attempted an intervention."""
+    """Performed interventions that also produced a scoreable outcome.
+
+    The denominator for the value-based rates (false-intervention, negative-EV),
+    which are undefined on a record carrying no true EV. It is deliberately
+    narrower than :func:`_performed`.
+    """
     return [record for record in _scored(records) if record.attempted]
 
 
@@ -60,7 +76,17 @@ def recovered_events(records: Sequence[StrategyEventRecord]) -> int:
 
 
 def interventions_attempted(records: Sequence[StrategyEventRecord]) -> int:
-    """Metric D — number of attempted interventions."""
+    """Metric D — number of attempted interventions.
+
+    Counts every intervention actually performed, including one whose outcome
+    realization later failed. Recovery is credited separately and never to a
+    failed record, so the count and the revenue stay independently honest.
+    """
+    return len(_performed(records))
+
+
+def scoreable_interventions(records: Sequence[StrategyEventRecord]) -> int:
+    """Performed interventions carrying a true EV, the value-rate denominator."""
     return len(_attempts(records))
 
 
@@ -126,8 +152,14 @@ def false_interventions(records: Sequence[StrategyEventRecord]) -> int:
 def false_intervention_rate(
     records: Sequence[StrategyEventRecord],
 ) -> float | None:
-    """Metric F — false interventions divided by interventions attempted."""
-    attempts = interventions_attempted(records)
+    """Metric F — false interventions divided by scoreable interventions.
+
+    The denominator excludes an attempt whose outcome realization failed: such
+    a record carries no true EV, so it can be neither counted as false nor
+    honestly assumed sound. It remains visible in the exception count and in
+    the intervention count.
+    """
+    attempts = scoreable_interventions(records)
     if attempts == 0:
         return None
     return false_interventions(records) / attempts
@@ -145,8 +177,11 @@ def negative_ev_interventions(records: Sequence[StrategyEventRecord]) -> int:
 def negative_ev_intervention_rate(
     records: Sequence[StrategyEventRecord],
 ) -> float | None:
-    """Metric G — negative-true-EV attempts divided by attempts."""
-    attempts = interventions_attempted(records)
+    """Metric G — negative-true-EV attempts divided by scoreable attempts.
+
+    Same denominator as metric F, and for the same reason.
+    """
+    attempts = scoreable_interventions(records)
     if attempts == 0:
         return None
     return negative_ev_interventions(records) / attempts
@@ -304,7 +339,7 @@ def fraud_intervention_rate(
     if not fraud_ids:
         return None
     attempted = sum(
-        1 for record in _attempts(records) if record.event_id in fraud_ids
+        1 for record in _performed(records) if record.event_id in fraud_ids
     )
     return attempted / len(fraud_ids)
 
@@ -315,7 +350,7 @@ def unauthorized_attempts(records: Sequence[StrategyEventRecord]) -> int:
     RecoveryOS's requirement is 0. Naive Retry has no policy gate by design, so
     a non-zero count there is the measurement of exactly that, not a defect.
     """
-    return sum(1 for record in _attempts(records) if not record.authorized)
+    return sum(1 for record in _performed(records) if not record.authorized)
 
 
 def exception_counts(
@@ -333,9 +368,19 @@ def exception_counts(
 
 
 def intervention_mix(records: Sequence[StrategyEventRecord]) -> dict[str, int]:
-    """How many times each intervention was selected (``no_action`` included)."""
+    """How many times each intervention was selected (``no_action`` included).
+
+    Counts a record that either produced an outcome or genuinely performed an
+    intervention, so an action taken before a later failure still appears in
+    the mix. A failure that never reached a decision contributes nothing.
+    """
+    counted = [
+        record
+        for record in records
+        if record.exception is None or record.attempted
+    ]
     mix: dict[str, int] = {}
-    for record in _scored(records):
+    for record in counted:
         mix[record.selected_intervention] = (
             mix.get(record.selected_intervention, 0) + 1
         )
@@ -360,6 +405,7 @@ class StrategyMetrics:
     recovered_events: int
     recovered_revenue_paise: int
     interventions_attempted: int
+    scoreable_interventions: int
     intervention_mix: Mapping[str, int]
     recovery_efficiency_paise: float | None
     incremental_vs_no_action_paise: int
@@ -393,6 +439,7 @@ class StrategyMetrics:
             "recovered_events": self.recovered_events,
             "recovered_revenue_paise": self.recovered_revenue_paise,
             "interventions_attempted": self.interventions_attempted,
+            "scoreable_interventions": self.scoreable_interventions,
             "intervention_mix": dict(sorted(self.intervention_mix.items())),
             "recovery_efficiency_paise": self.recovery_efficiency_paise,
             "incremental_vs_no_action_paise": self.incremental_vs_no_action_paise,
@@ -458,6 +505,7 @@ def strategy_metrics(
         recovered_events=recovered_events(records),
         recovered_revenue_paise=recovered_revenue_paise(records),
         interventions_attempted=interventions_attempted(records),
+        scoreable_interventions=scoreable_interventions(records),
         intervention_mix=intervention_mix(records),
         recovery_efficiency_paise=recovery_efficiency_paise(records),
         incremental_vs_no_action_paise=incremental_paise(records, no_action),
