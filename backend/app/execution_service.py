@@ -7,6 +7,7 @@ Phase 7, updated in Phase 16 — wires the chain for one event:
         -> authoritative policy decisions for every actionable candidate
         -> policy-allowed candidate set
         -> deterministic economic selection (highest expected value)
+        -> persist the economic decision (Phase 18 audit record)
         -> bounded execution
         -> persist outcome + attempt
         -> explicit result
@@ -33,11 +34,13 @@ from typing import Mapping
 
 from .db import (
     get_classification_result,
+    get_optimizer_decision,
     get_payment_event,
     get_policy_decision,
     get_policy_history,
     insert_execution_outcome,
     insert_intervention_attempt,
+    insert_optimizer_decision,
     insert_policy_decision,
 )
 from .classification import ClassificationResult
@@ -57,6 +60,7 @@ from .optimizer import (
     EconomicInterventionOptimizer,
     OptimizerDecision,
 )
+from .optimizer_audit import OptimizerDecisionRecord
 from .selector import NO_ACTION, select_intervention
 
 STATUS_NOT_FOUND = "not_found"
@@ -114,6 +118,33 @@ def _persist_decision(
             raise
         return existing
     return decision
+
+
+def _persist_optimizer_decision(
+    conn: sqlite3.Connection,
+    event_id: str,
+    decided_at: str,
+    decision: OptimizerDecision,
+) -> OptimizerDecisionRecord:
+    """Record the economic decision (Phase 18), reusing an identical record.
+
+    Persisted BEFORE execution is attempted, so an execution failure still
+    leaves an auditable record of what RecoveryOS decided. Re-running the same
+    event at the same evaluation time re-derives an identical decision (the
+    optimizer is deterministic), so the already-persisted row is authoritative
+    and is reused rather than overwritten. A genuinely different decision at
+    the same timestamp is a contradiction and is raised, never silently
+    dropped.
+    """
+    record = OptimizerDecisionRecord.from_decision(event_id, decided_at, decision)
+    try:
+        insert_optimizer_decision(conn, record)
+    except sqlite3.IntegrityError:
+        existing = get_optimizer_decision(conn, event_id, decided_at)
+        if existing is None or existing != record:
+            raise
+        return existing
+    return record
 
 
 def select_for_strategy(
@@ -206,6 +237,12 @@ def execute_event(
     selected, optimizer_decision = select_for_strategy(
         event, classification, decisions, selection_strategy
     )
+    if optimizer_decision is not None:
+        # Audit before action: the economic decision exists independently of
+        # whether the executor later succeeds, fails, or never runs at all.
+        _persist_optimizer_decision(
+            conn, event.event_id, evaluation_time.isoformat(), optimizer_decision
+        )
     if selected == NO_ACTION:
         return ExecutionServiceResult(
             status=STATUS_NO_ACTION,

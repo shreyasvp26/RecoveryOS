@@ -22,6 +22,7 @@ from .classification import ClassificationResult
 from .config import get_database_path
 from .models import PaymentEvent
 from .executor import ExecutionOutcome
+from .optimizer_audit import OptimizerDecisionRecord
 from .policy import (
     InterventionAttempt,
     PolicyDecision,
@@ -151,6 +152,26 @@ CREATE TABLE IF NOT EXISTS webhook_recovery_outcomes (
 """
 
 
+# Phase 18: the append-only audit record of the V2 economic optimizer's
+# decision for one event. The row stores exactly what the optimizer produced —
+# the candidate sets, the per-candidate estimated economics, the selection and
+# its reason — so the decision can be reconstructed after the fact. It is
+# written BEFORE execution is attempted, so a failed execution still leaves
+# evidence of what RecoveryOS decided. It holds no benchmark ground truth.
+_OPTIMIZER_DECISIONS_DDL = """
+CREATE TABLE IF NOT EXISTS optimizer_decisions (
+    event_id              TEXT NOT NULL,
+    decided_at            TEXT NOT NULL,
+    selected_intervention TEXT NOT NULL,
+    selection_reason      TEXT NOT NULL,
+    candidates_considered TEXT NOT NULL,
+    allowed_candidates    TEXT NOT NULL,
+    evaluations           TEXT NOT NULL,
+    PRIMARY KEY (event_id, decided_at)
+)
+"""
+
+
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection to the given database path.
 
@@ -181,6 +202,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_BENCHMARK_RUNS_DDL)
         conn.execute(_WEBHOOK_DELIVERIES_DDL)
         conn.execute(_WEBHOOK_RECOVERY_OUTCOMES_DDL)
+        conn.execute(_OPTIMIZER_DECISIONS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
@@ -631,6 +653,82 @@ def get_policy_decisions_for_event(
         data["policy_rules_applied"] = json.loads(data["policy_rules_applied"])
         out.append(data)
     return out
+
+
+def insert_optimizer_decision(
+    conn: sqlite3.Connection, record: OptimizerDecisionRecord
+) -> None:
+    """Persist one economic optimizer decision (Phase 18), append-only.
+
+    A logically identical decision (same event, same decision time) is
+    rejected as a duplicate (IntegrityError). Recorded decisions are never
+    overwritten or mutated, and the stored figures are the optimizer's own
+    output — this function computes nothing.
+    """
+    if not isinstance(record, OptimizerDecisionRecord):
+        raise TypeError("record must be an OptimizerDecisionRecord")
+    try:
+        conn.execute(
+            """
+            INSERT INTO optimizer_decisions (
+                event_id, decided_at, selected_intervention, selection_reason,
+                candidates_considered, allowed_candidates, evaluations
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.event_id,
+                record.decided_at,
+                record.selected_intervention,
+                record.selection_reason,
+                json.dumps(list(record.candidates_considered)),
+                json.dumps(list(record.allowed_candidates)),
+                json.dumps(
+                    [evaluation.to_dict() for evaluation in record.evaluations]
+                ),
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def _row_to_optimizer_decision(row: sqlite3.Row) -> dict[str, Any]:
+    data: dict[str, Any] = dict(row)
+    for field in ("candidates_considered", "allowed_candidates", "evaluations"):
+        data[field] = json.loads(data[field])
+    return data
+
+
+def get_optimizer_decision(
+    conn: sqlite3.Connection, event_id: str, decided_at: str
+) -> OptimizerDecisionRecord | None:
+    """Retrieve one persisted optimizer decision, or None if it does not exist."""
+    row = conn.execute(
+        """
+        SELECT * FROM optimizer_decisions
+        WHERE event_id = ? AND decided_at = ?
+        """,
+        (event_id, decided_at),
+    ).fetchone()
+    if row is None:
+        return None
+    return OptimizerDecisionRecord.from_dict(_row_to_optimizer_decision(row))
+
+
+def get_optimizer_decisions_for_event(
+    conn: sqlite3.Connection, event_id: str
+) -> list[dict[str, Any]]:
+    """Return every persisted optimizer decision for one event, newest last."""
+    rows = conn.execute(
+        """
+        SELECT * FROM optimizer_decisions
+        WHERE event_id = ?
+        ORDER BY decided_at ASC
+        """,
+        (event_id,),
+    ).fetchall()
+    return [_row_to_optimizer_decision(row) for row in rows]
 
 
 def get_execution_outcomes_for_event(
