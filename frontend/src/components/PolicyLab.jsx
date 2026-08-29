@@ -37,6 +37,17 @@ const PARAMETER_ORDER = [
   'daily_spend_cap_paise',
 ]
 
+/**
+ * What a scenario's numbers came from. "Current" is the policy this deployment
+ * actually runs on, not a frozen reference, and an operator reading a what-if
+ * result needs to know which of those they are looking at.
+ */
+const SOURCE_LABELS = {
+  active_runtime: 'Active runtime policy',
+  derived_from_active_runtime: 'Derived from active runtime policy',
+  operator_defined: 'Operator-defined',
+}
+
 const DELTA_TONES = {
   newly_blocked: 'danger',
   newly_allowed: 'success',
@@ -80,6 +91,9 @@ function ScenarioCard({ scenario, selected, onToggle, disabled }) {
           {selected ? 'selected' : 'off'}
         </Badge>
       </div>
+      {scenario.source && (
+        <div className="lab-scenario__source">{SOURCE_LABELS[scenario.source] || humanize(scenario.source)}</div>
+      )}
       <dl className="lab-params">
         {PARAMETER_ORDER.map((name) => (
           <div key={name}>
