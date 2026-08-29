@@ -143,7 +143,7 @@ Phase 16 replaced fixed-priority selection **in production** with expected-value
 Allowed Candidates  →  Recovery Probability Estimator  →  Economic Scoring  →  Best Candidate
 ```
 
-The policy gate still runs first and remains authoritative. `AllowedCandidates.from_policy_decisions` derives the authorized set from the authoritative `PolicyDecision` objects, and `EconomicInterventionOptimizer.select` accepts nothing else — so a policy-denied candidate is **structurally** unable to reach economic evaluation, however valuable it looks. The optimizer reads only `decision.allowed`; it never sees a denial reason and never re-implements a policy rule.
+The policy gate still runs first and remains authoritative. `EconomicInterventionOptimizer.select` accepts only an `AllowedCandidates` value, which carries the authoritative `PolicyDecision` objects and re-validates them on construction: an entry is authorized only if a real ALLOW names that exact intervention for that exact event. A policy-denied candidate is therefore **structurally** unable to reach economic evaluation, however valuable it looks, on every construction path rather than only via the convenience constructor. The optimizer reads only `decision.allowed`; it never sees a denial reason and never re-implements a policy rule.
 
 For each allowed candidate, using integer paise and integer basis points throughout:
 

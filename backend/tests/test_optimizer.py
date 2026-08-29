@@ -339,6 +339,137 @@ def test_the_optimizer_refuses_a_candidate_set_not_derived_from_policy() -> None
         )
 
 
+# ---------------------------------------------------------------------------
+# The authorization invariant holds on EVERY construction path
+#
+# Regression coverage for the Phase 16 repair: AllowedCandidates used to be a
+# plain frozen dataclass, so bypassing from_policy_decisions and constructing
+# it directly with a fabricated `allowed` tuple let a policy-denied candidate
+# reach the optimizer and be selected. The invariant was enforced by the single
+# call site, not by the type. It is now re-validated on construction.
+# ---------------------------------------------------------------------------
+
+
+def test_a_fabricated_allowed_set_with_no_decisions_is_rejected() -> None:
+    with pytest.raises(OptimizerError, match="no authoritative"):
+        AllowedCandidates(
+            considered=("payment_link",), allowed=("payment_link",), decisions={}
+        )
+
+
+def test_a_fabricated_allowed_set_backed_by_a_denial_is_rejected() -> None:
+    """The exact bypass: hand-build the gate around a DENIED candidate."""
+    with pytest.raises(OptimizerError, match="not authorized by policy"):
+        AllowedCandidates(
+            considered=("payment_link",),
+            allowed=("payment_link",),
+            decisions={"payment_link": _deny("payment_link", RULE_FRAUD)},
+        )
+
+
+def test_an_allow_for_one_intervention_cannot_authorize_another() -> None:
+    with pytest.raises(OptimizerError, match="unrelated intervention"):
+        AllowedCandidates(
+            considered=("payment_link",),
+            allowed=("payment_link",),
+            decisions={"payment_link": _allow("retry_delayed")},
+        )
+
+
+def test_an_allowed_candidate_must_also_have_been_considered() -> None:
+    with pytest.raises(OptimizerError, match="never considered"):
+        AllowedCandidates(
+            considered=("reminder",),
+            allowed=("payment_link",),
+            decisions={"payment_link": _allow("payment_link")},
+        )
+
+
+def test_an_allow_bound_to_a_different_event_authorizes_nothing() -> None:
+    """Authorization is per (event, intervention), never transferable."""
+    other_event_allow = PolicyDecision(
+        event_id="evt_someone_else",
+        proposed_intervention="payment_link",
+        allowed=True,
+        denial_reason=None,
+        policy_rules_applied=("fraud_check_passed",),
+        evaluated_at=EVALUATED_AT,
+    )
+    allowed = AllowedCandidates(
+        considered=("payment_link",),
+        allowed=("payment_link",),
+        decisions={"payment_link": other_event_allow},
+    )
+    with pytest.raises(OptimizerError, match="belongs to event"):
+        _optimizer(StubEstimator({"payment_link": 9_000})).select(
+            _event(), _classification(("payment_link",)), allowed
+        )
+
+
+def test_the_authorizing_decision_is_carried_and_retrievable() -> None:
+    allowed = AllowedCandidates.from_policy_decisions(
+        ("retry_delayed", "payment_link"),
+        {
+            "retry_delayed": _allow("retry_delayed"),
+            "payment_link": _deny("payment_link", RULE_FRAUD),
+        },
+    )
+    assert allowed.authorizing_decision("retry_delayed").allowed is True
+    with pytest.raises(OptimizerError, match="no authoritative ALLOW"):
+        allowed.authorizing_decision("payment_link")
+
+
+def test_both_construction_paths_enforce_the_same_input_rules() -> None:
+    """The factory's integrity rules must not be the weaker path's optional extras.
+
+    from_policy_decisions rejects duplicates and off-taxonomy interventions and
+    never admits no_action. Direct construction must reject them identically,
+    otherwise the weaker path silently becomes the real contract.
+    """
+    with pytest.raises(OptimizerError, match="duplicate allowed intervention"):
+        AllowedCandidates(
+            considered=("payment_link",),
+            allowed=("payment_link", "payment_link"),
+            decisions={"payment_link": _allow("payment_link")},
+        )
+
+    with pytest.raises(OptimizerError, match="duplicate considered intervention"):
+        AllowedCandidates(
+            considered=("payment_link", "payment_link"), allowed=(), decisions={}
+        )
+
+    with pytest.raises(OptimizerError, match="is not one of"):
+        AllowedCandidates(considered=("wire_transfer",), allowed=(), decisions={})
+
+
+def test_no_action_can_never_be_an_allowed_candidate() -> None:
+    """no_action is the absence of an intervention, not an economic option."""
+    with pytest.raises(OptimizerError, match="not executable"):
+        AllowedCandidates(
+            considered=(NO_ACTION,),
+            allowed=(NO_ACTION,),
+            decisions={NO_ACTION: _allow(NO_ACTION)},
+        )
+
+
+def test_no_action_remains_valid_as_a_considered_candidate() -> None:
+    """Excluding it from `allowed` must not break the normal factory path."""
+    allowed = AllowedCandidates.from_policy_decisions(
+        (NO_ACTION, "payment_link"), {"payment_link": _allow("payment_link")}
+    )
+    assert allowed.considered == (NO_ACTION, "payment_link")
+    assert allowed.allowed == ("payment_link",)
+
+
+def test_the_carried_decisions_cannot_be_mutated_after_construction() -> None:
+    """A caller must not be able to widen authorization post hoc."""
+    allowed = AllowedCandidates.from_policy_decisions(
+        ("retry_delayed",), {"retry_delayed": _allow("retry_delayed")}
+    )
+    with pytest.raises(TypeError):
+        allowed.decisions["payment_link"] = _allow("payment_link")  # type: ignore[index]
+
+
 def test_mixed_allowed_and_denied_selects_only_from_the_allowed() -> None:
     decision = _select(
         ("retry_immediate", "retry_delayed", "payment_link", "reminder"),
@@ -611,3 +742,68 @@ def test_the_production_estimator_and_model_compose_without_error() -> None:
     assert len(decision.evaluations) == len(candidates)
     # transient bank_timeout on a card: a delayed retry is the economic choice.
     assert decision.selected_intervention == "retry_delayed"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end determinism under attempted tampering
+#
+# The unit tests above prove each mapping rejects mutation. This proves the
+# property that actually matters: a live optimizer, already holding a real
+# economic model and estimator, returns the identical decision after every
+# mutation route has been attempted against it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_live_optimizer_decision_survives_every_mutation_attempt() -> None:
+    from app.economics import DEFAULT_ECONOMIC_MODEL, InterventionEconomics
+    from app.estimator import (
+        BASE_RECOVERY_BPS,
+        FAILURE_REASON_ADJUSTMENT_BPS,
+        PAYMENT_METHOD_ADJUSTMENT_BPS,
+        ROOT_CAUSE_ADJUSTMENT_BPS,
+        SUBSCRIPTION_ADJUSTMENT_BPS,
+    )
+
+    candidates = ("retry_delayed", "payment_link", "reminder")
+    estimator = RecoveryProbabilityEstimator()
+    optimizer = EconomicInterventionOptimizer(estimator, DEFAULT_ECONOMIC_MODEL)
+    allowed = AllowedCandidates.from_policy_decisions(
+        candidates, {name: _allow(name) for name in candidates}
+    )
+
+    before = optimizer.select(_event(), _classification(candidates), allowed)
+
+    # Every mutation route named in the hardening requirements, attempted
+    # against objects the live optimizer is already using.
+    alias = DEFAULT_ECONOMIC_MODEL.assumptions
+    attempts = [
+        lambda: DEFAULT_ECONOMIC_MODEL.assumptions.__setitem__(
+            "payment_link", InterventionEconomics(cost_paise=0, friction_bps=0)
+        ),
+        lambda: alias.__setitem__(
+            "retry_delayed", InterventionEconomics(cost_paise=9_999, friction_bps=9_999)
+        ),
+        lambda: alias.clear(),
+        lambda: BASE_RECOVERY_BPS.__setitem__("payment_link", 10_000),
+        lambda: SUBSCRIPTION_ADJUSTMENT_BPS.__setitem__("payment_link", 10_000),
+        lambda: ROOT_CAUSE_ADJUSTMENT_BPS["transient"].__setitem__("payment_link", 9_999),
+        lambda: FAILURE_REASON_ADJUSTMENT_BPS["bank_timeout"].__setitem__(
+            "payment_link", 9_999
+        ),
+        lambda: PAYMENT_METHOD_ADJUSTMENT_BPS["card"].__setitem__("payment_link", 9_999),
+        lambda: allowed.decisions.__setitem__("retry_immediate", _allow("retry_immediate")),
+    ]
+    for attempt in attempts:
+        with pytest.raises((TypeError, AttributeError)):
+            attempt()
+
+    after = optimizer.select(_event(), _classification(candidates), allowed)
+    assert after == before
+
+    # And still invariant under candidate ordering, on the real model.
+    for permutation in itertools.permutations(candidates):
+        permuted = AllowedCandidates.from_policy_decisions(
+            permutation, {name: _allow(name) for name in permutation}
+        )
+        decision = optimizer.select(_event(), _classification(permutation), permuted)
+        assert decision.selected_intervention == before.selected_intervention

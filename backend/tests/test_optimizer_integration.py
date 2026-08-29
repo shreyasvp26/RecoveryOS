@@ -459,3 +459,91 @@ def test_neither_strategy_can_widen_the_authorized_set(db_conn) -> None:
         result = _run(db_conn, event_id, selection_strategy=strategy)
         assert result.status == STATUS_NO_ACTION
         assert _counts(db_conn, event_id) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Which strategy runs where
+#
+# Phase 16 ships two ranking strategies. Production must default to the V2
+# economic optimizer, and the benchmark must stay pinned to V1 so that no
+# benchmark number can be read as a V2 performance claim. Both facts are
+# load-bearing and neither was previously asserted.
+# ---------------------------------------------------------------------------
+
+
+def test_production_defaults_to_the_economic_optimizer(db_conn) -> None:
+    """Calling execute_event without a strategy must use V2, not V1."""
+    event_id = "evt_default_strategy"
+    _seed(db_conn, _event(event_id), _classification(event_id, root="customer_action_needed"))
+
+    result = _run(db_conn, event_id)
+
+    assert result.optimizer_decision is not None, "the V2 optimizer did not run"
+    assert result.optimizer_decision.selection_reason == REASON_MAX_EXPECTED_VALUE
+    assert result.selected_intervention == max(
+        result.optimizer_decision.evaluations,
+        key=lambda evaluation: evaluation.expected_value_paise,
+    ).intervention
+
+
+def test_the_v1_arm_produces_no_optimizer_decision(db_conn) -> None:
+    """The V1 arm must not emit an economic decision record at all."""
+    event_id = "evt_v1_arm_no_decision"
+    _seed(db_conn, _event(event_id), _classification(event_id))
+
+    result = _run(db_conn, event_id, selection_strategy=SELECTION_V1_FIXED_PRIORITY)
+
+    assert result.optimizer_decision is None
+
+
+def test_the_benchmark_arm_is_pinned_to_the_v1_selector() -> None:
+    """The benchmark must not silently become a V2 performance claim.
+
+    The RecoveryOS benchmark arm is deliberately pinned to V1 fixed priority,
+    so the published baseline stays reproducible and no benchmark figure can
+    be attributed to economic selection. A V2 benchmark arm, and the
+    signal-bearing outcome model needed to evaluate one honestly, belong to
+    Phase 17. If this pin is ever removed, that is a deliberate evaluation
+    change and this test must be updated alongside the published claims.
+    """
+    import inspect
+
+    from app import benchmark
+
+    source = inspect.getsource(benchmark.run_recoveryos)
+    assert "selection_strategy=SELECTION_V1_FIXED_PRIORITY" in source
+
+
+def test_the_benchmark_cannot_execute_a_payment_link(db_conn) -> None:
+    """A known evaluation limitation, recorded rather than left implicit.
+
+    The benchmark harness runs with ``razorpay_client=None``, so payment_link
+    cannot actually execute there: it fails at the configuration boundary
+    without any network call. The outcome simulator, which is V1 code and is
+    feature-independent by design, nonetheless models recovery for any
+    attempted intervention, so a payment_link attempt in the benchmark would
+    be credited despite never having run.
+
+    This is unreachable today because the benchmark arm is pinned to V1 and
+    V1's fixed priority always selects retry_delayed ahead of payment_link.
+    Repairing the underlying accounting requires execution-aware outcome
+    semantics, which is Phase 17 work. This test records the limitation so it
+    cannot be rediscovered as a surprise.
+    """
+    event_id = "evt_payment_link_unconfigured"
+    _seed(
+        db_conn,
+        _event(event_id, failure_reason="expired_card"),
+        _classification(
+            event_id, root="customer_action_needed", candidates=["payment_link"]
+        ),
+    )
+
+    result = _run(db_conn, event_id)
+
+    assert result.selected_intervention == "payment_link"
+    assert result.status == STATUS_EXECUTION_FAILED
+    assert result.outcome.status == "FAILED"
+    assert result.outcome.execution_mode == "REAL_RAZORPAY"
+    assert "configuration_missing" in result.outcome.detail
+    assert result.outcome.external_reference is None

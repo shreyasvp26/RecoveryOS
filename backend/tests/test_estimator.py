@@ -13,6 +13,10 @@ from app.economics import (
 )
 from app.estimator import (
     BASE_RECOVERY_BPS,
+    FAILURE_REASON_ADJUSTMENT_BPS,
+    PAYMENT_METHOD_ADJUSTMENT_BPS,
+    ROOT_CAUSE_ADJUSTMENT_BPS,
+    SUBSCRIPTION_ADJUSTMENT_BPS,
     EstimationError,
     RecoveryProbabilityEstimator,
     _saturate,
@@ -359,3 +363,49 @@ def test_mismatched_event_and_classification_are_rejected() -> None:
     )
     with pytest.raises(EstimationError, match="do not match"):
         ESTIMATOR.estimate(_event(), other, "reminder")
+
+
+# ---------------------------------------------------------------------------
+# The coefficient tables are constants, not runtime configuration
+#
+# Regression coverage for the Phase 16 repair: the estimator's coefficient
+# tables were plain module-level dicts, so any importer could retune the model
+# in place and break the determinism the estimator guarantees.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "table, key",
+    [
+        (BASE_RECOVERY_BPS, "retry_delayed"),
+        (SUBSCRIPTION_ADJUSTMENT_BPS, "retry_delayed"),
+        (ROOT_CAUSE_ADJUSTMENT_BPS, "transient"),
+        (FAILURE_REASON_ADJUSTMENT_BPS, "bank_timeout"),
+        (PAYMENT_METHOD_ADJUSTMENT_BPS, "upi"),
+    ],
+)
+def test_a_coefficient_table_cannot_be_retuned_at_runtime(table, key) -> None:
+    with pytest.raises(TypeError):
+        table[key] = 9_999
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        ROOT_CAUSE_ADJUSTMENT_BPS,
+        FAILURE_REASON_ADJUSTMENT_BPS,
+        PAYMENT_METHOD_ADJUSTMENT_BPS,
+    ],
+)
+def test_nested_coefficient_tables_are_also_read_only(table) -> None:
+    for feature, adjustments in table.items():
+        with pytest.raises(TypeError):
+            adjustments["retry_delayed"] = 9_999
+
+
+def test_the_estimate_is_unchanged_by_an_attempted_retune() -> None:
+    event, classification = _event(), _classification()
+    before = ESTIMATOR.estimate(event, classification, "retry_delayed")
+    with pytest.raises(TypeError):
+        BASE_RECOVERY_BPS["retry_delayed"] = 9_999
+    assert ESTIMATOR.estimate(event, classification, "retry_delayed") == before

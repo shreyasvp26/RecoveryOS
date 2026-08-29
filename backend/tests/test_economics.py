@@ -395,3 +395,33 @@ def test_invalid_monetary_state_cannot_produce_an_evaluation() -> None:
             probability=RecoveryProbability(5_000),
             model=DEFAULT_ECONOMIC_MODEL,
         )
+
+
+# ---------------------------------------------------------------------------
+# The model is a frozen contract, not runtime configuration
+#
+# Regression coverage for the Phase 16 repair: EconomicModel stored its
+# assumptions as a plain dict, so anything holding a reference to the shared
+# DEFAULT_ECONOMIC_MODEL could silently retune costs and friction at runtime
+# and change every subsequent economic decision.
+# ---------------------------------------------------------------------------
+
+
+def test_the_shared_economic_model_cannot_be_retuned_at_runtime() -> None:
+    before = DEFAULT_ECONOMIC_MODEL.for_intervention("payment_link")
+    with pytest.raises(TypeError):
+        DEFAULT_ECONOMIC_MODEL.assumptions["payment_link"] = InterventionEconomics(
+            cost_paise=0, friction_bps=0
+        )
+    assert DEFAULT_ECONOMIC_MODEL.for_intervention("payment_link") == before
+
+
+def test_a_model_does_not_alias_the_mapping_it_was_built_from() -> None:
+    """Mutating the caller's dict afterwards must not change the model."""
+    source = {
+        intervention: InterventionEconomics(cost_paise=10, friction_bps=5)
+        for intervention in EXECUTABLE_INTERVENTIONS
+    }
+    model = EconomicModel(assumptions=source)
+    source["payment_link"] = InterventionEconomics(cost_paise=999_999, friction_bps=0)
+    assert model.for_intervention("payment_link").cost_paise == 10
