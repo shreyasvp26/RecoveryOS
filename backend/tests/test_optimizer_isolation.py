@@ -176,6 +176,21 @@ def test_decision_engine_imports_no_nondeterminism_or_io(module: str) -> None:
 
 
 @pytest.mark.parametrize("module", DECISION_ENGINE_MODULES)
+def test_nondeterminism_and_io_are_unreachable_transitively(module: str) -> None:
+    """A clean direct import list proves nothing if a dependency is dirty.
+
+    Randomness, a clock, a socket, or a database driver reached through any
+    intermediate app module would make the decision engine nondeterministic
+    just as effectively as importing it directly.
+    """
+    for reachable in {module} | _transitive_app_imports(module):
+        leaked = _imports(reachable) & FORBIDDEN_STDLIB
+        assert not leaked, (
+            f"{module} reaches {sorted(leaked)} through {reachable}"
+        )
+
+
+@pytest.mark.parametrize("module", DECISION_ENGINE_MODULES)
 def test_decision_engine_makes_no_llm_call(module: str) -> None:
     """The LLM boundary must be unreachable, not merely unused."""
     assert "classifier" not in _transitive_app_imports(module)
