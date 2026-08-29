@@ -15,8 +15,22 @@ ACTIVE POLICY VS REPLAY POLICY
 A scenario is never written back anywhere. It does not touch the environment,
 ``config.build_policy_config()``, the database, or any module-level state, so
 constructing or replaying one cannot change what the real system would do to
-the next real payment. ``CURRENT`` is a READ of the shipped defaults, taken
-fresh on every call.
+the next real payment. ``CURRENT`` is a READ of the active runtime policy,
+taken fresh on every call and returned as a frozen ``PolicyConfig``.
+
+THREE POLICIES THAT MUST NOT BE CONFLATED
+-----------------------------------------
+* **Active runtime policy** — what this process is configured to gate real
+  executions with, resolved by ``config.build_policy_config()``. ``CURRENT``
+  is a snapshot of it, and Conservative/Aggressive are derived from it.
+* **Canonical benchmark policy** — ``benchmark_config.frozen_policy_config``,
+  pinned to the shipped defaults so Phase 17 reproduces regardless of the
+  shell it runs in. Nothing here reads or writes it.
+* **Replay scenario policy** — a validated configuration that exists only for
+  the duration of a simulated replay.
+
+The first two coincide on an unconfigured install and are permitted to
+diverge; that is precisely why they are resolved through separate paths.
 
 WHICH KNOBS ARE REAL
 --------------------
@@ -45,8 +59,8 @@ from typing import Any, Mapping
 
 from .config import (
     DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE,
-    DEFAULT_POLICY_EVENT_COOLDOWN_MINUTES,
     DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H,
+    build_policy_config,
 )
 from .policy import (
     RULE_COOLDOWN,
@@ -76,6 +90,20 @@ SCENARIO_LABELS: Mapping[str, str] = {
     SCENARIO_AGGRESSIVE: "Aggressive",
     SCENARIO_CUSTOM: "Custom",
 }
+
+# Where a scenario's numbers came from. An operator reading "Current" needs to
+# know whether they are looking at the policy this process actually runs on or
+# at some frozen reference, because the two answer different questions and are
+# permitted to disagree.
+SOURCE_ACTIVE_RUNTIME = "active_runtime"
+SOURCE_DERIVED_FROM_ACTIVE_RUNTIME = "derived_from_active_runtime"
+SOURCE_OPERATOR_DEFINED = "operator_defined"
+
+SCENARIO_SOURCES: tuple[str, ...] = (
+    SOURCE_ACTIVE_RUNTIME,
+    SOURCE_DERIVED_FROM_ACTIVE_RUNTIME,
+    SOURCE_OPERATOR_DEFINED,
+)
 
 # The three genuinely configurable controls, named exactly as PolicyConfig
 # names them so the lab cannot drift from the engine's own vocabulary.
@@ -123,10 +151,30 @@ CONFIGURABLE_RULES: Mapping[str, str] = {
 # this yields conservative (1, 60, 2,500,000) and aggressive (4, 15, 10,000,000).
 SCENARIO_DERIVATION_FACTOR = 2
 
-# Guardrails for an operator-defined scenario, expressed as multiples of the
-# shipped defaults so they too move with the policy rather than being magic
-# numbers. The cooldown ceiling is 24 hours because the per-customer rule
-# reasons over a rolling 24h window: a cooldown longer than that window cannot
+# ---------------------------------------------------------------------------
+# REPLAY POLICY VALIDATION BOUNDS
+# ---------------------------------------------------------------------------
+#
+# THE SINGLE AUTHORITATIVE DEFINITION. Nothing else in RecoveryOS — API,
+# frontend, replay engine or tests — may restate these numbers; the API serves
+# CUSTOM_BOUNDS to clients and the UI renders whatever it is given, so the
+# server stays the only authority on what policy is admissible.
+#
+# WHAT THEY ARE: limits on what an operator may type into the What-If Lab. They
+# keep the lab a bounded, meaningful policy space — they stop nonsensical and
+# pathological configurations (a 30-day cooldown, a limit of a million) from
+# being replayed, and they keep validation deterministic.
+#
+# WHAT THEY ARE NOT: a claim about production business limits. RecoveryOS
+# defines no such limits, and a value being inside these bounds does not mean
+# it would be a sound policy to actually run. They constrain the simulator's
+# input, nothing more.
+#
+# They are anchored to the SHIPPED DEFAULTS rather than to the active runtime
+# policy, deliberately: the admissible policy space must be a fixed, stated
+# range, not something that silently widens because of how the server was
+# launched. The cooldown ceiling is 24 hours because the per-customer rule
+# reasons over a rolling 24h window; a cooldown longer than that window cannot
 # be interpreted against it.
 CUSTOM_MIN_MAX_INTERVENTIONS = 1
 CUSTOM_MAX_MAX_INTERVENTIONS = DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H * 5
@@ -188,6 +236,7 @@ class PolicyScenario:
     scenario_id: str
     name: str
     policy_config: PolicyConfig
+    source: str = SOURCE_OPERATOR_DEFINED
     derived_from: str | None = None
     derivation: str | None = None
 
@@ -198,6 +247,11 @@ class PolicyScenario:
             raise PolicyScenarioError("name must be a non-empty string")
         if not isinstance(self.policy_config, PolicyConfig):
             raise PolicyScenarioError("policy_config must be a PolicyConfig")
+        if self.source not in SCENARIO_SOURCES:
+            raise PolicyScenarioError(
+                f"source must be one of {list(SCENARIO_SOURCES)}, "
+                f"got {self.source!r}"
+            )
         for field_name in ("derived_from", "derivation"):
             value = getattr(self, field_name)
             if value is not None and (
@@ -229,6 +283,7 @@ class PolicyScenario:
         return {
             "scenario_id": self.scenario_id,
             "name": self.name,
+            "source": self.source,
             "derived_from": self.derived_from,
             "derivation": self.derivation,
             "parameters": self.parameters,
@@ -283,27 +338,55 @@ def _scenario_config(
         raise PolicyScenarioError(str(exc)) from exc
 
 
+def active_policy_snapshot() -> PolicyConfig:
+    """Read the policy this RecoveryOS process is actually configured to use.
+
+    Goes through ``config.build_policy_config()`` — the same authoritative path
+    the FastAPI ``get_policy_config`` dependency uses to gate real executions —
+    so the lab's reference arm is the live policy rather than a lookalike built
+    from the defaults. If an operator has set ``POLICY_EVENT_COOLDOWN_MINUTES``,
+    the lab must say so; showing them the shipped default instead would answer
+    a what-if question about a system they are not running.
+
+    This is a READ that returns a fresh frozen ``PolicyConfig``. Nothing is
+    written back, so it is a snapshot in the strict sense: replaying it cannot
+    change what the real engine decides about the next real payment.
+
+    Malformed configuration surfaces as a scenario error rather than an
+    unhandled crash, so the boundary reports a bad ``POLICY_*`` value as an
+    explicit refusal instead of a 500.
+    """
+    try:
+        return build_policy_config()
+    except ValueError as exc:
+        raise PolicyScenarioError(
+            f"the active runtime policy configuration is invalid: {exc}"
+        ) from exc
+
+
 def current_scenario() -> PolicyScenario:
-    """The reference scenario: the policy the shipped system actually uses.
+    """The reference scenario: the policy the running system actually uses.
 
-    Reads the same module-level defaults ``config.py`` resolves the live
-    policy from, and the same ones ``benchmark_config.frozen_policy_config``
-    pins the benchmark to, so the lab's reference arm is genuinely the current
-    policy rather than a copy of it that could drift.
+    Note what this deliberately is NOT: the canonical benchmark's policy.
+    ``benchmark_config.frozen_policy_config`` stays pinned to the shipped
+    defaults so the Phase 17 benchmark reproduces regardless of the shell it
+    runs in. The two coincide on an unconfigured install and are allowed to
+    diverge, which is exactly why they are resolved separately.
 
-    Deliberately NOT ``config.build_policy_config()``: that reads environment
-    variables, and a replay whose reference policy depends on the shell the
-    server was launched from is not reproducible or comparable.
+    Reproducibility is preserved by identity rather than by ignoring the
+    environment: the scenario's ``policy_fingerprint`` digests the parameters
+    actually used, so a replay result names the policy it ran under and can be
+    reconstructed from it.
     """
     return PolicyScenario(
         scenario_id=SCENARIO_CURRENT,
         name=SCENARIO_LABELS[SCENARIO_CURRENT],
-        policy_config=_scenario_config(
-            DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H,
-            DEFAULT_POLICY_EVENT_COOLDOWN_MINUTES,
-            DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE,
+        policy_config=active_policy_snapshot(),
+        source=SOURCE_ACTIVE_RUNTIME,
+        derivation=(
+            "the policy this RecoveryOS deployment is currently configured to "
+            "use, read live and never modified"
         ),
-        derivation="the shipped RecoveryOS policy defaults, read unchanged",
     )
 
 
@@ -319,6 +402,7 @@ def conservative_scenario() -> PolicyScenario:
             base.event_cooldown_minutes * factor,
             base.daily_spend_cap_paise // factor,
         ),
+        source=SOURCE_DERIVED_FROM_ACTIVE_RUNTIME,
         derived_from=SCENARIO_CURRENT,
         derivation=(
             f"current policy made {factor}x less permissive: limit // {factor}, "
@@ -344,6 +428,7 @@ def aggressive_scenario() -> PolicyScenario:
             max(1, base.event_cooldown_minutes // factor),
             base.daily_spend_cap_paise * factor,
         ),
+        source=SOURCE_DERIVED_FROM_ACTIVE_RUNTIME,
         derived_from=SCENARIO_CURRENT,
         derivation=(
             f"current policy made {factor}x more permissive: limit * {factor}, "
@@ -434,7 +519,8 @@ def custom_scenario(
                 parameters["daily_spend_cap_paise"], "daily_spend_cap_paise"
             ),
         ),
-        derivation="operator-defined, validated against the custom bounds",
+        source=SOURCE_OPERATOR_DEFINED,
+        derivation="operator-defined, validated against the replay policy bounds",
     )
 
 
@@ -467,6 +553,30 @@ def resolve_scenario(definition: Mapping[str, Any]) -> PolicyScenario:
     return custom_scenario(parameters, name=name)
 
 
+def custom_form_defaults() -> dict[str, int]:
+    """Starting values for the custom policy form: the active policy, in bounds.
+
+    The active runtime policy is the natural place for an operator to start
+    editing from. It can however sit OUTSIDE the replay bounds — those are
+    anchored to the shipped defaults, and an install may legitimately be
+    configured beyond them — which would prefill a form that the server then
+    refuses. Clamping keeps the form self-consistent.
+
+    This is presentation only. It is not a policy, is never replayed, and does
+    not soften validation: a submitted value is still checked against
+    ``CUSTOM_BOUNDS``, and the unclamped active policy remains visible on the
+    Current scenario itself.
+    """
+    active = current_scenario().parameters
+    return {
+        name: min(
+            max(value, CUSTOM_BOUNDS[name]["minimum"]),
+            CUSTOM_BOUNDS[name]["maximum"],
+        )
+        for name, value in active.items()
+    }
+
+
 def scenario_catalog() -> dict[str, Any]:
     """Everything a client needs to render the policy form, from real values.
 
@@ -483,7 +593,7 @@ def scenario_catalog() -> dict[str, Any]:
             "bounds": {
                 name: dict(bounds) for name, bounds in CUSTOM_BOUNDS.items()
             },
-            "defaults": current_scenario().parameters,
+            "defaults": custom_form_defaults(),
         },
         "configurable_parameters": list(CONFIGURABLE_PARAMETERS),
         "configurable_rules": dict(CONFIGURABLE_RULES),
