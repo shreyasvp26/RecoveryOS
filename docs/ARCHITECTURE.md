@@ -84,7 +84,7 @@ All benchmark **recovery amounts are simulated evaluation results** — they are
 
 The V1 pipeline is fully implemented through Phase 12: the Phase 9 benchmark runs on top of the Phase 8 evaluation foundation (hidden model + simulation); Phase 10 added the read-only Recovery Command Center & Decision Trace over persisted state; Phase 11 added real Razorpay Test Mode Payment Link execution; and Phase 12 added the closed-loop verified webhook outcome channel (documented below). The V2 optimizer does not exist yet. The benchmark measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline over ONE shared event set and ONE shared hidden outcome model on simulated, labeled recovery outcome amounts, reporting honest results with no forced RecoveryOS victory. The outcome engine answers *did an executed intervention recover the money?* It never decides whether anything executes, and RecoveryOS claims no real revenue.
 
-Phase 14 verified this pipeline end to end against real Razorpay **Test Mode** infrastructure: a real classification, a deterministic authorization and selection, a real Test Mode Payment Link, a real manual payment, and a genuine `payment_link.paid` webhook that was HMAC-verified, correlated to the persisted link, and recorded as a single trusted recovery. See the README for the evidence and the honest limitations. **Test Mode is not production payment processing, and no production readiness is claimed.** Two limitations are load-bearing for interpreting the demo: the external LLM classification can vary between equivalent events even at `temperature = 0` (the deterministic policy and selector are reproducible only *given* a classifier output), and the benchmark's hidden outcome model carries no signal, so it cannot demonstrate the value of targeting.
+Phase 14 verified this pipeline end to end against real Razorpay **Test Mode** infrastructure: a real classification, a deterministic authorization and selection, a real Test Mode Payment Link, a real manual payment, and a genuine `payment_link.paid` webhook that was HMAC-verified, correlated to the persisted link, and recorded as a single trusted recovery. See the README for the evidence and the honest limitations. **Test Mode is not production payment processing, and no production readiness is claimed.** Two limitations are load-bearing for interpreting the demo: the external LLM classification can vary between equivalent events even at `temperature = 0` (the deterministic policy and selector are reproducible only *given* a classifier output), and the **Phase 9** benchmark's hidden outcome model carries no signal, so it cannot demonstrate the value of targeting. Phase 17 addresses the second limitation with a separate signal-bearing benchmark; see below and `docs/BENCHMARK.md`.
 
 ## The Phase 12 closed-loop webhook (outcome channel)
 
@@ -155,7 +155,32 @@ Selection is `argmax(expected_value)`, with the V1 priority ordering used only t
 
 The optimizer selects; the existing bounded executor still executes. It performs no execution, no persistence, no LLM call, no network access, and has no benchmark or hidden-ground-truth dependency.
 
-Full specification, coefficients, assumptions, and limitations: [ECONOMIC_MODEL.md](ECONOMIC_MODEL.md). Note that V2 probabilities, costs, and friction are RecoveryOS controlled evaluation assumptions, and **Phase 16 does not claim improved recovery performance**.
+Full specification, coefficients, assumptions, and limitations: [ECONOMIC_MODEL.md](ECONOMIC_MODEL.md). Note that V2 probabilities, costs, and friction are RecoveryOS controlled evaluation assumptions, and **Phase 16 does not claim improved recovery performance**. Phase 17 supplies the experiment that can test that claim.
+
+### The Phase 17 signal-bearing benchmark
+
+Phase 16 built the decision engine; Phase 17 built the environment capable of honestly deciding whether it helps. It is a **second, separate** benchmark — the Phase 9 harness and its hidden model (`app/outcome_model.py`) are frozen and unchanged.
+
+```
+FROZEN 500 EVENTS  →  HIDDEN WORLD (app/hidden_world.py)
+                              │  hidden from the SUT
+   ┌──────────┬───────────────┼───────────────┬──────────┐
+No Action   Naive Retry   RecoveryOS V1   RecoveryOS V2   Oracle
+                               └──── policy gate ────┘   (eval only)
+                                          │
+                              simulated execution (never Razorpay)
+                                          │
+                               outcome realization  →  evaluation layer
+```
+
+Four things distinguish it from Phase 9:
+
+- **The hidden world carries causal signal.** `P_true` is a function of `failure_reason`, `payment_method`, `customer_history`, subscription status and amount band — never of `event_id`. Different failure classes genuinely reward different interventions, so targeting can be rewarded or punished. It is independently authored from the V2 estimator and provably disagrees with it about intervention rankings.
+- **Every intervention is simulatable offline.** `app/benchmark_simulation.py` runs `payment_link` as a `SIMULATED` execution with no credential and no network call, so the benchmark is no longer pinned to V1. The production executor still couples `payment_link` to `REAL_RAZORPAY`, unchanged.
+- **There is an evaluation-only Oracle**, giving regret and value-capture metrics rather than only a revenue comparison.
+- **Each event is an independent decision problem**, which makes the run invariant to strategy order and event order — both verified on every run.
+
+Ground truth remains structurally unreachable from the classifier, policy, selector, estimator, optimizer, executor and dashboard. Methodology, frozen coefficients, metric formulas, the canonical result and the limitations: [BENCHMARK.md](BENCHMARK.md).
 
 ### The bounded executor (Phase 7)
 

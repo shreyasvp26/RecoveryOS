@@ -324,28 +324,31 @@ no `event_id`-keyed subscript; and contains no float literals.
 The optimizer selects. The existing executor executes. There is no
 `optimizer → executor` path.
 
-## Benchmark arm: why the RecoveryOS arm is pinned to V1
+## Benchmark arms: the V1 pin, and how Phase 17 removed the need for it
 
-The benchmark's RecoveryOS arm runs `execute_event(..., selection_strategy=
-SELECTION_V1_FIXED_PRIORITY)` and therefore still measures the recorded V1
-baseline exactly (seed 42 / 500 events reproduces 266,939,600 / 271,854,300 /
-264,715,100 unchanged).
+The **Phase 9** benchmark's RecoveryOS arm runs `execute_event(...,
+selection_strategy=SELECTION_V1_FIXED_PRIORITY)` and therefore still measures the
+recorded V1 baseline exactly (seed 42 / 500 events reproduces 266,939,600 /
+271,854,300 / 264,715,100 unchanged). It remains pinned, and frozen.
 
-This is deliberate. The benchmark harness configures **no Razorpay client**, so
-`payment_link` has no execution path there and can only produce a controlled
+The pin was necessary because that harness configures **no Razorpay client**, so
+`payment_link` had no execution path there and could only produce a controlled
 `REAL_RAZORPAY` / `FAILED` / `configuration_missing` outcome. V1's fixed priority
-masked this completely: the benchmark's deterministic classifier offers the full
-executable taxonomy on every event, so `retry_delayed` is always a candidate and
-always outranks `payment_link`, which V1 therefore never selects. Economic
-selection does not mask it: at seed
-42 / 80 events the optimizer chose `payment_link` for 21 of 29 attempts, and the
-outcome simulator would have credited simulated recovery to executions that
-provably never ran.
+masked this completely: the deterministic classifier offers the full executable
+taxonomy on every event, so `retry_delayed` is always a candidate and always
+outranks `payment_link`, which V1 therefore never selects. Economic selection
+does not mask it — at seed 42 / 80 events the optimizer chose `payment_link` for
+21 of 29 attempts, and the outcome simulator would have credited simulated
+recovery to executions that provably never ran.
 
-That is a limitation of the current harness, not of the optimizer's decision
-theory, and repairing it means changing how the benchmark models executability —
-explicitly Phase 17 work. Pinning the arm keeps the V1 baseline honest and
-reproducible in the meantime.
+**Phase 17 repaired that**, as anticipated. `app/benchmark_simulation.py` gives
+the benchmark its own offline execution boundary in which every executable
+intervention — `payment_link` included — runs as a `SIMULATED` execution with no
+credential and no network call, while the production `BoundedExecutor` keeps
+`payment_link` pinned to `REAL_RAZORPAY` exactly as before. The Phase 17
+benchmark therefore runs V1 and V2 as separate arms over one signal-bearing
+hidden world, alongside No Action, Naive Retry and an evaluation-only Oracle.
+See `docs/BENCHMARK.md`.
 
 `selection_strategy` affects **ranking only**. It cannot widen the authorized
 set: both strategies consume the same authoritative policy decisions, and a
@@ -391,14 +394,20 @@ re-checks authorization before acting. Phase 16 does not change that boundary.
 - **No empirical validation.** Every estimator coefficient, cost, and friction
   value is a modelled assumption. None is fitted, measured, or validated against
   real recovery outcomes, and none was tuned against the benchmark's hidden
-  labels.
-- **The current benchmark cannot evaluate this work.** `generate_hidden_outcome_model`
+  labels — including Phase 17's.
+- **The Phase 9 benchmark cannot evaluate this work.** `generate_hidden_outcome_model`
   draws independent uniform probabilities per (event, intervention) pair, so
   hidden recovery is uncorrelated with every observable feature the estimator
-  reads. Under that model no targeting strategy can outperform any other, so the
-  existing benchmark can neither confirm nor refute the optimizer. Phase 17
-  introduces a signal-bearing model.
-- **No V2 benchmark arm exists yet**, by design (see above).
+  reads. Under that model no targeting strategy can outperform any other. The
+  Phase 17 benchmark (`docs/BENCHMARK.md`) supplies a signal-bearing world and a
+  dedicated V2 arm, and reports V2 ahead of V1 by ₹100,006.72 of true economic
+  value at the canonical seed — while also showing V2 capturing only 93.1% of the
+  Oracle's available value, with the residual regret traced to specific,
+  uncorrected estimator errors.
+- **That evaluation is against an authored synthetic world**, not against nature.
+  The estimator and the hidden world were independently authored with different
+  coefficients, bands and feature sets, and are proven to disagree on rankings —
+  but both were written by the same project.
 - **Friction proportionality is an assumption.** Modelling friction as a fixed
   proportion of transaction value is defensible but unmeasured; real friction may
   not scale linearly with amount.
