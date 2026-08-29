@@ -273,3 +273,93 @@ def test_decision_engine_never_swallows_an_exception(module: str) -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.ExceptHandler):
             pytest.fail(f"{module} contains an exception handler: {ast.unparse(node)}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 18: the audit contract inherits the decision engine's isolation
+#
+# The optimizer's decision is now recorded durably. The record must be able to
+# describe the decision without acquiring any capability the decision engine
+# itself is denied: it must not reach ground truth, must not become an
+# execution path, and must not introduce a second economic calculation.
+# ---------------------------------------------------------------------------
+
+AUDIT_MODULE = "optimizer_audit"
+
+
+def test_the_audit_contract_cannot_reach_the_evaluation_layer() -> None:
+    reachable = _transitive_app_imports(AUDIT_MODULE) & EVALUATION_MODULES
+    assert not reachable, f"{AUDIT_MODULE} can reach {sorted(reachable)}"
+
+
+def test_the_audit_contract_never_names_hidden_ground_truth() -> None:
+    source = _code_only(AUDIT_MODULE)
+    for term in (
+        "HiddenOutcomeModel",
+        "hidden_outcome",
+        "hidden_probability",
+        "true_probability",
+        "true_expected_value",
+        "ground_truth",
+        "oracle",
+        "Oracle",
+        "outcome_draw",
+        "RecoveryOutcome",
+        "OutcomeSimulator",
+        "recovered_amount_paise",
+    ):
+        assert term not in source, f"{AUDIT_MODULE} references {term}"
+
+
+def test_the_audit_contract_cannot_execute_or_reach_a_provider() -> None:
+    reachable = _transitive_app_imports(AUDIT_MODULE) & EXECUTION_MODULES
+    assert not reachable, (
+        f"{AUDIT_MODULE} can reach execution/persistence: {sorted(reachable)}"
+    )
+    source = _code_only(AUDIT_MODULE)
+    for term in ("BoundedExecutor", "ExecutionOutcome", ".execute(", "razorpay"):
+        assert term not in source, f"{AUDIT_MODULE} references execution: {term}"
+
+
+def test_the_audit_contract_introduces_no_nondeterminism_or_io() -> None:
+    for reachable in {AUDIT_MODULE} | _transitive_app_imports(AUDIT_MODULE):
+        leaked = _imports(reachable) & FORBIDDEN_STDLIB
+        assert not leaked, (
+            f"{AUDIT_MODULE} reaches {sorted(leaked)} through {reachable}"
+        )
+
+
+def test_the_audit_contract_does_not_reimplement_the_economic_equation() -> None:
+    """It records the optimizer's arithmetic; it must never redo it.
+
+    A second implementation of the expected-value equation would let the audit
+    trail disagree with the decision it claims to describe.
+    """
+    tree = ast.parse(_module_path(AUDIT_MODULE).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(
+            node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Div, ast.Mod)
+        ):
+            pytest.fail(
+                f"{AUDIT_MODULE} performs arithmetic: {ast.unparse(node)}"
+            )
+    source = _code_only(AUDIT_MODULE)
+    for term in ("evaluate_candidate", "EconomicModel", "PROBABILITY_SCALE"):
+        assert term not in source, f"{AUDIT_MODULE} recomputes economics: {term}"
+
+
+def test_the_audit_contract_never_swallows_an_exception() -> None:
+    """It may translate a failure, but it may never absorb one."""
+    tree = ast.parse(_module_path(AUDIT_MODULE).read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        raises = any(isinstance(inner, ast.Raise) for inner in ast.walk(node))
+        assert raises, f"{AUDIT_MODULE} swallows: {ast.unparse(node)}"
+
+
+def test_the_audit_contract_cannot_reach_policy_rules() -> None:
+    """It records that policy allowed something, never why or whether."""
+    source = _code_only(AUDIT_MODULE)
+    for term in ("PolicyEngine", "PolicyInput", "PolicyConfig", "denial_reason"):
+        assert term not in source, f"{AUDIT_MODULE} duplicates policy logic: {term}"

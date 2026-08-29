@@ -48,7 +48,10 @@ from ..execution_service import (
     STATUS_NO_ACTION,
     execute_event,
 )
+from ..economics import EconomicsError
 from ..ingestion import IngestionStatus, ingest_event
+from ..optimizer import OptimizerError
+from ..optimizer_audit import OptimizerAuditError
 from ..policy import (
     PolicyConfig,
     PolicyEngine,
@@ -352,6 +355,18 @@ def execute_event_endpoint(
     """
     try:
         result = execute_event(conn, event_id, now, config, razorpay_client)
+    except (EconomicsError, OptimizerError, OptimizerAuditError) as exc:
+        # An unusable estimate, an unusable economic decision, or an
+        # unrecordable one. Each stops the flow before the executor runs, and
+        # is surfaced explicitly rather than as an opaque server error.
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "economic_selection_failure",
+                "event_id": event_id,
+                "detail": str(exc) or "the economic decision could not be made",
+            },
+        )
     except PolicyValidationError as exc:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
