@@ -63,6 +63,7 @@ from .db import (
     insert_payment_event,
 )
 from .execution_service import (
+    SELECTION_V1_FIXED_PRIORITY,
     STATUS_EXECUTION_FAILED,
     STATUS_EXECUTION_SUCCESS,
     STATUS_MISSING_CLASSIFICATION,
@@ -718,6 +719,11 @@ def run_recoveryos(
                     evaluation_time,
                     policy_config,
                     razorpay_client=None,
+                    # Pinned to V1 so this arm keeps measuring the recorded V1
+                    # baseline. The harness configures no Razorpay client, so
+                    # payment_link cannot execute here; Phase 17 introduces the
+                    # V2 arm together with a signal-bearing outcome model.
+                    selection_strategy=SELECTION_V1_FIXED_PRIORITY,
                 )
             except Exception as exc:
                 results.append(
