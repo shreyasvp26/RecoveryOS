@@ -39,7 +39,7 @@ recoveryos/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, PITCH_NOTES.md
+├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, PITCH_NOTES.md, V1_BASELINE.md
 ├── README.md
 └── .gitignore
 ```
@@ -328,7 +328,7 @@ curl -X POST http://127.0.0.1:8000/events/<event_id>/policy \
 ```
 
 - **Authority path** — the LLM only recommends; the deterministic policy engine authorizes (ALLOW/DENY); the future executor acts. There is never an `execute=true` supplied by the LLM.
-- **Six locked rules, evaluated in a fixed order** — (1) fraud protection (`fraud_suspect` events are always denied), (2) max 2 interventions per customer per rolling 24h, (3) 30-minute event cooldown, (4) configurable daily spend cap (rolling 24h, global), (5) terminal failure block, (6) duplicate successful-intervention protection. The first blocker determines the denial reason; the same inputs always produce the same decision.
+- **Six locked rules, evaluated in a fixed order** — (1) fraud protection (`fraud_suspect` events are always denied), (2) terminal failure block, (3) duplicate successful-intervention protection, (4) max 2 interventions per customer per rolling 24h, (5) 30-minute event cooldown, (6) configurable daily spend cap (rolling 24h, global). The first blocker determines the denial reason; the same inputs always produce the same decision. This order is the authoritative `DETERMINISTIC_RULE_ORDER` in `app/policy.py` and matches `docs/ARCHITECTURE.md`.
 - **Fail-closed by construction** — malformed input, unknown interventions, timezone-naive timestamps, and history lookups that cannot be determined safely produce explicit controlled errors; policy never fabricates history, spend, or duplicates and never fails open.
 - **Historical facts come from persisted state** — the customer 24h count, most-recent event intervention, successful-duplicate flag, and daily spend are computed by the persistence boundary (`intervention_attempts`) with actual datetime arithmetic against the explicit evaluation timestamp, never from the LLM and never from shadow in-memory state.
 - **Persistence** — every evaluation is persisted to `policy_decisions` (correlated by `event_id`, preserving the decision contract). No execution exists: nothing in Phase 6 records a successful intervention.
