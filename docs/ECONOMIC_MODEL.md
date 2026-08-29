@@ -70,11 +70,33 @@ optimizer_decision_set  ⊆  policy_allowed_candidates
 ```
 
 This is enforced **structurally, not by convention**. The optimizer's `select`
-method accepts only an `AllowedCandidates` value, and `AllowedCandidates` can
-only be built by `from_policy_decisions(candidates, decisions)`, which derives
-the allowed set itself from authoritative `PolicyDecision` objects. There is no
-code path that accepts a bare list of interventions, so a denied candidate
-cannot be smuggled in. Passing a plain list raises `OptimizerError`.
+method accepts only an `AllowedCandidates` value; passing a plain list raises
+`OptimizerError`.
+
+Crucially, the guarantee does not rest on callers choosing the
+`from_policy_decisions(candidates, decisions)` entry point. `AllowedCandidates`
+carries the authorizing `PolicyDecision` objects and re-validates them in
+`__post_init__`, on every construction path. An entry in `allowed` is accepted
+only when it was also considered, carries a real `PolicyDecision`, that decision
+names that exact intervention, and that decision is an ALLOW. Hand-constructing
+the type around a denied candidate therefore fails; producing one that succeeds
+requires a genuine ALLOW, at which point the candidate is authorized by
+definition.
+
+Authorization is further bound to the event it was issued for. A policy decision
+is a grant of one intervention on one event, so `select` rejects an ALLOW whose
+`event_id` does not match the event being decided; authorization is not
+transferable between events.
+
+> **Repaired after the Phase 16 publication.** `AllowedCandidates` was
+> originally a plain frozen dataclass, so this section's guarantee held only for
+> callers who used `from_policy_decisions`. Constructing the type directly with
+> a fabricated `allowed` tuple bypassed the policy filter and the optimizer would
+> select the unauthorized candidate. The only in-tree caller
+> (`execution_service`) always used the safe path, and the bounded executor
+> independently re-checks authorization, so no unauthorized execution was ever
+> reachable — but the invariant was weaker than documented, and is now enforced
+> by the type itself.
 
 `from_policy_decisions` excludes a candidate when it is denied, when it has no
 decision at all (absence of a decision is not permission), and when it is
@@ -305,8 +327,10 @@ baseline exactly (seed 42 / 500 events reproduces 266,939,600 / 271,854,300 /
 This is deliberate. The benchmark harness configures **no Razorpay client**, so
 `payment_link` has no execution path there and can only produce a controlled
 `REAL_RAZORPAY` / `FAILED` / `configuration_missing` outcome. V1's fixed priority
-happened to mask this, because `retry_delayed` outranked `payment_link` and was
-almost always an offered candidate. Economic selection does not mask it: at seed
+masked this completely: the benchmark's deterministic classifier offers the full
+executable taxonomy on every event, so `retry_delayed` is always a candidate and
+always outranks `payment_link`, which V1 therefore never selects. Economic
+selection does not mask it: at seed
 42 / 80 events the optimizer chose `payment_link` for 21 of 29 attempts, and the
 outcome simulator would have credited simulated recovery to executions that
 provably never ran.
@@ -319,6 +343,22 @@ reproducible in the meantime.
 `selection_strategy` affects **ranking only**. It cannot widen the authorized
 set: both strategies consume the same authoritative policy decisions, and a
 fraud event is inert under either.
+
+## Model immutability
+
+`EconomicModel.assumptions` and the estimator's coefficient tables
+(`BASE_RECOVERY_BPS`, `ROOT_CAUSE_ADJUSTMENT_BPS`,
+`FAILURE_REASON_ADJUSTMENT_BPS`, `PAYMENT_METHOD_ADJUSTMENT_BPS`,
+`SUBSCRIPTION_ADJUSTMENT_BPS`) are read-only mappings, nested tables included.
+They are evaluation constants, not runtime configuration.
+
+This matters because determinism is a claim about the engine, not about caller
+discipline. Both were plain dictionaries when Phase 16 was first published, so
+anything holding a reference to the shared `DEFAULT_ECONOMIC_MODEL`, or merely
+importing the estimator, could retune costs, friction, or probability
+coefficients in place and silently change every subsequent decision. A model
+built from a caller's mapping also copies it, so later mutation of the source
+cannot reach the model. Coefficient values are unchanged by this repair.
 
 ## Known limitations
 
