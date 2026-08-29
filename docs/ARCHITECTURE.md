@@ -202,6 +202,35 @@ Three properties make it defensible:
 
 The record is exposed additively on the existing `GET /events/{event_id}/trace` response as `optimizer_decisions`, and the Event Decision Trace renders an **Economic Optimization** stage between Policy and Execution showing, per candidate, the estimated recovery probability, estimated recovered amount, estimated intervention cost, modeled friction and estimated expected value, plus the selection and its rationale. Every figure is a persisted backend value labelled `MODEL ESTIMATE`; none is hardcoded, none is recomputed in the frontend, and no benchmark ground truth reaches the operator surface. The V1 arm records nothing, because no economic decision occurred — an absent stage is reported as absent rather than reconstructed.
 
+### The Phase 19 policy replay lab
+
+Phase 18 made the economic decision auditable, but the *policy bounds* constraining that decision remained untestable: changing the intervention limit, the cooldown or the spend cap meant changing production and finding out afterwards. Phase 19 adds a **What-If Decision Lab** that answers one question — *what would RecoveryOS have done, on the exact same workload, if the control policy had been different?*
+
+```
+Policy scenario  ←  the ONLY experimental variable
+     ↓
+same events → same classifications → same candidates
+     → same POLICY ENGINE (given the scenario's config)
+     → same Phase 18 OPTIMIZER
+     → simulated execution
+     → same HIDDEN WORLD and seed
+     ↓
+replay metrics, scenario comparison, event-level decision deltas
+```
+
+This is deliberately **not** a simulator. `app/replay.py` re-implements no decision: classification comes from the benchmark's deterministic classifier, authorization from the same `PolicyEngine`, selection from the same `select_for_strategy` the production execution service calls, execution from the benchmark's `SimulatedExecutor`, and outcomes from the same `HiddenWorld`. A scenario (`app/policy_scenario.py`) is a validated `PolicyConfig` plus identity — *data*, not a branch. There is no `if scenario == "aggressive"` in the decision path.
+
+Four properties make it trustworthy:
+
+- **Simulation only, structurally.** Replay does not import the Razorpay client, the production executor or the execution service, and `SimulatedExecutor` has no provider dependency — both verified by AST inspection of imports rather than by grepping prose. Razorpay call count, Payment Link creations and database writes are all asserted to be zero. The active policy, historical audit records and canonical benchmark records are never mutated.
+- **Safety is not configurable.** Fraud, terminal-failure and duplicate protection have no setting at all; a custom scenario naming them is rejected with a 422. "Aggressive" means more permissive bounded thresholds, never less safety.
+- **Fairness is verified, not asserted.** Scenarios share one `Phase17BenchmarkConfig` with only `policy_config` replaced, and the comparison payload reports per-run checks on event-set identity, hidden-world identity, classification source, simulated-execution status, unauthorized attempts and immutable-protection activity.
+- **Ground truth stays out.** The hidden world is consulted once per event, *after* the decision and the simulated execution. `ReplayEventRecord` carries no hidden probability at all, so there is nothing for the API to leak — and an attempt's "success" for policy-history purposes is read from the execution status, never from whether money came back.
+
+Because the configurable rules are history-dependent, replay accumulates policy history **across** events in memory — same four facts and same rolling-24h semantics as `db.get_policy_history`, each event evaluated at its own timestamp, events ordered canonically by `(timestamp, event_id)`. Phase 17's harness hands the engine an *empty* history (correct for comparing decision engines), which would make every scenario produce byte-identical results.
+
+Exposed additively as `GET /replay/scenarios` and `POST /replay/compare`, and rendered by a new read-only **Policy Lab** screen. Nothing is persisted; no table was added. Every figure is labelled `SIMULATED`. See `docs/POLICY_REPLAY.md` for the scenario derivations, the metric definitions and the honest limitations — notably that on the canonical workload the spend cap never binds and the cooldown rarely does, which the lab reports rather than disguises.
+
 ### The bounded executor (Phase 7)
 
 The executor's API is effectively `execute(event, intervention, policy_decision, razorpay_client)`. It is not a second policy engine:

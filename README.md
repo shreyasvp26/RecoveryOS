@@ -39,7 +39,7 @@ recoveryos/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, PITCH_NOTES.md, V1_BASELINE.md
+├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, PITCH_NOTES.md, V1_BASELINE.md
 ├── README.md
 └── .gitignore
 ```
