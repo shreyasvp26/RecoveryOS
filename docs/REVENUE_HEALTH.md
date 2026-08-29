@@ -233,3 +233,11 @@ carries its own canonical Phase 19 id.
   `python -m app.populate --seed 42 --count 500`) before expecting incidents.
 - **The unrecovered rate is not independent evidence.** It is the exact
   complement of the recovery rate and moves by construction.
+- **The affected batch is a selected sample, and the incident replay inherits
+  that.** Affected payments are exactly the ones that stayed unrecovered under
+  the active policy, so the reference arm starts at zero simulated recovered
+  revenue on that batch *by construction*. The comparison therefore answers
+  "would an alternative policy have recovered any of these?", which is the
+  operational question, and **not** "which policy is better overall" — that is
+  what the Policy Lab's full-workload comparison is for. A run in which every
+  arm recovers nothing is an honest result on this batch, not a broken replay.

@@ -209,6 +209,14 @@ function PolicyInvestigation({ incidentId }) {
             </tbody>
             </table>
           </div>
+          <p className="panel-note">
+            These payments are affected precisely because they stayed unrecovered
+            under the current policy, so the reference arm recovers nothing on
+            this batch by construction. Read the comparison as “would an
+            alternative policy have recovered any of these?”, not as an overall
+            ranking of policies — the Policy Lab’s full-workload comparison
+            answers that.
+          </p>
         </>
       )}
     </div>
