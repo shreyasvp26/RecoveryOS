@@ -83,6 +83,13 @@ the type around a denied candidate therefore fails; producing one that succeeds
 requires a genuine ALLOW, at which point the candidate is authorized by
 definition.
 
+The same validation applies the factory's input-integrity rules on both paths:
+an off-taxonomy intervention, a duplicate candidate, and `no_action` in the
+allowed set are all rejected regardless of which constructor was used, so the
+type's guarantees do not depend on which door the caller came through.
+`no_action` remains valid in `considered`, where it records that the option was
+seen and is not executable.
+
 Authorization is further bound to the event it was issued for. A policy decision
 is a grant of one intervention on one event, so `select` rejects an ALLOW whose
 `event_id` does not match the event being decided; authorization is not
@@ -359,6 +366,25 @@ importing the estimator, could retune costs, friction, or probability
 coefficients in place and silently change every subsequent decision. A model
 built from a caller's mapping also copies it, so later mutation of the source
 cannot reach the model. Coefficient values are unchanged by this repair.
+
+## The determinism property, and the boundary of the authorization claim
+
+Given the same event, the same classification, the same policy decisions, and
+the same economic model, the optimizer returns the same decision. This holds
+regardless of candidate ordering, of how many decisions preceded it, and of any
+attempted mutation of the shared model or coefficient tables in between. There
+is no randomness, no clock, no network, no database, and no global mutable
+state: the decision engine reaches only `classification`, `models`, `policy`,
+and `selector`, verified over the transitive import closure.
+
+One limit is worth stating plainly rather than overclaiming. `PolicyDecision` is
+an ordinary public type, so a caller inside the process can fabricate one. What
+the optimizer guarantees is that it never *widens* authorization relative to the
+decisions it was handed: it cannot manufacture an ALLOW, cannot upgrade a
+denial, cannot reinterpret a denial reason, and cannot carry an ALLOW across
+interventions or events. Trusting the decisions themselves is the same trust
+boundary V1's bounded executor already operates under, which independently
+re-checks authorization before acting. Phase 16 does not change that boundary.
 
 ## Known limitations
 
