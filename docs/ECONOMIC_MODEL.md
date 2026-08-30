@@ -19,6 +19,15 @@ economic decision engine. It answers one engineering question:
    verifies the decision engine. Demonstrating that V2 recovers more money
    requires a signal-bearing hidden outcome model, which is Phase 17 work.
 
+> **Phase 23 qualification.** Statement 1 governs the **baseline** estimator,
+> which is still the default and still unmeasured. Phase 23 adds a calibration
+> layer that corrects the baseline's `payment_link` probability from real
+> operational terminal outcomes: verified webhook recoveries plus provider-
+> confirmed `expired` (the authoritative negative signal), through an immutable,
+> versioned, evidence-gated snapshot. This is a transparent deterministic
+> correction over observed outcomes — not a hidden outcome model, and not an
+> empirical validation of the whole estimator. See `docs/ADAPTIVE_ESTIMATION.md`.
+
 ## V1 selection vs V2 selection
 
 **V1 (`app/selector.py`, frozen and still present).** Intersect the classifier's
