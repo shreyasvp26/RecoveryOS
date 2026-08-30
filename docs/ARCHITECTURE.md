@@ -45,6 +45,52 @@ Flow explanation:
 9. **Benchmark** — results are measured against baselines.
 10. **Dashboard** — results are surfaced for humans.
 
+## Current System Architecture (Phase 25)
+
+This is the current, authoritative view of the system — the closed recovery
+loop as it runs today. Authority and evidence flow in one direction only, and
+the loop feeds back into future estimation without ever granting the model or
+the browser any authority:
+
+```
+Revenue at Risk                        ← failed/declined/abandoned payments (persisted)
+   ↓
+AI Diagnosis                           ← advisory LLM classification (recommends only)
+   ↓
+Economic Estimation                    ← V2 optimizer: expected value over allowed candidates
+   ↓
+Deterministic Policy                   ← ALLOW / DENY — the authoritative safety gate
+   ↓
+Bounded Execution                      ← SIMULATED, or REAL_RAZORPAY Test Mode Payment Link
+   ↓
+Verified Outcome                       ← HMAC-verified payment_link.paid webhook (OUTCOME only)
+   ↓
+Recovery Intelligence                  ← prediction vs verified outcome
+   ↓
+Adaptive Estimation                    ← operator-triggered calibration from operational evidence
+   ↓
+Future Decisions                       ← versioned estimator feeds the economic ranking
+```
+
+Semantics that this diagram must never blur:
+
+- **LLM is advisory.** The model recommends candidate interventions; it never
+  authorizes, selects, or executes.
+- **Policy is authoritative.** The deterministic six-rule gate is the only
+  thing that can allow or deny an intervention. No browser, no LLM, and no
+  benchmark can override it.
+- **Benchmark truth is isolated.** The hidden outcome model is evaluation-side
+  ground truth that never reaches the decision path.
+- **Operational evidence is separate from simulation.** Only REAL_RAZORPAY
+  terminal outcomes (verified recoveries + provider-confirmed expired links)
+  calibrate the estimator. SIMULATED, benchmark, Policy Lab, and replay data
+  are structurally ineligible.
+
+The historical V1/V2 sections below remain as provenance; the production
+selection strategy is the **V2 economic optimizer** (Phase 16), and the
+adaptive estimator (Phase 23) recalibrates only the probability used to rank —
+never what is authorized or executed.
+
 ## REAL_RAZORPAY vs SIMULATED
 
 RecoveryOS operates in two distinct modes:

@@ -8,7 +8,7 @@ An **AI Revenue Recovery Control Plane** for the Razorpay AI Buildathon 2026 (Re
 
 The LLM never has direct authority over a money-moving action. AI output is advisory; a deterministic policy gate is authoritative; an executor performs the action; a benchmark proves value against baselines.
 
-> **Important:** This repository is at **Phase 24 — submission readiness**. RecoveryOS performs **no production revenue recovery**. The complete loop is implemented and verified: event ingestion → advisory AI classification → the deterministic six-rule policy gate → the **V2 economic optimizer** (the production selection strategy since Phase 16) → bounded execution (explicit `SIMULATED`, or a real **Razorpay Test Mode** Payment Link) → the verified, OUTCOME-only `payment_link.paid` webhook channel → recovery-intelligence feedback and a versioned, evidence-calibrated adaptive estimator (Phase 23). **Test Mode is not production payment processing**, and no production claim is made. Benchmark value is measured only by comparison, over **synthetic** hidden worlds and **simulated** recovery amounts, under **two explicitly separate methodologies** — the frozen Phase 9 benchmark (`phase9_v1_compat`, whose uniform hidden model carries **no signal** and cannot reward targeting) and the current Phase 17 signal-bearing benchmark (`phase17_signal_bearing_v1`, on which V2 demonstrably beats V1 and the naive baselines in true economic value). Read `docs/BENCHMARK.md` before quoting any figure. Everything is gated by GitHub Actions CI (backend test suite + frontend lint/build).
+> **Important:** This repository is at **Phase 25 — final productization, production readiness & release**. RecoveryOS performs **no production revenue recovery**. The complete loop is implemented and verified: event ingestion → advisory AI classification → the deterministic six-rule policy gate → the **V2 economic optimizer** (the production selection strategy since Phase 16) → bounded execution (explicit `SIMULATED`, or a real **Razorpay Test Mode** Payment Link) → the verified, OUTCOME-only `payment_link.paid` webhook channel → recovery-intelligence feedback and a versioned, evidence-calibrated adaptive estimator (Phase 23). A readiness check (`GET /health/ready`) reports database usability and configuration state without exposing secrets, the operator workflow and real-vs-simulated presentation are unified across the frontend, the benchmark is fully reproducible from documented commands, and deployment/demo documentation is explicit. **Test Mode is not production payment processing**, and no production claim is made. Benchmark value is measured only by comparison, over **synthetic** hidden worlds and **simulated** recovery amounts, under **two explicitly separate methodologies** — the frozen Phase 9 benchmark (`phase9_v1_compat`, whose uniform hidden model carries **no signal** and cannot reward targeting) and the current Phase 17 signal-bearing benchmark (`phase17_signal_bearing_v1`, on which V2 demonstrably beats V1 and the naive baselines in true economic value). Read `docs/BENCHMARK.md` before quoting any figure. Everything is gated by GitHub Actions CI (backend test suite + frontend lint/build).
 
 ## Locked Architecture
 
@@ -40,7 +40,7 @@ recoveryos/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, ADAPTIVE_ESTIMATION.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, RECOVERY_INTELLIGENCE.md, RECOVERY_OPERATIONS.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
+├── docs/          ARCHITECTURE.md, ADAPTIVE_ESTIMATION.md, BENCHMARK.md, DEMO.md, DEPLOYMENT.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, RECOVERY_INTELLIGENCE.md, RECOVERY_OPERATIONS.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
 ├── README.md
 └── .gitignore
 ```
@@ -85,7 +85,7 @@ cd backend
 uvicorn app.main:app --reload
 ```
 
-Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
+Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`. For an operator readiness check use `http://127.0.0.1:8000/health/ready`, which reports whether the SQLite database is usable and whether each external integration (Razorpay Test Mode, Razorpay webhook, OmniRoute classifier) is configured — as booleans only, never exposing any credential value.
 
 ## Environment & Configuration
 
@@ -117,7 +117,9 @@ For webhook delivery during local development, the backend must be reachable fro
 
 ## Running the demo
 
-The offline demo needs no Razorpay credentials and is fully deterministic:
+A deterministic five-minute walkthrough (live and offline paths) is documented
+in `docs/DEMO.md`. The offline demo needs no Razorpay credentials and is fully
+deterministic:
 
 ```bash
 cd backend
@@ -128,6 +130,8 @@ uvicorn app.main:app                                 # start the API on :8000
 cd ../frontend
 npm run dev                                          # Vite dev server (proxies /api -> :8000)
 ```
+
+For a reproducible local or simple public deployment see `docs/DEPLOYMENT.md`.
 
 To reset, stop the API, delete the SQLite file, and re-run the same two commands — `app.populate` is deterministic and idempotent, so the persisted chain reproduces exactly.
 
