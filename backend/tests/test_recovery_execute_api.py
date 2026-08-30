@@ -14,9 +14,21 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+from app import calibration_service
+from app.calibration import OUTCOME_NOT_RECOVERED
 from app.classifier import OmniRouteError
-from app.db import connect, init_db
+from app.db import (
+    connect,
+    get_optimizer_decisions_for_event,
+    init_db,
+    insert_execution_outcome,
+    insert_optimizer_decision,
+    insert_provider_payment_link_outcome,
+    insert_webhook_recovery_outcome,
+)
+from app.executor import PAYMENT_LINK, ExecutionOutcome
 from app.main import app
+from app.optimizer_audit import OptimizerDecisionRecord
 from app.razorpay_client import PaymentLinkResult, RazorpayExecutionError
 from app.routes.events import get_classifier, get_now, get_razorpay_client
 
@@ -111,6 +123,75 @@ def _count(db_path: str, table: str) -> int:
         return conn.execute(
             f"SELECT COUNT(*) FROM {table} WHERE event_id = ?", ("evt_ops",)
         ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _calibration_part(
+    conn, *, intervention: str, link_id: str, recovered: bool
+) -> None:
+    """One terminal provider observation that feeds a calibration snapshot."""
+    insert_execution_outcome(
+        conn,
+        ExecutionOutcome(
+            event_id=f"cal_{link_id}",
+            intervention=intervention,
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference=f"https://rzp.io/rzp/{link_id}",
+            reported_at="2026-01-01T00:00:00+00:00",
+            payment_link_id=link_id,
+        ),
+    )
+    insert_optimizer_decision(
+        conn,
+        OptimizerDecisionRecord(
+            event_id=f"cal_{link_id}",
+            decided_at="2026-01-01T00:00:00+00:00",
+            selected_intervention=intervention,
+            selection_reason="max_expected_value",
+            candidates_considered=(intervention,),
+            allowed_candidates=(intervention,),
+            evaluations=(),
+        ),
+    )
+    if recovered:
+        insert_webhook_recovery_outcome(
+            conn,
+            delivery_id=f"del_{link_id}",
+            payment_link_id=link_id,
+            referenced_event_id=f"cal_{link_id}",
+            amount_paid_paise=10_000,
+            currency="INR",
+            payment_id=f"pay_{link_id}",
+            recovered_at="2026-01-02T00:00:00+00:00",
+        )
+
+
+def _activate_calibration(db_path: str, *, intervention: str) -> int:
+    """Provide gated recovery evidence and build an immutable active snapshot.
+
+    The snapshot is built on the SAME database the recovery endpoint reads (via
+    DATABASE_URL), so ``build_production_estimator`` observes it on the request
+    path. Returns the snapshot version.
+    """
+    conn = connect(db_path)
+    try:
+        init_db(conn)
+        for i in range(6):
+            _calibration_part(conn, intervention=intervention, link_id=f"r{i}", recovered=True)
+        for i in range(4):
+            _calibration_part(conn, intervention=intervention, link_id=f"e{i}", recovered=False)
+            insert_provider_payment_link_outcome(
+                conn,
+                payment_link_id=f"e{i}",
+                event_id=f"cal_e{i}",
+                status="expired",
+                outcome=OUTCOME_NOT_RECOVERED,
+                observed_at="2026-01-03T00:00:00+00:00",
+            )
+        built = calibration_service.build_calibration_snapshot(conn, None)
+        return built["version"]
     finally:
         conn.close()
 
@@ -330,3 +411,68 @@ def test_an_unclassified_event_never_executes(monkeypatch, tmp_path) -> None:
     assert response.status_code == 422
     assert response.json()["status"] == "missing_classification"
     assert _count(str(db_path), "execution_outcomes") == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 23 estimator wiring through the operator entry point
+# ---------------------------------------------------------------------------
+
+
+def _latest_optimizer_decision(db_path: str) -> dict:
+    conn = connect(db_path)
+    try:
+        init_db(conn)
+        decisions = get_optimizer_decisions_for_event(conn, "evt_ops")
+        assert decisions, "the recovery path must persist an economic decision"
+        return decisions[-1]
+    finally:
+        conn.close()
+
+
+def test_recovery_execute_records_baseline_without_calibration(
+    monkeypatch, tmp_path
+) -> None:
+    """No snapshot yet: the operator path stays on the frozen baseline.
+
+    The persisted decision must be honest about ranking on the baseline, never
+    fabricated as calibrated just because the production estimator is wired in.
+    """
+    db_path = _seed(monkeypatch, tmp_path, candidates=["retry_delayed", "payment_link"])
+    response = client.post("/recovery/evt_ops/execute")
+    assert response.status_code == 200
+    assert response.json()["status"] == "execution_success"
+
+    stage = _latest_optimizer_decision(db_path)
+    assert stage["estimator_mode"] == "BASELINE"
+    assert stage["estimator_version"] is None
+    assert stage["estimator_reason"] == "no_calibration_evidence"
+
+
+def test_recovery_execute_uses_the_active_calibration_snapshot(
+    monkeypatch, tmp_path
+) -> None:
+    """The operator execute path consumes the production adaptive estimator.
+
+    Regression: the endpoint previously called ``execute_event`` without the
+    estimator, so even with an active snapshot it silently ranked with the
+    frozen baseline and recorded no_calibration_evidence. With the wiring in
+    place it ranks with the gated posterior and records CALIBRATED.
+    """
+    provider = StubPaymentLinkClient(
+        result=PaymentLinkResult(id="plink_cal", short_url="https://rzp.io/l/cal")
+    )
+    db_path = _seed(
+        monkeypatch, tmp_path, candidates=["payment_link"], razorpay_client=provider
+    )
+    version = _activate_calibration(db_path, intervention=PAYMENT_LINK)
+    assert version >= 1
+
+    response = client.post("/recovery/evt_ops/execute")
+    assert response.status_code == 200
+    assert response.json()["status"] == "execution_success"
+    assert response.json()["execution"]["execution_mode"] == "REAL_RAZORPAY"
+
+    stage = _latest_optimizer_decision(db_path)
+    assert stage["estimator_mode"] == "CALIBRATED"
+    assert stage["estimator_version"] == version
+    assert stage["estimator_reason"] == "active_calibration"
