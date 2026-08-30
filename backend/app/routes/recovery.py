@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, status
 from fastapi.responses import JSONResponse
 
+from .. import calibration_service
 from .. import db
 from ..economics import EconomicsError
 from ..execution_service import (
@@ -185,7 +186,19 @@ def execute_from_recovery_queue(
             )
 
     try:
-        result = execute_event(conn, event_id, now, config, razorpay_client)
+        # Phase 23 (additive): when an active calibration snapshot exists, the
+        # operator path ranks with calibrated posteriors, exactly as the Phase 7
+        # execute endpoint does; otherwise it keeps the frozen baseline. A read
+        # failure degrades to the baseline rather than guessing a probability,
+        # never altering authorization or execution.
+        estimator = None
+        try:
+            estimator = calibration_service.build_production_estimator(conn)
+        except Exception:
+            estimator = None
+        result = execute_event(
+            conn, event_id, now, config, razorpay_client, estimator=estimator
+        )
     except (EconomicsError, OptimizerError, OptimizerAuditError) as exc:
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
