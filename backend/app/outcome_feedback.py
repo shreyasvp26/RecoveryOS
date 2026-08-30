@@ -121,10 +121,16 @@ INELIGIBILITY_REASONS: tuple[str, ...] = (
 REAL_EXECUTION_MODE = "REAL_RAZORPAY"
 EXECUTION_SUCCESS = "SUCCESS"
 
+# The projection is driven by the EXECUTION table, so its population is every
+# execution RecoveryOS ever recorded rather than the events that happen to be
+# most recent. The limit is a safety bound on one request's working set, not a
+# reporting window: whenever it actually bites, the payload says so explicitly
+# instead of presenting a prefix as though it were the whole history.
+DEFAULT_OBSERVATION_LIMIT = 5_000
+
 # Sorts an unparseable timestamp last without discarding the record.
 _UNORDERABLE_INSTANT = datetime.max.replace(tzinfo=timezone.utc)
 
-DEFAULT_SCAN_LIMIT = 500
 
 
 @dataclass(frozen=True)
@@ -524,43 +530,90 @@ def build_observations_for_event(
     ]
 
 
-def build_observations(
-    conn, *, scan_limit: int = DEFAULT_SCAN_LIMIT
-) -> list[FeedbackObservation]:
-    """Assemble every feedback observation from persisted state.
+@dataclass(frozen=True)
+class ObservationPopulation:
+    """The observations, plus an honest statement of what they cover.
 
-    Reads only. The scan is bounded by the same convention the Recovery
-    Operations projection uses, so this stays a bounded read rather than an
-    unbounded query engine.
+    ``complete`` is the property that matters: it is True only when every
+    execution RecoveryOS has ever recorded was projected. When it is False the
+    figures describe a deterministic prefix of history and must not be
+    presented as overall performance.
     """
-    events = db.list_events_for_recovery_queue(conn, scan_limit=scan_limit)
-    event_ids = [event["event_id"] for event in events]
-    executions = db.get_execution_outcomes_for_events(conn, event_ids)
+
+    observations: tuple[FeedbackObservation, ...]
+    total_executions: int
+    projected_executions: int
+    limit: int
+
+    @property
+    def complete(self) -> bool:
+        return self.projected_executions >= self.total_executions
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_executions": self.total_executions,
+            "projected_executions": self.projected_executions,
+            "limit": self.limit,
+            "complete": self.complete,
+        }
+
+
+def build_observation_population(
+    conn, *, limit: int = DEFAULT_OBSERVATION_LIMIT
+) -> ObservationPopulation:
+    """Project persisted executions into observations, stating the coverage.
+
+    Driven by the EXECUTION table rather than by a window of recent events, so
+    an old execution whose event has since fallen outside any recency window is
+    still measured. Reads only; writes nothing.
+    """
+    total_executions = db.count_execution_outcomes(conn)
+    execution_rows = db.list_execution_outcomes(conn, limit=limit)
+    event_ids = sorted({str(row["event_id"]) for row in execution_rows})
+    events = db.get_payment_events_for_events(conn, event_ids)
     optimizer_decisions = db.get_optimizer_decisions_for_events(conn, event_ids)
     link_ids = sorted(
         {
             row["payment_link_id"]
-            for rows in executions.values()
-            for row in rows
+            for row in execution_rows
             if row.get("payment_link_id")
         }
     )
     recoveries = db.get_webhook_recovery_outcomes_for_payment_links(conn, link_ids)
 
+    by_event: dict[str, list[Mapping[str, Any]]] = {}
+    for row in execution_rows:
+        by_event.setdefault(str(row["event_id"]), []).append(row)
+
     observations: list[FeedbackObservation] = []
-    for event in sorted(events, key=lambda row: str(row["event_id"])):
-        event_executions = executions.get(event["event_id"], [])
-        if not event_executions:
+    for event_id in event_ids:
+        event = events.get(event_id)
+        if event is None:
+            # An execution whose event is not persisted cannot be described
+            # (no amount, no segment). Skipping it is honest; inventing an
+            # event for it would not be.
             continue
         observations.extend(
             build_observations_for_event(
                 event,
-                event_executions,
-                optimizer_decisions.get(event["event_id"], []),
+                by_event[event_id],
+                optimizer_decisions.get(event_id, []),
                 recoveries,
             )
         )
-    return observations
+    return ObservationPopulation(
+        observations=tuple(observations),
+        total_executions=total_executions,
+        projected_executions=len(execution_rows),
+        limit=limit,
+    )
+
+
+def build_observations(
+    conn, *, limit: int = DEFAULT_OBSERVATION_LIMIT
+) -> list[FeedbackObservation]:
+    """Assemble every feedback observation from persisted state."""
+    return list(build_observation_population(conn, limit=limit).observations)
 
 
 def calibration_observations(

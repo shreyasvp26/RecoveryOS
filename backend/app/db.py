@@ -1066,6 +1066,48 @@ def get_execution_outcomes_for_events(
     return out
 
 
+def count_execution_outcomes(conn: sqlite3.Connection) -> int:
+    """Count every persisted execution outcome.
+
+    Phase 22 reads this to state its population honestly: comparing it with the
+    number of rows actually projected is how the intelligence layer knows
+    whether it is describing all recorded executions or only a bounded prefix.
+    """
+    row = conn.execute("SELECT COUNT(*) AS c FROM execution_outcomes").fetchone()
+    return int(row["c"])
+
+
+def list_execution_outcomes(
+    conn: sqlite3.Connection, *, limit: int
+) -> list[dict[str, Any]]:
+    """Return persisted execution outcomes, oldest first, up to ``limit``.
+
+    Ordered by (reported_at, event_id, intervention) so the prefix taken under
+    a limit is deterministic and the same rows are returned every time.
+    """
+    rows = conn.execute(
+        """
+        SELECT * FROM execution_outcomes
+        ORDER BY reported_at ASC, event_id ASC, intervention ASC
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_payment_events_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return event_id -> the full persisted PaymentEvent contract."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn, "SELECT * FROM payment_events WHERE event_id IN ({ids})", event_ids
+    )
+    return {row["event_id"]: _row_to_event(row).to_dict() for row in rows}
+
+
 def get_webhook_recovery_outcomes_for_payment_links(
     conn: sqlite3.Connection, payment_link_ids: list[str]
 ) -> dict[str, dict[str, Any]]:

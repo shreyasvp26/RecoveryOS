@@ -193,6 +193,21 @@ def test_pending_links_are_reported_as_pending_not_as_failures(
     assert row["observed_recovery_rate_bps"] is None
 
 
+def test_population_coverage_is_stated_in_the_payload(monkeypatch, tmp_path):
+    conn = _db(monkeypatch, tmp_path, "population.db")
+    try:
+        for index in range(4):
+            _seed_recovered_event(conn, index)
+    finally:
+        conn.close()
+
+    population = client.get("/recovery-intelligence").json()["evidence"]["population"]
+    assert population["total_executions"] == 4
+    assert population["projected_executions"] == 4
+    assert population["complete"] is True
+    assert population["limit"] >= 4
+
+
 def test_observations_can_be_included_for_traceability(monkeypatch, tmp_path):
     conn = _db(monkeypatch, tmp_path, "trace.db")
     try:

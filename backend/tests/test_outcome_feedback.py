@@ -37,6 +37,7 @@ from app.outcome_feedback import (
     REASON_MISSING_PREDICTION,
     REASON_SIMULATED_EXECUTION,
     build_observation,
+    build_observation_population,
     build_observations,
     build_observations_for_event,
     calibration_observations,
@@ -642,6 +643,100 @@ def test_verified_recovery_value_evidence_survives_without_calibration(db_conn):
     assert value["realized_recovered_amount_paise"] == 300_000
     assert value["expected_recovered_value_paise"] == 180_000
     assert payload["interventions"][0]["average_recovered_amount_paise"] == 100_000
+
+
+# ---------------------------------------------------------------------------
+# Population semantics: the projection must never present a bounded prefix as
+# though it were the whole history.
+# ---------------------------------------------------------------------------
+
+
+def test_population_reports_completeness_when_everything_is_projected(db_conn):
+    for index in range(3):
+        _seed_verified_recovery(db_conn, index)
+    population = build_observation_population(db_conn)
+    assert population.total_executions == 3
+    assert population.projected_executions == 3
+    assert population.complete is True
+    assert population.to_dict()["complete"] is True
+
+
+def test_population_declares_itself_incomplete_at_the_limit(db_conn):
+    for index in range(5):
+        _seed_verified_recovery(db_conn, index)
+    population = build_observation_population(db_conn, limit=2)
+    assert population.total_executions == 5
+    assert population.projected_executions == 2
+    assert population.complete is False
+    assert len(population.observations) == 2
+
+
+def test_bounded_population_takes_a_deterministic_prefix(db_conn):
+    for index in range(5):
+        _seed_verified_recovery(db_conn, index)
+    first = build_observation_population(db_conn, limit=3)
+    second = build_observation_population(db_conn, limit=3)
+    assert [o.to_dict() for o in first.observations] == [
+        o.to_dict() for o in second.observations
+    ]
+
+
+def test_old_executions_are_measured_regardless_of_event_recency(db_conn):
+    """An execution outside any recent-events window is still projected."""
+    insert_payment_event(
+        db_conn,
+        PaymentEvent.from_dict(
+            _event("evt_ancient", timestamp=(NOW - timedelta(days=900)).isoformat())
+        ),
+    )
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_ancient",
+            intervention="payment_link",
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/i/old",
+            detail=None,
+            reported_at=(NOW - timedelta(days=900)).isoformat(),
+            payment_link_id="plink_ancient",
+        ),
+    )
+    insert_webhook_recovery_outcome(
+        db_conn,
+        delivery_id="delivery_ancient",
+        payment_link_id="plink_ancient",
+        referenced_event_id="evt_ancient",
+        amount_paid_paise=100_000,
+        currency="INR",
+        payment_id="pay_ancient",
+        recovered_at=(NOW - timedelta(days=899)).isoformat(),
+    )
+    for index in range(3):
+        _seed_verified_recovery(db_conn, index)
+
+    observations = build_observations(db_conn)
+    assert "evt_ancient" in {observation.event_id for observation in observations}
+    assert len(verified_recoveries(observations)) == 4
+
+
+def test_an_execution_without_a_persisted_event_is_skipped_not_invented(db_conn):
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_orphan",
+            intervention="payment_link",
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/i/z",
+            detail=None,
+            reported_at=NOW.isoformat(),
+            payment_link_id="plink_orphan",
+        ),
+    )
+    population = build_observation_population(db_conn)
+    assert population.total_executions == 1
+    assert population.observations == ()
 
 
 @pytest.mark.parametrize("mode", ["SIMULATED", "REAL_RAZORPAY"])

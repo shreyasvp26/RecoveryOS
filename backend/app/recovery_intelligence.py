@@ -50,9 +50,9 @@ from typing import Any, Mapping, Sequence
 
 from .economics import PROBABILITY_SCALE
 from .outcome_feedback import (
-    DEFAULT_SCAN_LIMIT,
+    DEFAULT_OBSERVATION_LIMIT,
     FeedbackObservation,
-    build_observations,
+    build_observation_population,
     calibration_observations,
     ineligibility_counts,
     outcome_counts,
@@ -310,14 +310,18 @@ def expected_vs_realized(
 
 
 def build_recovery_intelligence(
-    conn, *, scan_limit: int = DEFAULT_SCAN_LIMIT
+    conn, *, limit: int = DEFAULT_OBSERVATION_LIMIT
 ) -> dict[str, Any]:
     """Assemble the full Recovery Intelligence payload from persisted state.
 
     Read-only end to end: it projects observations, aggregates them, and
     returns them. It writes nothing and decides nothing.
+
+    The population it covers is reported alongside the figures, so a bounded
+    read can never be mistaken for a complete history.
     """
-    observations = build_observations(conn, scan_limit=scan_limit)
+    population = build_observation_population(conn, limit=limit)
+    observations = population.observations
     return {
         "calibration": calibration(observations),
         "interventions": intervention_performance(observations),
@@ -326,7 +330,9 @@ def build_recovery_intelligence(
         "evidence": {
             "observations": len(observations),
             "ineligible_reasons": ineligibility_counts(observations),
-            "scan_limit": scan_limit,
+            # Whether these figures describe every recorded execution or a
+            # deterministic prefix of them.
+            "population": population.to_dict(),
         },
         "methodology": {
             "prediction_source": "optimizer_decisions",
