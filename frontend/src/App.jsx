@@ -4,6 +4,7 @@ import CommandCenter from './components/CommandCenter.jsx'
 import EventTrace from './components/EventTrace.jsx'
 import PolicyBlocks from './components/PolicyBlocks.jsx'
 import PolicyLab from './components/PolicyLab.jsx'
+import RecoveryIntelligence from './components/RecoveryIntelligence.jsx'
 import RecoveryOps from './components/RecoveryOps.jsx'
 import RevenueHealth from './components/RevenueHealth.jsx'
 
@@ -11,6 +12,12 @@ const NAV = [
   { key: 'command', label: 'Command Center', icon: '◧', Component: CommandCenter },
   { key: 'health', label: 'Revenue Health', icon: '◉', Component: RevenueHealth },
   { key: 'ops', label: 'Recovery Operations', icon: '▶', Component: RecoveryOps },
+  {
+    key: 'intelligence',
+    label: 'Recovery Intelligence',
+    icon: '◎',
+    Component: RecoveryIntelligence,
+  },
   { key: 'trace', label: 'Event Decision Trace', icon: '◈', Component: EventTrace },
   { key: 'blocks', label: 'Policy & Blocks', icon: '⛔', Component: PolicyBlocks },
   { key: 'lab', label: 'Policy Lab', icon: '⚗', Component: PolicyLab },

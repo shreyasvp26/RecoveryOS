@@ -111,3 +111,9 @@ export const recoveryQueue = (params) => get('/recovery/queue', params)
  */
 export const executeRecovery = (eventId) =>
   post(`/recovery/${encodeURIComponent(eventId)}/execute`, {})
+/**
+ * Recovery Intelligence evidence. Read-only by design: the intelligence layer
+ * measures outcomes and has no endpoint that could execute, authorize, or
+ * change a decision.
+ */
+export const recoveryIntelligence = (params) => get('/recovery-intelligence', params)
