@@ -8,7 +8,7 @@ An **AI Revenue Recovery Control Plane** for the Razorpay AI Buildathon 2026 (Re
 
 The LLM never has direct authority over a money-moving action. AI output is advisory; a deterministic policy gate is authoritative; an executor performs the action; a benchmark proves value against baselines.
 
-> **Important:** This repository is at **Phase 14 — V1 verification and submission readiness**. RecoveryOS performs **no production revenue recovery**. It can select one intervention deterministically and run it either as an explicit simulation or as a real **Razorpay Test Mode** Payment Link; the closed loop has been demonstrated end to end against real Razorpay Test Mode infrastructure (see [Live Razorpay verification (Trace C)](#live-razorpay-verification-trace-c)). **Test Mode is not production payment processing**, and no claim of production readiness is made. The benchmark proves value only by comparison — over ONE shared 500-event **synthetic** set and ONE shared hidden outcome model, it measures **No Action**, **Naive Retry**, and the real **RecoveryOS** pipeline (classifier → policy → selector → executor) on simulated, labeled recovery amounts; read the [benchmark honesty disclosure](#benchmark-honesty-and-the-no-signal-limitation) before quoting any figure. A **read-only operator dashboard** (Recovery Command Center, Event Decision Trace, Policy & Blocked Actions) reports persisted state with honest labeling of simulated figures, and the verified, outcome-only `payment_link.paid` webhook marks each real link `waiting` → `recovered`. The V2 optimizer remains future work.
+> **Important:** This repository is at **Phase 24 — submission readiness**. RecoveryOS performs **no production revenue recovery**. The complete loop is implemented and verified: event ingestion → advisory AI classification → the deterministic six-rule policy gate → the **V2 economic optimizer** (the production selection strategy since Phase 16) → bounded execution (explicit `SIMULATED`, or a real **Razorpay Test Mode** Payment Link) → the verified, OUTCOME-only `payment_link.paid` webhook channel → recovery-intelligence feedback and a versioned, evidence-calibrated adaptive estimator (Phase 23). **Test Mode is not production payment processing**, and no production claim is made. Benchmark value is measured only by comparison, over **synthetic** hidden worlds and **simulated** recovery amounts, under **two explicitly separate methodologies** — the frozen Phase 9 benchmark (`phase9_v1_compat`, whose uniform hidden model carries **no signal** and cannot reward targeting) and the current Phase 17 signal-bearing benchmark (`phase17_signal_bearing_v1`, on which V2 demonstrably beats V1 and the naive baselines in true economic value). Read `docs/BENCHMARK.md` before quoting any figure. Everything is gated by GitHub Actions CI (backend test suite + frontend lint/build).
 
 ## Locked Architecture
 
@@ -33,20 +33,21 @@ See `docs/ARCHITECTURE.md` for the detailed design, including the distinction be
 
 ```
 recoveryos/
+├── .github/workflows/   GitHub Actions CI (backend pytest + frontend lint/build)
 ├── backend/       FastAPI application + pytest test suite
-│   ├── app/       Application package (models, persistence, generator, ingestion, classifier, policy, selector, executor, razorpay client)
+│   ├── app/       Application package (models, persistence, generator, ingestion, classifier, policy, selector, optimizer, executor, razorpay client, webhook, calibration, adaptive estimation)
 │   ├── tests/     pytest tests
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, RECOVERY_INTELLIGENCE.md, RECOVERY_OPERATIONS.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
+├── docs/          ARCHITECTURE.md, ADAPTIVE_ESTIMATION.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, RECOVERY_INTELLIGENCE.md, RECOVERY_OPERATIONS.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
 ├── README.md
 └── .gitignore
 ```
 
 ## Local Setup
 
-Prerequisites: Python 3.11, Node.js, npm.
+Prerequisites: Python 3.11+ (CI runs 3.13), Node.js, npm.
 
 ### Backend
 
@@ -184,19 +185,16 @@ During Phase 14, two semantically similar fresh events were classified by the re
 
 The accurate overall claim is therefore: *the intervention-selection policy is deterministic once the classifier output is available, while the external LLM classification itself can vary between equivalent events.*
 
-## Benchmark honesty and the "no-signal" limitation
+## Benchmark honesty and the two methodologies
 
 Full methodology lives in `docs/BENCHMARK.md`. The essentials:
 
-- **The dataset is seeded and synthetic.** Events come from `app/generator.py` under an explicit seed (canonically seed 42, 500 events). **No benchmark figure is derived from real customer payment data**, from real Razorpay transactions, or from the live Trace C verification.
-- **All recovery amounts are simulated** and labeled `SIMULATED` (`evaluation_mode`).
-- **Disclosed limitation — the hidden outcome model carries no signal.** Recovery probabilities are drawn as independent uniform values (`rng.random()`) per (event, intervention) pair. They are **not correlated with any event feature** — not the failure reason, payment method, amount, or risk flag — and not correlated across interventions. Every intervention on every event therefore has an expected recovery probability of ≈0.5, and no intervention is genuinely better suited to any event.
+RecoveryOS ships **two** benchmark methodologies over **different hidden worlds**; their numbers are **not comparable** and must never be mixed in one claim.
 
-  Consequently **the benchmark cannot reward intelligent targeting**, and the canonical seed-42 result reflects exactly that: No Action recovers 242/500 events, Naive Retry 246/500, and RecoveryOS 241/500 — all statistically flat at the ~0.5 the model dictates. Naive Retry's small edge comes from attempting more interventions, not from choosing better ones, and RecoveryOS is slightly behind because policy correctly blocks fraud and terminal events.
+- **`phase9_v1_compat` (frozen, `app/benchmark.py`)** — the original three-strategy benchmark over a **synthetic, seeded** set (canonically seed 42, 500 events) and `app/outcome_model.py`. **This methodology's hidden outcome model carries no signal:** recovery probabilities are independent uniform draws, uncorrelated with every event feature, so no targeting strategy can be rewarded. Its canonical seed-42 result reflects exactly that — No Action 242/500, Naive Retry 246/500, RecoveryOS 241/500 — flat at the ~0.5 the model dictates. What it does establish is **harness integrity**: fairness over a shared event set and shared hidden model, order-invariant determinism, ground-truth isolation from the decision path, and honest accounting. It predates the V2 optimizer and remains reproducible via `python -m app.benchmark --seed 42 --count 500`.
+- **`phase17_signal_bearing_v1` (current, `app/benchmark_phase17.py`)** — the V2 validation experiment over the same synthetic dataset shape and a **feature-driven hidden world** (`app/hidden_world.py`) in which the correct action genuinely differs by event class, so this benchmark does test **targeting**. Canonical seed-42 verdict: **V2 WON** — total true EV **+₹100,006.72** over V1 (materiality threshold ₹7,319.32), realized simulated revenue **+₹76,855**, incremental Oracle value capture 93.1% vs 79.4%, and a 0% fraud-intervention rate with 0 unauthorized executions on every robustness seed. V2's gain comes from re-ranking 129 of the 180 intervened events by expected value, not from intervening more often.
 
-  What the benchmark **does** establish is harness integrity: fairness across a shared event set and shared model, order-invariant determinism, ground-truth isolation from the decision path, and honest accounting. What it **cannot** establish is that RecoveryOS's targeting recovers more revenue than a blanket retry. A signal-bearing outcome model would be required for that, and inventing one would mean fabricating the very correlations the system claims to exploit.
-
-The existing methodology, calculations, and results are preserved as-is. The unflattering seed-42 result is reported rather than suppressed, and nothing was tuned to improve presentation.
+**No benchmark figure derives from real customer payment data, from real Razorpay transactions, or from the live Trace C verification** — the dataset is seeded and synthetic, and all recovery amounts are simulated (`evaluation_mode`) and labeled SIMULATED. The existing methodology, calculations, and results are preserved as-is; the unflattering Phase 9 result is reported rather than suppressed, Phase 17's robustness seeds were declared before any result was observed, and V2 is honestly reported as still ₹50,809.52 short of the policy-bounded Oracle.
 
 ## Closed-loop webhook mechanism
 
@@ -220,6 +218,33 @@ uvicorn app.main:app                              # start the API
 ## Phase history
 
 The sections below are a **historical record** of how each capability was built, retained for provenance and audit. They describe the phase in which a capability landed, not the current status of the repository — for current status see the top of this file.
+
+### Phase 24 — Submission readiness: end-to-end golden-path and safety scenarios
+
+```bash
+cd backend
+python -m pytest tests/test_phase24_end_to_end.py   # full-API golden path + safety scenarios
+python -m pytest                                   # full suite (1623 tests incl. all phases)
+```
+
+- **A single end-to-end mission through the public API** — ingest → classify → V2 select → real Razorpay Test Mode execution → `waiting` trace → verified `payment_link.paid` webhook (real HMAC, real body) → `recovered` trace → recovery-intelligence observation. If any link in the loop breaks, the test fails; it is the repository's one test that drives the whole product, not a component.
+- **API-level safety scenarios, not unit mocks** — customer retry-limit denial and daily spend-cap blockage are asserted through `/recovery/{id}/execute` and `/recovery`, the exact endpoints an operator uses; the calibration rank-change is proven with a posterior that flips the V2 ranking (`payment_link` replaces `retry_delayed`) and history stays immutable across a second recalibration; and `threshold_not_met` is observed on a decision when the evidence gate blocks calibration. All of these were previously proven only inside the engine, not at the API the operation runs on.
+- **Close the audit gap** — the Phase-23 audit matrix showed a single missing golden-path integration test (mocked pieces previously covered it) and API-level gaps in the safety scenarios the manual demos had only reached by hand. These tests close exactly those cells, nothing more; no frozen contract changed.
+- **Everything is CI-gated** — GitHub Actions runs the backend suite (Python 3.13) and the frontend lint + production build (Node 20) on every push and PR. See `.github/workflows/ci.yml`.
+
+### Phase 23 — Adaptive recovery estimation
+
+```bash
+cd backend
+python -m pytest                                   # full suite (Phase 23 tests included)
+curl -s localhost:8000/estimator-evidence | head   # current calibration state, versioned
+curl -s -X POST localhost:8000/estimator-evidence/recalibrate   # explicit, operator-only build
+```
+
+- **A calibration layer, not a new authority** — `app/calibration.py` owns the terminal contract (provider status → calibration outcome), the integer-exact Beta-binomial posterior against a baseline-derived prior, and the per-intervention evidence gate (`observed_total >= 10, recovered >= 1, not_recovered >= 1`). It executes nothing, authorizes nothing, and isolates itself from the executor, policy engine, optimizer, webhook boundary, classifier, and benchmark.
+- **Composes additively around the frozen chain** — `CalibratedRecoveryProbabilityEstimator` (`app/adaptive_estimation.py`) wraps the frozen baseline with an immutable `CalibrationSnapshot`; gated interventions use the calibrated posterior, everything else keeps the baseline. `select_for_strategy` and `execute_event` default to the frozen baseline, so the V1/V2 benchmark and Policy Replay arms reproduce their recorded results exactly; only the production execute endpoint constructs the calibrated wrapper when an active gated snapshot exists.
+- **Evidence is real operational world only** — verified `payment_link.paid` webhook recoveries (positive) and provider-confirmed `expired` links (negative, via the read-only `get_payment_link` boundary) are the only samples. SIMULATED, benchmark, Policy Lab, replay and hidden ground truth are structurally ineligible.
+- **Snapshots are immutable and versioned** — version is the PRIMARY KEY, duplicates are rejected, and there is no update/delete path, so past estimates and the decisions they preceded stay reconstructable and are never rewritten. An operator triggers a build explicitly; nothing recalibrates on its own. See `docs/ADAPTIVE_ESTIMATION.md`.
 
 ### Phase 22 — Recovery Intelligence: outcome feedback
 
