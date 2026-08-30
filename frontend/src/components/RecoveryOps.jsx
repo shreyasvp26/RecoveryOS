@@ -318,6 +318,13 @@ export default function RecoveryOps({ onNavigate }) {
         <button className="btn btn--ghost" onClick={reload}>
           Refresh
         </button>
+        {onNavigate && (
+          // Complements this screen rather than duplicating it: the evidence
+          // view measures predictions against verified outcomes across events.
+          <button className="btn btn--ghost" onClick={() => onNavigate('intelligence')}>
+            View recovery evidence
+          </button>
+        )}
       </div>
 
       <div className="meta-line">
