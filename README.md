@@ -39,7 +39,7 @@ recoveryos/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/      React + Vite application
-├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, RECOVERY_OPERATIONS.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
+├── docs/          ARCHITECTURE.md, BENCHMARK.md, DESIGN.md, ECONOMIC_MODEL.md, POLICY_REPLAY.md, RECOVERY_INTELLIGENCE.md, RECOVERY_OPERATIONS.md, REVENUE_HEALTH.md, PITCH_NOTES.md, V1_BASELINE.md
 ├── README.md
 └── .gitignore
 ```
@@ -220,6 +220,20 @@ uvicorn app.main:app                              # start the API
 ## Phase history
 
 The sections below are a **historical record** of how each capability was built, retained for provenance and audit. They describe the phase in which a capability landed, not the current status of the repository — for current status see the top of this file.
+
+### Phase 22 — Recovery Intelligence: outcome feedback
+
+```bash
+cd backend
+python -m pytest                                          # full suite (Phase 22 tests included)
+curl -s localhost:8000/recovery-intelligence | head       # prediction vs verified outcome
+```
+
+- **Prediction measured against reality** — the probability RecoveryOS actually used is **read** from the persisted `optimizer_decisions` (never recomputed with a newer estimator) and compared with the recovery observed on that action. `calibration_gap = observed − predicted`, in percentage points, sign preserved: a negative gap means observed recovery came in below prediction.
+- **A projection, not a new store** — `app/outcome_feedback.py` derives observations from `optimizer_decisions`, `execution_outcomes` and `webhook_recovery_outcomes`. No feedback table, no second lifecycle, no schema change. The decision→execution join is by intervention and decision time; the provider join is by `payment_link_id` only — never amount, customer, email or timestamp proximity.
+- **Uncertainty stays uncertain** — a waiting Payment Link is `PENDING`, an unreadable provider result and a failed execution are `UNKNOWN`, and `NOT_RECOVERED` is defined but never inferred, because `payment_link.paid` is the only provider evidence RecoveryOS verifies. Below **10 eligible observations** no observed rate, gap or conclusion is reported at all; the UI reads "Insufficient observations".
+- **Simulated and benchmark worlds cannot leak in** — a `SIMULATED` execution produces no operational observation, and hidden benchmark truth is structurally excluded: `tests/test_feedback_integrity.py` parses the Phase 22 source and fails if it imports the hidden outcome model, the benchmark, the executor, the policy engine, the estimator or the optimizer.
+- **Measurement without authority** — the API is `GET`-only, writes nothing, and there is no feedback → estimator, → optimizer, → policy or → execution path. Observed outcomes produce evidence for a human, not automatic changes to future decisions. See `docs/RECOVERY_INTELLIGENCE.md` for the methodology, the outcome semantics and the limitations.
 
 ### Phase 21 — Recovery Operations Center
 
