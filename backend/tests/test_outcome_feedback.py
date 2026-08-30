@@ -1,0 +1,452 @@
+"""Phase 22 outcome feedback domain tests.
+
+These tests pin the two properties the whole intelligence layer rests on:
+execution is never mistaken for recovery, and uncertainty is never converted
+into failure.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.db import (
+    get_execution_outcomes_for_events,
+    get_optimizer_decisions_for_events,
+    get_webhook_recovery_outcomes_for_payment_links,
+    insert_execution_outcome,
+    insert_optimizer_decision,
+    insert_payment_event,
+    insert_webhook_recovery_outcome,
+)
+from app.economics import CandidateEvaluation
+from app.executor import ExecutionOutcome
+from app.models import PaymentEvent
+from app.optimizer_audit import OptimizerDecisionRecord
+from app.outcome_feedback import (
+    OUTCOME_PENDING,
+    OUTCOME_RECOVERED,
+    OUTCOME_UNKNOWN,
+    REASON_AMBIGUOUS_PROVIDER_RESULT,
+    REASON_AWAITING_OUTCOME,
+    REASON_ELIGIBLE,
+    REASON_EXECUTION_FAILED,
+    REASON_MISSING_PAYMENT_LINK_ID,
+    REASON_MISSING_PREDICTION,
+    REASON_SIMULATED_EXECUTION,
+    build_observation,
+    build_observations,
+    build_observations_for_event,
+    eligible_observations,
+    find_prediction,
+    ineligibility_counts,
+)
+from app.razorpay_client import PROVIDER_RESULT_UNKNOWN
+
+NOW = datetime(2026, 8, 30, 9, 0, tzinfo=timezone.utc)
+
+
+def _event(event_id: str = "evt_1", **overrides) -> dict:
+    data = {
+        "event_id": event_id,
+        "order_id": f"order_{event_id}",
+        "payment_id": f"pay_{event_id}",
+        "customer_id": f"cust_{event_id}",
+        "amount_paise": 100_000,
+        "currency": "INR",
+        "payment_method": "upi",
+        "failure_reason": "bank_timeout",
+        "bank": "HDFC",
+        "risk_flag": "normal",
+        "customer_history": {
+            "prior_successful_payments": 2,
+            "prior_failed_payments": 1,
+            "has_active_subscription": True,
+        },
+        "timestamp": NOW.isoformat(),
+    }
+    data.update(overrides)
+    return data
+
+
+def _execution(
+    *,
+    event_id: str = "evt_1",
+    intervention: str = "payment_link",
+    mode: str = "REAL_RAZORPAY",
+    status: str = "SUCCESS",
+    payment_link_id: str | None = "plink_1",
+    detail: str | None = None,
+    reported_at: datetime = NOW,
+) -> dict:
+    return {
+        "event_id": event_id,
+        "intervention": intervention,
+        "execution_mode": mode,
+        "status": status,
+        "external_reference": "https://rzp.io/i/abc",
+        "detail": detail,
+        "payment_link_id": payment_link_id,
+        "reported_at": reported_at.isoformat(),
+    }
+
+
+def _decision(
+    *,
+    event_id: str = "evt_1",
+    intervention: str = "payment_link",
+    probability_bps: int = 6_000,
+    decided_at: datetime | None = None,
+    amount_paise: int = 100_000,
+) -> dict:
+    decided = decided_at or (NOW - timedelta(minutes=1))
+    return {
+        "event_id": event_id,
+        "decided_at": decided.isoformat(),
+        "selected_intervention": intervention,
+        "selection_reason": "highest expected value",
+        "candidates_considered": [intervention],
+        "allowed_candidates": [intervention],
+        "evaluations": [
+            {
+                "intervention": intervention,
+                "estimated_probability_bps": probability_bps,
+                "amount_paise": amount_paise,
+                "expected_recovered_value_paise": amount_paise
+                * probability_bps
+                // 10_000,
+                "intervention_cost_paise": 100,
+                "friction_cost_paise": 100,
+                "expected_value_paise": amount_paise * probability_bps // 10_000 - 200,
+            }
+        ],
+    }
+
+
+def _recovery(
+    *,
+    payment_link_id: str = "plink_1",
+    delivery_id: str = "delivery_1",
+    amount_paid_paise: int | None = 100_000,
+) -> dict:
+    return {
+        "delivery_id": delivery_id,
+        "payment_link_id": payment_link_id,
+        "referenced_event_id": "evt_1",
+        "amount_paid_paise": amount_paid_paise,
+        "currency": "INR",
+        "payment_id": "pay_verified",
+        "recovered_at": (NOW + timedelta(minutes=30)).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Outcome mapping
+# ---------------------------------------------------------------------------
+
+
+def test_verified_payment_is_recovered_and_eligible():
+    observation = build_observation(
+        _event(), _execution(), [_decision()], {"plink_1": _recovery()}
+    )
+    assert observation.outcome == OUTCOME_RECOVERED
+    assert observation.eligible is True
+    assert observation.reason == REASON_ELIGIBLE
+    assert observation.recovered is True
+    assert observation.recovered_amount_paise == 100_000
+    assert observation.evidence_id == "delivery_1"
+    assert observation.predicted_probability_bps == 6_000
+
+
+def test_successful_real_execution_without_verified_payment_is_pending():
+    observation = build_observation(_event(), _execution(), [_decision()], {})
+    assert observation.outcome == OUTCOME_PENDING
+    assert observation.reason == REASON_AWAITING_OUTCOME
+    assert observation.eligible is False
+    assert observation.recovered is None
+    assert observation.recovered_amount_paise is None
+
+
+def test_failed_execution_is_never_recovered_and_is_not_a_payment_failure():
+    observation = build_observation(
+        _event(),
+        _execution(status="FAILED", payment_link_id=None, detail="gateway refused"),
+        [_decision()],
+        {"plink_1": _recovery()},
+    )
+    assert observation.outcome == OUTCOME_UNKNOWN
+    assert observation.reason == REASON_EXECUTION_FAILED
+    assert observation.eligible is False
+    assert observation.recovered is None
+
+
+def test_ambiguous_provider_result_is_unknown_and_ineligible():
+    observation = build_observation(
+        _event(),
+        _execution(
+            status="FAILED",
+            payment_link_id=None,
+            detail=f"{PROVIDER_RESULT_UNKNOWN}: connection reset",
+        ),
+        [_decision()],
+        {},
+    )
+    assert observation.outcome == OUTCOME_UNKNOWN
+    assert observation.reason == REASON_AMBIGUOUS_PROVIDER_RESULT
+    assert observation.eligible is False
+
+
+def test_simulated_execution_is_never_an_operational_observation():
+    observation = build_observation(
+        _event(),
+        _execution(mode="SIMULATED", intervention="retry_delayed", payment_link_id=None),
+        [_decision(intervention="retry_delayed")],
+        {},
+    )
+    assert observation.eligible is False
+    assert observation.reason == REASON_SIMULATED_EXECUTION
+    assert observation.recovered is None
+    assert observation.recovered_amount_paise is None
+
+
+def test_real_success_without_payment_link_id_is_unknown():
+    observation = build_observation(
+        _event(), _execution(payment_link_id=None), [_decision()], {}
+    )
+    assert observation.outcome == OUTCOME_UNKNOWN
+    assert observation.reason == REASON_MISSING_PAYMENT_LINK_ID
+
+
+def test_unmatched_recovery_evidence_fabricates_nothing():
+    # A verified recovery exists, but for a different Payment Link.
+    observation = build_observation(
+        _event(),
+        _execution(),
+        [_decision()],
+        {"plink_other": _recovery(payment_link_id="plink_other")},
+    )
+    assert observation.outcome == OUTCOME_PENDING
+    assert observation.recovered is None
+
+
+def test_missing_recovered_amount_is_recorded_as_missing_not_inferred():
+    observation = build_observation(
+        _event(),
+        _execution(),
+        [_decision()],
+        {"plink_1": _recovery(amount_paid_paise=None)},
+    )
+    assert observation.outcome == OUTCOME_RECOVERED
+    assert observation.eligible is True
+    assert observation.recovered_amount_paise is None
+    # The original event amount must never be substituted.
+    assert observation.amount_paise == 100_000
+    assert "never inferred" in observation.note
+
+
+def test_late_verified_outcome_is_included_deterministically():
+    late = _recovery()
+    late["recovered_at"] = (NOW + timedelta(days=9)).isoformat()
+    observation = build_observation(
+        _event(), _execution(), [_decision()], {"plink_1": late}
+    )
+    assert observation.outcome == OUTCOME_RECOVERED
+    assert observation.eligible is True
+    assert observation.observed_at == late["recovered_at"]
+
+
+def test_verified_recovery_without_a_persisted_prediction_is_ineligible():
+    observation = build_observation(
+        _event(), _execution(), [], {"plink_1": _recovery()}
+    )
+    assert observation.outcome == OUTCOME_RECOVERED
+    assert observation.eligible is False
+    assert observation.reason == REASON_MISSING_PREDICTION
+    assert observation.predicted_probability_bps is None
+
+
+# ---------------------------------------------------------------------------
+# Prediction / outcome join
+# ---------------------------------------------------------------------------
+
+
+def test_prediction_join_selects_the_decision_that_drove_the_execution():
+    older = _decision(probability_bps=4_000, decided_at=NOW - timedelta(hours=2))
+    newer = _decision(probability_bps=7_000, decided_at=NOW - timedelta(minutes=5))
+    prediction = find_prediction([older, newer], "payment_link", NOW.isoformat())
+    assert prediction is not None
+    assert prediction["decided_at"] == newer["decided_at"]
+
+
+def test_prediction_join_ignores_decisions_made_after_the_execution():
+    before = _decision(probability_bps=4_000, decided_at=NOW - timedelta(hours=1))
+    after = _decision(probability_bps=9_900, decided_at=NOW + timedelta(hours=1))
+    prediction = find_prediction([before, after], "payment_link", NOW.isoformat())
+    assert prediction is not None
+    assert prediction["decided_at"] == before["decided_at"]
+
+
+def test_prediction_join_never_crosses_interventions():
+    other = _decision(intervention="reminder", probability_bps=9_000)
+    assert find_prediction([other], "payment_link", NOW.isoformat()) is None
+
+
+def test_repeated_interventions_produce_one_observation_each():
+    first = _execution(
+        intervention="reminder",
+        mode="SIMULATED",
+        payment_link_id=None,
+        reported_at=NOW - timedelta(hours=1),
+    )
+    second = _execution(reported_at=NOW)
+    observations = build_observations_for_event(
+        _event(),
+        [second, first],
+        [
+            _decision(intervention="reminder", decided_at=NOW - timedelta(hours=2)),
+            _decision(),
+        ],
+        {"plink_1": _recovery()},
+    )
+    assert [o.intervention for o in observations] == ["reminder", "payment_link"]
+    assert [o.eligible for o in observations] == [False, True]
+
+
+def test_projection_is_deterministic_over_persisted_records(db_conn):
+    insert_payment_event(db_conn, PaymentEvent.from_dict(_event()))
+    insert_payment_event(db_conn, PaymentEvent.from_dict(_event("evt_2")))
+    insert_optimizer_decision(
+        db_conn,
+        OptimizerDecisionRecord(
+            event_id="evt_1",
+            decided_at=(NOW - timedelta(minutes=1)).isoformat(),
+            selected_intervention="payment_link",
+            selection_reason="highest expected value",
+            candidates_considered=("payment_link",),
+            allowed_candidates=("payment_link",),
+            evaluations=(
+                CandidateEvaluation(
+                    intervention="payment_link",
+                    estimated_probability_bps=6_000,
+                    amount_paise=100_000,
+                    expected_recovered_value_paise=60_000,
+                    intervention_cost_paise=100,
+                    friction_cost_paise=100,
+                    expected_value_paise=59_800,
+                ),
+            ),
+        ),
+    )
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_1",
+            intervention="payment_link",
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/i/abc",
+            detail=None,
+            reported_at=NOW.isoformat(),
+            payment_link_id="plink_1",
+        ),
+    )
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_2",
+            intervention="retry_delayed",
+            execution_mode="SIMULATED",
+            status="SUCCESS",
+            external_reference=None,
+            detail=None,
+            reported_at=NOW.isoformat(),
+            payment_link_id=None,
+        ),
+    )
+    insert_webhook_recovery_outcome(
+        db_conn,
+        delivery_id="delivery_1",
+        payment_link_id="plink_1",
+        referenced_event_id="evt_1",
+        amount_paid_paise=100_000,
+        currency="INR",
+        payment_id="pay_verified",
+        recovered_at=(NOW + timedelta(minutes=30)).isoformat(),
+    )
+
+    first = build_observations(db_conn)
+    second = build_observations(db_conn)
+    assert [o.to_dict() for o in first] == [o.to_dict() for o in second]
+    assert [o.event_id for o in first] == ["evt_1", "evt_2"]
+    assert len(eligible_observations(first)) == 1
+    assert ineligibility_counts(first)[REASON_SIMULATED_EXECUTION] == 1
+
+
+def test_duplicate_webhook_delivery_yields_one_logical_observation(db_conn):
+    insert_webhook_recovery_outcome(
+        db_conn,
+        delivery_id="delivery_1",
+        payment_link_id="plink_1",
+        referenced_event_id="evt_1",
+        amount_paid_paise=100_000,
+        currency="INR",
+        payment_id="pay_verified",
+        recovered_at=NOW.isoformat(),
+    )
+    inserted_again = insert_webhook_recovery_outcome(
+        db_conn,
+        delivery_id="delivery_1",
+        payment_link_id="plink_1",
+        referenced_event_id="evt_1",
+        amount_paid_paise=100_000,
+        currency="INR",
+        payment_id="pay_verified",
+        recovered_at=NOW.isoformat(),
+    )
+    assert inserted_again is False
+    recoveries = get_webhook_recovery_outcomes_for_payment_links(db_conn, ["plink_1"])
+    observation = build_observation(_event(), _execution(), [_decision()], recoveries)
+    assert observation.outcome == OUTCOME_RECOVERED
+    assert observation.recovered is True
+
+
+def test_no_cross_event_join_in_the_persisted_projection(db_conn):
+    """Another event's verified recovery must not attach to this execution."""
+    insert_payment_event(db_conn, PaymentEvent.from_dict(_event("evt_a")))
+    insert_payment_event(db_conn, PaymentEvent.from_dict(_event("evt_b")))
+    for event_id, link in (("evt_a", "plink_a"), ("evt_b", "plink_b")):
+        insert_execution_outcome(
+            db_conn,
+            ExecutionOutcome(
+                event_id=event_id,
+                intervention="payment_link",
+                execution_mode="REAL_RAZORPAY",
+                status="SUCCESS",
+                external_reference="https://rzp.io/i/x",
+                detail=None,
+                reported_at=NOW.isoformat(),
+                payment_link_id=link,
+            ),
+        )
+    insert_webhook_recovery_outcome(
+        db_conn,
+        delivery_id="delivery_a",
+        payment_link_id="plink_a",
+        referenced_event_id="evt_a",
+        amount_paid_paise=100_000,
+        currency="INR",
+        payment_id="pay_a",
+        recovered_at=NOW.isoformat(),
+    )
+    by_event = {o.event_id: o for o in build_observations(db_conn)}
+    assert by_event["evt_a"].outcome == OUTCOME_RECOVERED
+    assert by_event["evt_b"].outcome == OUTCOME_PENDING
+
+
+@pytest.mark.parametrize("mode", ["SIMULATED", "REAL_RAZORPAY"])
+def test_observation_always_carries_a_reason(mode):
+    observation = build_observation(
+        _event(), _execution(mode=mode), [_decision()], {}
+    )
+    assert observation.reason
