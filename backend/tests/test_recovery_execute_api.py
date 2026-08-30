@@ -522,3 +522,28 @@ def test_recovery_execute_preserves_calibration_unavailable(
     assert stage["estimator_mode"] == "BASELINE"
     assert stage["estimator_version"] is None
     assert stage["estimator_reason"] == "calibration_unavailable"
+
+
+def test_events_execute_preserves_calibration_unavailable(
+    monkeypatch, tmp_path
+) -> None:
+    """The events entry point, like the recovery one, keeps that state.
+
+    POST /events/{event_id}/execute must reach the same
+    ``build_production_estimator(conn)`` contract the recovery route uses: a
+    calibration that exists but cannot be read reports ``calibration_unavailable``
+    rather than being collapsed into ``no_calibration_evidence`` or raising. The
+    route does not guess a probability and does not wrap the build call in its
+    own fallback.
+    """
+    db_path = _seed(monkeypatch, tmp_path, candidates=["retry_delayed", "payment_link"])
+    _corrupt_snapshot(db_path)
+
+    response = client.post("/events/evt_ops/execute")
+    assert response.status_code == 200
+    assert response.json()["status"] == "execution_success"
+
+    stage = _latest_optimizer_decision(db_path)
+    assert stage["estimator_mode"] == "BASELINE"
+    assert stage["estimator_version"] is None
+    assert stage["estimator_reason"] == "calibration_unavailable"
