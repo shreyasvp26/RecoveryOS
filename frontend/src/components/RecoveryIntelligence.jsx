@@ -11,13 +11,16 @@ import { formatINR, humanize } from '../core/format.js'
  * webhook recoveries. Nothing here is hardcoded, estimated client-side, or
  * carried over from a benchmark simulation.
  *
- * THREE THINGS THIS SCREEN MUST NEVER BLUR
- * ----------------------------------------
- * 1. Below the backend's minimum sample threshold, no observed rate and no
+ * FOUR THINGS THIS SCREEN MUST NEVER BLUR
+ * ---------------------------------------
+ * 1. A verified recovery count is NOT a recovery rate. Positive evidence alone
+ *    cannot form a denominator, so the two are displayed as separate facts and
+ *    the rate stays absent until the backend says a rate exists.
+ * 2. Below the backend's minimum sample threshold, no observed rate and no
  *    conclusion is shown — the cell reads "Insufficient observations".
- * 2. A pending Payment Link is waiting, not failed, and never counts as an
+ * 3. A pending Payment Link is waiting, not failed, and never counts as an
  *    observation either way.
- * 3. A SIMULATED intervention produces no operational observation at all.
+ * 4. A SIMULATED intervention produces no operational observation at all.
  */
 
 const REASON_LABELS = {
@@ -84,7 +87,8 @@ function PerformanceTable({ rows, keyHeader, renderKey }) {
             <th>Predicted</th>
             <th>Observed</th>
             <th>Gap</th>
-            <th>Samples</th>
+            <th title="Terminal outcomes available for calibration">Samples</th>
+            <th>Verified recoveries</th>
             <th>Attempts</th>
             <th>Avg recovered</th>
           </tr>
@@ -100,7 +104,8 @@ function PerformanceTable({ rows, keyHeader, renderKey }) {
               <td>
                 <GapCell row={row} />
               </td>
-              <td>{row.eligible_observations}</td>
+              <td>{row.calibration_observations}</td>
+              <td>{row.verified_recoveries}</td>
               <td>{row.attempts}</td>
               <td>
                 {row.average_recovered_amount_paise === null ? (
@@ -130,6 +135,7 @@ export default function RecoveryIntelligence({ onNavigate }) {
   const segments = data.segments || {}
   const value = data.expected_vs_realized
   const evidence = data.evidence
+  const population = evidence.population
   const reasons = Object.entries(evidence.ineligible_reasons || {}).filter(
     ([, count]) => count > 0,
   )
@@ -155,14 +161,22 @@ export default function RecoveryIntelligence({ onNavigate }) {
       <Card title="Evidence summary" subtitle="Prediction vs verified outcome">
         <div className="stat-grid">
           <Stat
-            label="Observed recovery"
+            label="Verified recoveries"
+            value={calibration.verified_recoveries}
+            tone={calibration.verified_recoveries > 0 ? 'success' : 'neutral'}
+            sub="Payments confirmed by a signed webhook"
+            hint="Authoritative positive evidence. This is a count of real recoveries, not a recovery rate."
+          />
+          <Stat
+            label="Observed recovery rate"
             value={
               calibration.sufficient_observations
                 ? formatBps(calibration.observed_recovery_rate_bps)
                 : 'Insufficient observations'
             }
             tone={calibration.sufficient_observations ? 'success' : 'neutral'}
-            sub={`${calibration.recovered_observations} verified of ${calibration.eligible_observations} eligible`}
+            sub={`${calibration.recovered_observations} recovered / ${calibration.not_recovered_observations} not recovered`}
+            hint="Requires terminal outcomes on both sides. A count of recoveries divided by itself would always be 100%."
           />
           <Stat
             label="Predicted recovery"
@@ -186,19 +200,28 @@ export default function RecoveryIntelligence({ onNavigate }) {
             sub="Observed minus predicted, in percentage points"
           />
           <Stat
-            label="Eligible observations"
-            value={calibration.eligible_observations}
+            label="Calibration samples"
+            value={calibration.calibration_observations}
             tone={calibration.sufficient_observations ? 'info' : 'warn'}
-            sub={`${calibration.total_observations} executions projected`}
+            sub={`Terminal outcomes · ${calibration.total_observations} executions projected`}
+            hint="Only settled outcomes (recovered or not recovered) can form a recovery rate. Pending and unknown are excluded."
           />
         </div>
 
         {!calibration.sufficient_observations && (
           <p className="panel-note">
-            Fewer than {calibration.minimum_observations} eligible observations exist, so
-            no observed recovery rate, calibration gap or performance conclusion is
-            reported. The predicted figure is a model estimate and does not depend on
-            sample size.
+            <strong>No observed recovery rate is reported.</strong>{' '}
+            {calibration.status_detail} The minimum sample of{' '}
+            {calibration.minimum_observations} applies to terminal outcomes, not to
+            verified recoveries. The predicted figure is a model estimate and does not
+            depend on sample size.
+          </p>
+        )}
+        {!population.complete && (
+          <p className="panel-note">
+            These figures cover {population.projected_executions} of{' '}
+            {population.total_executions} recorded executions and are therefore a
+            bounded sample of history, not overall performance.
           </p>
         )}
       </Card>
@@ -284,7 +307,7 @@ export default function RecoveryIntelligence({ onNavigate }) {
         {reasons.length === 0 ? (
           <EmptyState
             title="Nothing excluded"
-            message="Every projected execution produced an eligible observation."
+            message="Every projected execution produced a calibration-eligible observation."
           />
         ) : (
           <div className="kv-grid">
