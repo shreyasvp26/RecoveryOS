@@ -35,6 +35,30 @@ from .economics import PROBABILITY_SCALE, RecoveryProbability
 from .estimator import RecoveryProbabilityEstimator
 from .models import PaymentEvent
 
+# Decision-level estimator provenance modes persisted on optimizer decisions.
+# A decision records WHICH estimator produced it so it stays explainable
+# tomorrow even after the active snapshot changes. ``CALIBRATED`` means the
+# decision ranked with a gated posterior; ``BASELINE`` means it ranked with the
+# frozen baseline. A pre-hardening decision that never recorded provenance is
+# reconstructed as ``LEGACY_BASELINE`` (never fabricated as calibrated).
+PROVENANCE_CALIBRATED = "CALIBRATED"
+PROVENANCE_BASELINE = "BASELINE"
+PROVENANCE_LEGACY_BASELINE = "LEGACY_BASELINE"
+
+# Reasons why a decision's estimator is BASELINE. These make the fallback
+# observable so the system can tell "no evidence yet" apart from "evidence or
+# calibration is unavailable":
+#   active_calibration      the chosen intervention used a gated posterior
+#   no_calibration_evidence  no snapshot has ever been built
+#   threshold_not_met        a snapshot exists but the gate is not met
+#   calibration_unavailable  a snapshot was corrupt/unreadable or the read failed
+#   legacy_decision          a pre-hardening decision that recorded no provenance
+REASON_CALIBRATED_ACTIVE = "active_calibration"
+REASON_NO_CALIBRATION = "no_calibration_evidence"
+REASON_THRESHOLD_NOT_MET = "threshold_not_met"
+REASON_CALIBRATION_UNAVAILABLE = "calibration_unavailable"
+REASON_LEGACY = "legacy_decision"
+
 
 @dataclass(frozen=True)
 class CalibrationSnapshot:
@@ -98,13 +122,24 @@ class CalibratedRecoveryProbabilityEstimator:
         self,
         baseline: RecoveryProbabilityEstimator | None = None,
         snapshot: CalibrationSnapshot | None = None,
+        available: bool = True,
     ) -> None:
         self._baseline = baseline or RecoveryProbabilityEstimator()
         self._snapshot = snapshot
+        # ``available`` distinguishes "no active calibration" (a normal state,
+        # reason threshold_not_met / no_calibration_evidence) from "calibration
+        # is unavailable" (a corrupt snapshot or a failed read, reason
+        # calibration_unavailable). Both fall back to baseline as safely as
+        # ever; only the observable reason differs.
+        self._available = available
 
     @property
     def snapshot(self) -> CalibrationSnapshot | None:
         return self._snapshot
+
+    @property
+    def available(self) -> bool:
+        return self._available
 
     def estimate(
         self,
@@ -141,5 +176,50 @@ class CalibratedRecoveryProbabilityEstimator:
                     "observed_recovered": row.get("observed_recovered"),
                     "observed_not_recovered": row.get("observed_not_recovered"),
                     "baseline_bps": row.get("baseline_bps"),
+                    "reason": REASON_CALIBRATED_ACTIVE,
                 }
-        return {"status": STATUS_BASELINE, "version": None, "posterior_bps": None}
+        return {
+            "status": STATUS_BASELINE,
+            "version": self._snapshot.version if self._snapshot is not None else None,
+            "posterior_bps": None,
+            "reason": self._baseline_reason(),
+        }
+
+    def _baseline_reason(self) -> str:
+        """Why this estimate is BASELINE: unavailable, no snapshot, or gate unmet."""
+        if not self._available:
+            return REASON_CALIBRATION_UNAVAILABLE
+        if self._snapshot is None:
+            return REASON_NO_CALIBRATION
+        return REASON_THRESHOLD_NOT_MET
+
+    def decision_provenance(self, intervention: str) -> dict[str, Any]:
+        """The decision-level estimator provenance (persisted on new decisions).
+
+        This is the state captured AT DECISION TIME and recorded immutably with
+        the optimizer decision, so a decision made under snapshot v1 continues
+        to identify v1 after v2 becomes active. It is read-only and never
+        rewrites a decision or a snapshot. Returns:
+
+            {
+              "estimator_mode":   CALIBRATED | BASELINE,
+              "estimator_version": int when calibrated (or baseline under a
+                                    specific snapshot), else None,
+              "estimator_reason": see the REASON_ constants,
+            }
+
+        ``intervention`` lets the decision report the state that produced the
+        chosen candidate's probability; all candidates of one decision share the
+        same immutable snapshot version.
+        """
+        if self._snapshot is not None and self._snapshot.posterior_for(intervention) is not None:
+            return {
+                "estimator_mode": PROVENANCE_CALIBRATED,
+                "estimator_version": self._snapshot.version,
+                "estimator_reason": REASON_CALIBRATED_ACTIVE,
+            }
+        return {
+            "estimator_mode": PROVENANCE_BASELINE,
+            "estimator_version": self._snapshot.version if self._snapshot is not None else None,
+            "estimator_reason": self._baseline_reason(),
+        }

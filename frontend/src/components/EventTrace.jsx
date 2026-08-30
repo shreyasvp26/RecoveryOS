@@ -60,6 +60,51 @@ const SELECTION_REASON_TEXT = {
     'The AI diagnosis produced no actionable candidate intervention to evaluate.',
 }
 
+const ESTIMATOR_REASON_TEXT = {
+  active_calibration:
+    'This decision\u2019s probability came from the active, gated calibration snapshot. A decision under snapshot vN keeps identifying vN even after a newer snapshot activates.',
+  no_calibration_evidence:
+    'No calibration snapshot exists yet, so the decision used the frozen baseline estimator\u2019s probability.',
+  threshold_not_met:
+    'A snapshot exists but no intervention met the evidence gate, so the frozen baseline estimator\u2019s probability was used.',
+  calibration_unavailable:
+    'The calibration snapshot was corrupt or could not be read, so the decision safely fell back to the frozen baseline estimator\u2019s probability.',
+  legacy_decision:
+    'This decision predates estimator capability tracking and is reported as having used the frozen baseline estimator.',
+}
+
+/**
+ * Format the persisted estimator provenance of a decision.
+ *
+ * The authoritative estimator_mode / estimator_reason / estimator_version are
+ * read straight from the persisted optimizer decision — captured at decision
+ * time and never recomputed here.
+ */
+function EstimatorProvenance({ decision }) {
+  const mode = decision.estimator_mode
+  const version = decision.estimator_version
+  const reason = decision.estimator_reason
+
+  const calibrated = mode === 'CALIBRATED'
+  const tone = calibrated ? 'success' : 'neutral'
+  const label = calibrated
+    ? `CALIBRATED · v${version ?? '—'}`
+    : mode === 'LEGACY_BASELINE'
+      ? 'BASELINE (LEGACY)'
+      : 'BASELINE'
+
+  return (
+    <div className="meta-row">
+      <Badge tone={tone}>{label}</Badge>
+      {reason && (
+        <span className="meta-line">
+          {ESTIMATOR_REASON_TEXT[reason] || reason}
+        </span>
+      )}
+    </div>
+  )
+}
+
 /**
  * The economic optimization stage: the model estimates the backend persisted
  * for each policy-approved candidate, and which one it selected.
@@ -93,6 +138,8 @@ function EconomicOptimizationStage({ optimizerDecisions }) {
         <Badge tone="info">MODEL ESTIMATE</Badge>
         <span className="meta-line">decided {formatTime(decision.decided_at)}</span>
       </div>
+
+      <EstimatorProvenance decision={decision} />
 
       {evaluations.length === 0 ? (
         <EmptyState

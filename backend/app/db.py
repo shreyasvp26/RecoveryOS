@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .classification import ClassificationResult
+from .calibration import validate_provider_outcome
 from .config import get_database_path
 from .models import PaymentEvent
 from .executor import ExecutionOutcome
@@ -167,6 +168,9 @@ CREATE TABLE IF NOT EXISTS optimizer_decisions (
     candidates_considered TEXT NOT NULL,
     allowed_candidates    TEXT NOT NULL,
     evaluations           TEXT NOT NULL,
+    estimator_version     INTEGER,
+    estimator_mode        TEXT,
+    estimator_reason      TEXT,
     PRIMARY KEY (event_id, decided_at)
 )
 """
@@ -211,7 +215,9 @@ CREATE TABLE IF NOT EXISTS provider_payment_link_outcomes (
     event_id        TEXT NOT NULL,
     status          TEXT NOT NULL,
     outcome         TEXT NOT NULL,
-    observed_at     TEXT NOT NULL
+    observed_at     TEXT NOT NULL,
+    CHECK (status IN ('created', 'partially_paid', 'expired', 'cancelled', 'paid')),
+    CHECK (outcome IN ('RECOVERED', 'NOT_RECOVERED'))
 )
 """
 
@@ -265,6 +271,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_PROVIDER_PAYMENT_LINK_OUTCOMES_DDL)
         conn.execute(_ESTIMATOR_CALIBRATION_SNAPSHOTS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
+        _migrate_optimizer_decisions_estimator_provenance(conn)
         conn.commit()
     except sqlite3.Error:
         conn.rollback()
@@ -286,6 +293,39 @@ def _migrate_execution_outcomes_payment_link_id(conn: sqlite3.Connection) -> Non
     conn.execute(
         f"ALTER TABLE execution_outcomes ADD COLUMN {_PAYMENT_LINK_ID_COLUMN} TEXT"
     )
+
+
+# The Phase 23 hardening columns that record WHICH estimator produced each
+# optimizer decision (mode, version, reason), so a historical decision keeps
+# identifying that state forever. Additive and nullable: every pre-hardening
+# row reads back as LEGACY_BASELINE with no version.
+_OPTIMIZER_DECISION_PROVENANCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("estimator_version", "INTEGER"),
+    ("estimator_mode", "TEXT"),
+    ("estimator_reason", "TEXT"),
+)
+
+
+def _migrate_optimizer_decisions_estimator_provenance(
+    conn: sqlite3.Connection,
+) -> None:
+    """Idempotently add the nullable estimator provenance columns when missing.
+
+    Existing (pre-hardening) databases keep every historical row untouched; the
+    columns are added once and later rows read back as LEGACY_BASELINE.
+    """
+    present = _optimizer_decision_columns(conn)
+    for column, column_type in _OPTIMIZER_DECISION_PROVENANCE_COLUMNS:
+        if column in present:
+            continue
+        conn.execute(
+            f"ALTER TABLE optimizer_decisions ADD COLUMN {column} {column_type}"
+        )
+
+
+def _optimizer_decision_columns(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("PRAGMA table_info(optimizer_decisions)").fetchall()
+    return {row["name"] for row in rows}
 
 
 def _execution_outcome_columns(conn: sqlite3.Connection) -> set[str]:
@@ -833,8 +873,9 @@ def insert_optimizer_decision(
             """
             INSERT INTO optimizer_decisions (
                 event_id, decided_at, selected_intervention, selection_reason,
-                candidates_considered, allowed_candidates, evaluations
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                candidates_considered, allowed_candidates, evaluations,
+                estimator_version, estimator_mode, estimator_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.event_id,
@@ -846,6 +887,9 @@ def insert_optimizer_decision(
                 json.dumps(
                     [evaluation.to_dict() for evaluation in record.evaluations]
                 ),
+                record.estimator_version,
+                record.estimator_mode,
+                record.estimator_reason,
             ),
         )
         conn.commit()
@@ -1551,9 +1595,19 @@ def insert_provider_payment_link_outcome(
     or by poll. Returns True when this call inserted the row, False when it
     already existed. sqlite3.Error (other than the ignored unique violation)
     propagates as a persistence failure.
+
+    Application-level validation is mandatory even with the table CHECK
+    constraints: ``status`` must be an authoritative provider status and
+    ``outcome`` must be its single canonical terminal outcome (only terminal,
+    canonical/provider-consistent rows may ever be stored), so a malformed or
+    contradictory row is rejected at the write boundary and can never become
+    calibration evidence.
     """
     if not isinstance(payment_link_id, str) or not payment_link_id.strip():
         raise TypeError("payment_link_id must be a non-empty string")
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise TypeError("event_id must be a non-empty string")
+    validate_provider_outcome(status, outcome)
     try:
         cur = conn.execute(
             """

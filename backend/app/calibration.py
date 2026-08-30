@@ -103,6 +103,24 @@ EVIDENCE_SOURCE_PROVIDER_POLL = "provider_poll"
 STATUS_BASELINE = "BASELINE"
 STATUS_CALIBRATED = "CALIBRATED"
 
+# The authoritative Razorpay Payment Link status domain
+# (GET /v1/payment_links/:id). No other status exists; an unrecognized status
+# is UNKNOWN and is never calibration evidence.
+PROVIDER_STATUS_PAID = "paid"
+PROVIDER_STATUS_PARTIALLY_PAID = "partially_paid"
+PROVIDER_STATUS_EXPIRED = "expired"
+PROVIDER_STATUS_CANCELLED = "cancelled"
+PROVIDER_STATUS_CREATED = "created"
+PROVIDER_STATUSES: frozenset[str] = frozenset(
+    {
+        PROVIDER_STATUS_PAID,
+        PROVIDER_STATUS_PARTIALLY_PAID,
+        PROVIDER_STATUS_EXPIRED,
+        PROVIDER_STATUS_CANCELLED,
+        PROVIDER_STATUS_CREATED,
+    }
+)
+
 
 class CalibrationError(Exception):
     """The calibration layer received state it cannot turn into a safe value."""
@@ -195,6 +213,50 @@ def map_provider_status(status: str | None) -> str:
     return OUTCOME_UNKNOWN
 
 
+def canonical_terminal_outcome(status: str | None) -> str | None:
+    """The ONLY canonical TERMINAL calibration outcome a provider status has.
+
+    Returns ``RECOVERED`` only for ``paid`` and ``NOT_RECOVERED`` only for
+    ``expired``; every other status (``created``, ``partially_paid``,
+    ``cancelled``, unrecognized, unreadable) has no terminal outcome and
+    returns None — those links are PENDING/UNKNOWN, never a sample, and no
+    outcome is ever inferred for them.
+    """
+    outcome = map_provider_status(status)
+    return outcome if outcome in TERMINAL_OUTCOMES else None
+
+
+def validate_provider_outcome(status: str | None, outcome: str) -> str:
+    """Enforce canonical status<->outcome consistency before calibration.
+
+    ``outcome`` is accepted VERBATIM only when it is the single canonical
+    terminal outcome for ``status``. Every malformed or contradictory pairing —
+    an unrecognized status, a non-terminal status, or a terminal outcome that
+    does not match its status (e.g. status ``created`` with outcome
+    ``NOT_RECOVERED``, or status ``expired`` with outcome ``RECOVERED``) — is
+    rejected with ``CalibrationError`` so a corrupt or contradictory persisted
+    row can never become calibration evidence. The safe evidence set is the
+    rows that survive this check; nothing is guessed and nothing is "fixed".
+    """
+    if not isinstance(status, str) or status not in PROVIDER_STATUSES:
+        raise CalibrationError(
+            f"unknown provider status {status!r}; the authoritative domain is "
+            f"{sorted(PROVIDER_STATUSES)}"
+        )
+    canonical = canonical_terminal_outcome(status)
+    if canonical is None:
+        raise CalibrationError(
+            f"status {status!r} has no terminal calibration outcome; it is "
+            "PENDING/UNKNOWN and can never be a sample"
+        )
+    if outcome != canonical:
+        raise CalibrationError(
+            f"status {status!r} canonically maps to {canonical!r}; "
+            f"recorded outcome {outcome!r} contradicts the provider contract"
+        )
+    return outcome
+
+
 # ---------------------------------------------------------------------------
 # Prior derivation (baseline-derived, integer-exact).
 # ---------------------------------------------------------------------------
@@ -238,75 +300,6 @@ def posterior_bps(recovered: int, total: int, baseline_bps: int) -> int:
     prior_s = prior_successes(baseline_bps)
     value = (recovered + prior_s) * PROBABILITY_SCALE // (total + PRIOR_STRENGTH)
     return max(0, min(PROBABILITY_SCALE, value))
-
-
-# ---------------------------------------------------------------------------
-# Evidence projection (real operational world only).
-# ---------------------------------------------------------------------------
-
-
-def build_observations(
-    executions: Sequence[Mapping[str, Any]],
-    recoveries: Mapping[str, Mapping[str, Any]],
-    provider: Any,
-) -> list[CalibrationObservation]:
-    """Project persisted executions + provider evidence into observations.
-
-    Only REAL_RAZORPAY ``payment_link`` SUCCESS executions with a persisted
-    Payment Link id are eligible; everything else (SIMULATED, non-payment_link,
-    failed, missing link id) is excluded by construction. A verified webhook
-    recovery is authoritative positive evidence; a link without one is resolved
-    by a read-only provider poll, mapping the returned status via the terminal
-    contract. Provider read failures are UNKNOWN, never negative.
-    """
-    observations: list[CalibrationObservation] = []
-    for execution in executions:
-        if execution.get("execution_mode") != "REAL_RAZORPAY":
-            continue
-        if execution.get("intervention") != "payment_link":
-            continue
-        if execution.get("status") != "SUCCESS":
-            continue
-        link_id = execution.get("payment_link_id")
-        if not isinstance(link_id, str) or not link_id.strip():
-            continue
-        event_id = str(execution["event_id"])
-
-        recovery = recoveries.get(link_id)
-        if recovery is not None:
-            observations.append(
-                CalibrationObservation(
-                    event_id=event_id,
-                    intervention="payment_link",
-                    outcome=OUTCOME_RECOVERED,
-                    amount_paid_paise=recovery.get("amount_paid_paise"),
-                    observed_at=recovery.get("recovered_at"),
-                    evidence_id=recovery.get("delivery_id"),
-                    evidence_source=EVIDENCE_SOURCE_WEBHOOK,
-                )
-            )
-            continue
-
-        # No verified webhook recovery: resolve by provider poll (read-only).
-        if provider is None:
-            continue
-        try:
-            status = provider.get_payment_link(link_id).status
-            outcome = map_provider_status(status)
-        except Exception:
-            outcome = OUTCOME_UNKNOWN
-        observations.append(
-            CalibrationObservation(
-                event_id=event_id,
-                intervention="payment_link",
-                outcome=outcome,
-                amount_paid_paise=None,
-                observed_at=None,
-                evidence_id=None,
-                evidence_source=EVIDENCE_SOURCE_PROVIDER_POLL,
-            )
-        )
-    return observations
 
 
 def calibration_samples(

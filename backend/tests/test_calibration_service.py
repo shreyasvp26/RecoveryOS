@@ -13,8 +13,17 @@ import sqlite3
 import pytest
 
 from app import db, calibration_service
-from app.calibration import OUTCOME_RECOVERED, OUTCOME_NOT_RECOVERED, map_provider_status
+from app.calibration import (
+    OUTCOME_RECOVERED,
+    OUTCOME_NOT_RECOVERED,
+    CalibrationError,
+    EVIDENCE_SOURCE_WEBHOOK,
+    canonical_terminal_outcome,
+    map_provider_status,
+    validate_provider_outcome,
+)
 from app.executor import PAYMENT_LINK, ExecutionOutcome
+from app.optimizer_audit import OptimizerDecisionRecord
 
 INTERVENTION = PAYMENT_LINK
 BASELINE_BPS = 2800  # payment_link base recover in bps
@@ -35,6 +44,27 @@ class FakeProvider:
         return link
 
 
+def _seed_prediction(conn, *, event_id: str, decided_at: str = "2026-01-01T00:00:00+00:00") -> None:
+    """Persist the payment_link optimizer decision that predicted the execution.
+
+    Phase 23 hardening: calibration evidence is eligible only when the event
+    carries a persisted payment_link prediction, so every seeded execution must
+    be backed by its decision record.
+    """
+    db.insert_optimizer_decision(
+        conn,
+        OptimizerDecisionRecord(
+            event_id=event_id,
+            decided_at=decided_at,
+            selected_intervention=INTERVENTION,
+            selection_reason="max_expected_value",
+            candidates_considered=(INTERVENTION,),
+            allowed_candidates=(INTERVENTION,),
+            evaluations=(),
+        ),
+    )
+
+
 def _seed_execution(conn, *, link_id: str, event_id: str) -> None:
     db.insert_execution_outcome(
         conn,
@@ -48,6 +78,7 @@ def _seed_execution(conn, *, link_id: str, event_id: str) -> None:
             payment_link_id=link_id,
         ),
     )
+    _seed_prediction(conn, event_id=event_id)
 
 
 def _seed_recovery(conn, *, link_id: str, delivery_id: str, event_id: str) -> None:
@@ -246,3 +277,196 @@ def test_load_active_snapshot_returns_latest_immutable_snapshot(db_conn):
     assert snap is not None
     assert snap.version == 2
     assert snap.posterior_for(INTERVENTION) is not None
+
+
+# ---------------------------------------------------------------------------
+# Hardening: provider evidence integrity & duplicate projection consolidation
+# ---------------------------------------------------------------------------
+
+def test_canonical_terminal_outcome_only_for_terminal_statuses():
+    assert canonical_terminal_outcome("paid") == OUTCOME_RECOVERED
+    assert canonical_terminal_outcome("expired") == OUTCOME_NOT_RECOVERED
+    # Non-terminal / unrecognized / unreadable have NO terminal outcome.
+    assert canonical_terminal_outcome("created") is None
+    assert canonical_terminal_outcome("partially_paid") is None
+    assert canonical_terminal_outcome("cancelled") is None
+    assert canonical_terminal_outcome(None) is None
+    assert canonical_terminal_outcome("mystery_status") is None
+
+
+def test_validate_provider_outcome_accepts_only_canonical_pairs():
+    assert validate_provider_outcome("paid", OUTCOME_RECOVERED) == OUTCOME_RECOVERED
+    assert (
+        validate_provider_outcome("expired", OUTCOME_NOT_RECOVERED)
+        == OUTCOME_NOT_RECOVERED
+    )
+
+
+@pytest.mark.parametrize(
+    "status,outcome",
+    [
+        ("created", OUTCOME_NOT_RECOVERED),  # non-terminal status, negative outcome
+        ("expired", OUTCOME_RECOVERED),  # contradictory (paid only is positive)
+        ("paid", OUTCOME_NOT_RECOVERED),  # contradictory negative on paid
+        ("mystery_status", OUTCOME_RECOVERED),  # unknown status
+        (None, OUTCOME_RECOVERED),  # unreadable status
+        ("created", OUTCOME_RECOVERED),  # non-terminal, positive
+    ],
+)
+def test_validate_provider_outcome_rejects_contradictions(status, outcome):
+    with pytest.raises(CalibrationError):
+        validate_provider_outcome(status, outcome)
+
+
+def test_validate_provider_outcome_rejects_non_terminal_row_entirely():
+    # A terminal-but-non-canonical outcome for a terminal status is rejected.
+    with pytest.raises(CalibrationError):
+        validate_provider_outcome("cancelled", OUTCOME_NOT_RECOVERED)
+
+
+def test_contradictory_persisted_provider_outcome_is_excluded(db_conn):
+    # A corrupt persisted row (status 'paid' but recorded NOT_RECOVERED) can
+    # never become a sample: it is excluded, never "fixed".
+    _seed_execution(db_conn, link_id="pl_bad", event_id="evt_bad")
+    with pytest.raises(CalibrationError):
+        # Direct write is blocked by app-level validation…
+        db.insert_provider_payment_link_outcome(
+            db_conn,
+            payment_link_id="pl_bad",
+            event_id="evt_bad",
+            status="paid",
+            outcome=OUTCOME_NOT_RECOVERED,
+            observed_at="2026-01-01T00:00:00+00:00",
+        )
+
+
+def test_write_boundary_rejects_unknown_status(db_conn):
+    _seed_execution(db_conn, link_id="pl_unk", event_id="evt_unk")
+    with pytest.raises(CalibrationError):
+        db.insert_provider_payment_link_outcome(
+            db_conn,
+            payment_link_id="pl_unk",
+            event_id="evt_unk",
+            status="mystery_status",
+            outcome=OUTCOME_NOT_RECOVERED,
+            observed_at="2026-01-01T00:00:00+00:00",
+        )
+
+
+def test_provider_evidence_admitted_only_through_readonly_boundary(db_conn):
+    # The durable provider store is validated at the write; a projected row that
+    # is somehow non-canonical is excluded during projection too.
+    _seed_execution(db_conn, link_id="pl_z", event_id="evt_z")
+    obs = calibration_service.build_calibration_observations(
+        db_conn, FakeProvider({"pl_z": "paid"})
+    )
+    exp = [o for o in obs if o.event_id == "evt_z"]
+    assert len(exp) == 1 and exp[0].outcome == OUTCOME_RECOVERED
+
+
+def test_duplicate_executions_share_one_observation_per_link(db_conn):
+    # A link that appears in two executions must contribute at most ONE sample.
+    for i in range(2):
+        _seed_execution(db_conn, link_id="pl_dup", event_id=f"evt_dup_{i}")
+    # One durable terminal outcome for the shared link.
+    db.insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="pl_dup",
+        event_id="evt_dup_0",
+        status="expired",
+        outcome=OUTCOME_NOT_RECOVERED,
+        observed_at="2026-01-01T00:00:00+00:00",
+    )
+    obs = calibration_service.build_calibration_observations(
+        db_conn, FakeProvider({})
+    )
+    links = [o.event_id for o in obs]
+    assert links.count("evt_dup_0") + links.count("evt_dup_1") == 1
+
+
+def test_duplicate_executions_and_recovery_still_one_observation(db_conn):
+    for i in range(2):
+        _seed_execution(db_conn, link_id="pl_dupr", event_id=f"evt_dupr_{i}")
+    _seed_recovery(db_conn, link_id="pl_dupr", delivery_id="del_dupr", event_id="evt_dupr_0")
+    obs = calibration_service.build_calibration_observations(
+        db_conn, FakeProvider({})
+    )
+    assert len(
+        [o for o in obs if o.event_id in ("evt_dupr_0", "evt_dupr_1")]
+    ) == 1
+
+
+def test_execution_without_prediction_is_excluded(db_conn):
+    # No optimizer decision -> no eligibility, even with a terminal provider
+    # outcome and even with a webhook recovery referencing the event. Nothing
+    # is calibrated against an outcome a decision never predicted.
+    db.insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_nopred",
+            intervention=INTERVENTION,
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/rzp/pl_np",
+            reported_at="2026-01-01T00:00:00+00:00",
+            payment_link_id="pl_np",
+        ),
+    )
+    db.insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="pl_np",
+        event_id="evt_nopred",
+        status="expired",
+        outcome=OUTCOME_NOT_RECOVERED,
+        observed_at="2026-01-03T00:00:00+00:00",
+    )
+    obs = calibration_service.build_calibration_observations(
+        db_conn, FakeProvider({})
+    )
+    assert [o for o in obs if o.event_id == "evt_nopred"] == []
+
+
+def test_webhook_recovery_wins_over_contradictory_provider_outcome(db_conn):
+    # A verified recovery is authoritative: it beats any provider-polled or
+    # persisted non-positive state for the same link.
+    _seed_execution(db_conn, link_id="pl_conf", event_id="evt_conf")
+    # Persist a (wrongly) expired provider row for the same link.
+    db.insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="pl_conf",
+        event_id="evt_conf",
+        status="expired",
+        outcome=OUTCOME_NOT_RECOVERED,
+        observed_at="2026-01-03T00:00:00+00:00",
+    )
+    # Now a verified webhook recovery arrives for the same link.
+    _seed_recovery(db_conn, link_id="pl_conf", delivery_id="del_conf", event_id="evt_conf")
+    obs = calibration_service.build_calibration_observations(
+        db_conn, FakeProvider({})
+    )
+    matched = [o for o in obs if o.event_id == "evt_conf"]
+    assert len(matched) == 1
+    assert matched[0].outcome == OUTCOME_RECOVERED
+    assert matched[0].evidence_source == EVIDENCE_SOURCE_WEBHOOK
+
+
+def test_provider_outcome_tied_to_other_event_is_excluded(db_conn):
+    # Two executions, two links; the persisted provider outcome for one link is
+    # (corruptly) tied to the OTHER link's event -> the mismatched row cannot
+    # be projected for that execution.
+    _seed_execution(db_conn, link_id="pl_a", event_id="evt_a")
+    _seed_execution(db_conn, link_id="pl_b", event_id="evt_b")
+    db.insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="pl_b",
+        event_id="evt_a",  # mismatched: belongs to a different link's event
+        status="expired",
+        outcome=OUTCOME_NOT_RECOVERED,
+        observed_at="2026-01-03T00:00:00+00:00",
+    )
+    obs = calibration_service.build_calibration_observations(
+        db_conn, FakeProvider({})
+    )
+    # Only evt_b may consume pl_b's outcome; evt_a's link has no evidence.
+    assert [o for o in obs if o.event_id == "evt_a"] == []
+    assert [o for o in obs if o.event_id == "evt_b"] == []

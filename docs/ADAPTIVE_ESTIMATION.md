@@ -119,8 +119,62 @@ probability.
 The wrapper's `provenance(intervention)` reports, read-only, which source produced
 a probability (snapshot version + evidence counts, or `BASELINE`). It is surfaced
 by `GET /estimator-evidence` and the **Estimator Evidence** frontend screen.
-Historical `optimizer_decisions` are never rewritten; provenance is display data
-for new decisions and for understanding which snapshot produced a given estimate.
+Historical `optimizer_decisions` are never rewritten.
+
+### Decision-level provenance (captured at decision time)
+
+When the production execute endpoint persists a new optimizer decision it also
+records the estimator state **at that moment** on the decision row
+(`optimizer_decisions.estimator_*`), so every decision is transparent:
+
+| Field | Meaning |
+|-------|---------|
+| `estimator_mode` | `CALIBRATED` when the chosen candidate used an active posterior, else `BASELINE` |
+| `estimator_version` | the snapshot version that produced the probability (NULL under a pure baseline) |
+| `estimator_reason` | why this mode: `active_calibration`, `no_calibration_evidence`, `threshold_not_met`, `calibration_unavailable`, or `legacy_decision` for rows predating capability tracking |
+
+A decision made under snapshot v1 keeps identifying v1 even after v2 becomes
+active. The **Event Decision Trace** surfaces this compactly on the Economic
+Optimization stage. Pre-hardening rows read back with `estimator_mode = NULL`,
+which the accessor normalizes to `LEGACY_BASELINE` / `legacy_decision` — honest
+about the fact that those decisions did not track capability.
+
+### Fallback observability
+
+The wrapper is explicit about *why* it fell back to a baseline probability, via
+`available` and the `estimator_reason`:
+
+- `available=True`, no snapshot            → `no_calibration_evidence`
+- `available=True`, snapshot not gated     → `threshold_not_met`
+- `available=False` (corrupt/unreadable)   → `calibration_unavailable`
+
+All three are safe (baseline) states; the last one is visible so an operator can
+tell an honest "not enough evidence yet" apart from a calibration-read failure.
+
+## Evidence integrity & consolidation
+
+Every evidence row that could become a sample is validated before it can enter one
+(`calibration.validate_provider_outcome`, `calibration.canonical_terminal_outcome`):
+
+- **Canonical status→outcome only.** A provider status maps to exactly one terminal
+  outcome (`paid`→`RECOVERED`, `expired`→`NOT_RECOVERED`). Any other status
+  (`created`/`partially_paid`/`cancelled`/unrecognized/unreadable) has **no** terminal
+  outcome and is never a sample. A persisted row whose `outcome` contradicts its
+  `status` is rejected — at the write boundary (app-level validation in
+  `db.insert_provider_payment_link_outcome`, reinforced by DDL `CHECK` constraints on
+  new databases) and again at projection. Nothing is guessed and nothing is "fixed".
+- **Prediction exists.** A `payment_link` execution is only observable when the event
+  carries a persisted payment_link optimizer decision; an execution with no predicted
+  derivative is excluded rather than calibrated against an outcome it never predicted.
+- **Event match.** A webhook recovery is authoritative positive only when tied to the
+  execution's event; a provider outcome is admitted only when its row's `event_id`
+  matches the execution carrying that link.
+- **One sample per link.** The projection is keyed by Payment Link, so a link that
+  appears across several executions contributes at most one terminal observation —
+  duplicates can never inflate a calibration rate.
+- **Webhook wins.** A verified recovery settles the link and overrides any
+  contradictory provider-polled/persisted non-positive state (authoritative
+  chronology: the webhook is the proof the provider later confirms).
 
 ## Boundaries
 

@@ -8,13 +8,31 @@ from app.db import (
     connect,
     init_db,
     insert_execution_outcome,
+    insert_optimizer_decision,
     insert_provider_payment_link_outcome,
     insert_webhook_recovery_outcome,
 )
 from app.executor import ExecutionOutcome
 from app.main import app
+from app.optimizer_audit import OptimizerDecisionRecord
 
 client = TestClient(app)
+
+
+def _seed_prediction(conn, *, event_id: str) -> None:
+    """Persist the payment_link prediction that drove the execution."""
+    insert_optimizer_decision(
+        conn,
+        OptimizerDecisionRecord(
+            event_id=event_id,
+            decided_at="2026-01-01T00:00:00+00:00",
+            selected_intervention="payment_link",
+            selection_reason="max_expected_value",
+            candidates_considered=("payment_link",),
+            allowed_candidates=("payment_link",),
+            evaluations=(),
+        ),
+    )
 
 
 def _seed_gated_world(conn) -> None:
@@ -34,6 +52,7 @@ def _seed_gated_world(conn) -> None:
                 payment_link_id=link,
             ),
         )
+        _seed_prediction(conn, event_id=event)
         insert_webhook_recovery_outcome(
             conn,
             delivery_id=f"del_r{i}",
@@ -59,6 +78,7 @@ def _seed_gated_world(conn) -> None:
                 payment_link_id=link,
             ),
         )
+        _seed_prediction(conn, event_id=event)
         insert_provider_payment_link_outcome(
             conn,
             payment_link_id=link,
@@ -128,6 +148,7 @@ def test_estimator_evidence_never_reports_active_when_below_gate(monkeypatch, tm
                 payment_link_id=link,
             ),
         )
+        _seed_prediction(conn, event_id=event)
         insert_provider_payment_link_outcome(
             conn,
             payment_link_id=link,
