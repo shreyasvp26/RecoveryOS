@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 
 from .. import db
-from ..outcome_feedback import DEFAULT_SCAN_LIMIT, build_observations
+from ..outcome_feedback import DEFAULT_OBSERVATION_LIMIT, build_observations
 from ..recovery_intelligence import build_recovery_intelligence, observation_rows
 
 router = APIRouter(tags=["recovery-intelligence"])
@@ -52,15 +52,16 @@ def recovery_intelligence(
     Every figure is computed from the persisted optimizer decisions, execution
     outcomes and verified webhook recoveries. Nothing is hardcoded, and a
     metric with too little evidence behind it is reported as insufficient
-    rather than estimated.
+    rather than estimated. ``evidence.population`` states whether the figures
+    cover every recorded execution.
 
     ``include_observations`` attaches the underlying per-observation rows so an
     aggregate can be traced back to the exact execution and provider evidence
     it came from.
     """
-    payload = build_recovery_intelligence(conn, scan_limit=DEFAULT_SCAN_LIMIT)
+    payload = build_recovery_intelligence(conn, limit=DEFAULT_OBSERVATION_LIMIT)
     if include_observations:
-        observations = build_observations(conn, scan_limit=DEFAULT_SCAN_LIMIT)
+        observations = build_observations(conn, limit=DEFAULT_OBSERVATION_LIMIT)
         payload["observations"] = observation_rows(observations)[
             :MAX_OBSERVATION_ROWS
         ]

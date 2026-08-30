@@ -19,7 +19,12 @@ from app.executor import ExecutionOutcome
 from app.main import app
 from app.models import PaymentEvent
 from app.optimizer_audit import OptimizerDecisionRecord
-from app.recovery_intelligence import INSUFFICIENT_OBSERVATIONS, MIN_OBSERVATIONS
+from app.recovery_intelligence import (
+    INSUFFICIENT_OBSERVATIONS,
+    MIN_OBSERVATIONS,
+    NO_TERMINAL_OUTCOMES,
+    POSITIVE_EVIDENCE_ONLY,
+)
 
 client = TestClient(app)
 
@@ -113,17 +118,20 @@ def test_empty_database_reports_insufficient_observations(monkeypatch, tmp_path)
     response = client.get("/recovery-intelligence")
     assert response.status_code == 200
     body = response.json()
-    assert body["calibration"]["eligible_observations"] == 0
+    assert body["calibration"]["calibration_observations"] == 0
+    assert body["calibration"]["verified_recoveries"] == 0
     assert body["calibration"]["status"] == INSUFFICIENT_OBSERVATIONS
+    assert body["calibration"]["status_detail"] == NO_TERMINAL_OUTCOMES
     assert body["calibration"]["observed_recovery_rate_bps"] is None
     assert body["interventions"] == []
     assert body["segments"]["bank"] == []
     assert body["expected_vs_realized"]["compared_observations"] == 0
 
 
-def test_sufficient_verified_recoveries_produce_observed_metrics(
+def test_verified_recoveries_are_reported_without_claiming_a_rate(
     monkeypatch, tmp_path
 ):
+    """The audit case, end to end: 10 recoveries, 0 negatives, no 100%."""
     conn = _db(monkeypatch, tmp_path, "recovered.db")
     try:
         for index in range(MIN_OBSERVATIONS):
@@ -133,19 +141,29 @@ def test_sufficient_verified_recoveries_produce_observed_metrics(
 
     body = client.get("/recovery-intelligence").json()
     calibration = body["calibration"]
-    assert calibration["eligible_observations"] == MIN_OBSERVATIONS
-    assert calibration["sufficient_observations"] is True
-    assert calibration["mean_predicted_probability_bps"] == 6_000
-    assert calibration["observed_recovery_rate_bps"] == 10_000
-    assert calibration["calibration_gap_bps"] == 4_000
+    assert calibration["verified_recoveries"] == MIN_OBSERVATIONS
+    assert calibration["recovered_observations"] == MIN_OBSERVATIONS
+    assert calibration["not_recovered_observations"] == 0
+    assert calibration["has_terminal_negative_evidence"] is False
+    assert calibration["sufficient_observations"] is False
+    assert calibration["status"] == INSUFFICIENT_OBSERVATIONS
+    assert calibration["status_detail"] == POSITIVE_EVIDENCE_ONLY
+    assert calibration["observed_recovery_rate_bps"] is None
+    assert calibration["calibration_gap_bps"] is None
+    assert calibration["outcome_counts"]["RECOVERED"] == MIN_OBSERVATIONS
+    assert calibration["outcome_counts"]["NOT_RECOVERED"] == 0
 
+    # Positive evidence stays fully visible.
     interventions = body["interventions"]
     assert [row["key"] for row in interventions] == ["payment_link"]
+    assert interventions[0]["verified_recoveries"] == MIN_OBSERVATIONS
     assert interventions[0]["average_recovered_amount_paise"] == 100_000
+    assert interventions[0]["observed_recovery_rate_bps"] is None
 
     banks = body["segments"]["bank"]
     assert [row["key"] for row in banks] == ["HDFC"]
-    assert banks[0]["observed_recovery_rate_bps"] == 10_000
+    assert banks[0]["verified_recoveries"] == MIN_OBSERVATIONS
+    assert banks[0]["observed_recovery_rate_bps"] is None
 
     value = body["expected_vs_realized"]
     assert value["compared_observations"] == MIN_OBSERVATIONS
@@ -164,12 +182,30 @@ def test_pending_links_are_reported_as_pending_not_as_failures(
         conn.close()
 
     body = client.get("/recovery-intelligence").json()
-    assert body["calibration"]["eligible_observations"] == 0
+    assert body["calibration"]["calibration_observations"] == 0
+    assert body["calibration"]["verified_recoveries"] == 0
+    assert body["calibration"]["outcome_counts"]["PENDING"] == 3
+    assert body["calibration"]["outcome_counts"]["NOT_RECOVERED"] == 0
     assert body["calibration"]["status"] == INSUFFICIENT_OBSERVATIONS
     assert body["evidence"]["ineligible_reasons"]["awaiting_outcome"] == 3
     row = body["interventions"][0]
     assert row["attempts"] == 3
     assert row["observed_recovery_rate_bps"] is None
+
+
+def test_population_coverage_is_stated_in_the_payload(monkeypatch, tmp_path):
+    conn = _db(monkeypatch, tmp_path, "population.db")
+    try:
+        for index in range(4):
+            _seed_recovered_event(conn, index)
+    finally:
+        conn.close()
+
+    population = client.get("/recovery-intelligence").json()["evidence"]["population"]
+    assert population["total_executions"] == 4
+    assert population["projected_executions"] == 4
+    assert population["complete"] is True
+    assert population["limit"] >= 4
 
 
 def test_observations_can_be_included_for_traceability(monkeypatch, tmp_path):
@@ -211,6 +247,7 @@ def test_methodology_names_the_authoritative_sources(monkeypatch, tmp_path):
         "execution_source": "execution_outcomes",
         "recovery_source": "webhook_recovery_outcomes",
         "correlation_key": "payment_link_id",
+        "calibration_denominator": "RECOVERED + NOT_RECOVERED",
         "minimum_observations": MIN_OBSERVATIONS,
         "operational_world_only": True,
     }
