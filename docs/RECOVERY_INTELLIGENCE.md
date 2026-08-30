@@ -36,7 +36,7 @@ The estimator is frozen in Phase 22. Nothing in this layer reads it, imports it,
 
 The join is deterministic and uses authoritative identifiers only. Amount, customer, email, timestamp proximity, and event similarity are never used to correlate anything.
 
-1. **Execution → prediction.** Among the persisted optimizer decisions for the same `event_id`, keep those whose `selected_intervention` equals the execution's intervention *and* whose `decided_at` is at or before the execution's `reported_at`; take the latest. An execution cannot have been driven by a decision made after it, and a decision that selected a different intervention did not drive this action. If no such decision exists, the observation is ineligible (`missing_prediction`) rather than paired with a guess.
+1. **Execution → prediction.** Among the persisted optimizer decisions for the same `event_id`, keep those whose `selected_intervention` equals the execution's intervention *and* whose `decided_at` is at or before the execution's `reported_at`; take the latest. Timestamps are compared as **instants**, not as strings: both sides are parsed with the repository's `parse_aware_datetime`, so `2026-08-30T10:00:00+05:30` and `2026-08-30T04:30:00+00:00` correctly match as the same moment even though they sort differently as text. A decision whose stored timestamp is unparseable or naive is skipped rather than guessed at, and an execution with an unusable timestamp joins to nothing — fail-closed, so an unreadable timestamp yields no prediction rather than a wrong one. An execution cannot have been driven by a decision made after it, and a decision that selected a different intervention did not drive this action. If no such decision exists, the observation is ineligible (`missing_prediction`) rather than paired with a guess.
 2. **Execution → provider evidence.** Correlation is by `payment_link_id`, which is only ever persisted on a `REAL_RAZORPAY` `payment_link` SUCCESS outcome. This is the same key the Phase 12 webhook path already uses.
 3. **Repeated interventions.** Each execution is its own observation, paired with its own decision. An event intervened on twice contributes two observations.
 
@@ -79,48 +79,102 @@ A failed execution is a failed *intervention*, not an observed payment failure. 
 
 ---
 
+## A verified recovery is not a recovery rate
+
+This distinction is the reason the numbers on this screen can be trusted, so it is worth stating on its own.
+
+**Verified recovery evidence** is a count of payments the provider confirmed. It is authoritative, and it is always reported.
+
+**A recovery rate** is a ratio, and a ratio needs a denominator of *settled* outcomes — cases where we know the customer paid *and* cases where we know they did not. RecoveryOS only ever receives the first kind. Absence of a `payment_link.paid` webhook is not evidence of non-payment: the customer may still pay tomorrow, the webhook may be in flight, or the link may simply be open.
+
+So if the only observations in the denominator are the recoveries themselves, the arithmetic is `n / n` and the answer is **100% no matter how good or bad the estimator is**. That number would be meaningless, and it would look like RecoveryOS never gets a prediction wrong.
+
+RecoveryOS therefore reports:
+
+```
+Verified recoveries: 12
+Calibration samples: 0
+Observed recovery rate: INSUFFICIENT_OBSERVATIONS
+```
+
+That is the correct and intended output, not a gap in the implementation.
+
+---
+
 ## Eligibility
 
-| Situation | Eligible? | Outcome | Reason code |
-| --- | --- | --- | --- |
-| Real Payment Link, verified paid | yes | `RECOVERED` | `eligible` |
-| Real Payment Link, waiting for payment | no (not yet) | `PENDING` | `awaiting_outcome` |
-| Ambiguous provider result | no | `UNKNOWN` | `ambiguous_provider_result` |
-| Known execution failure | no | `UNKNOWN` | `execution_failed` |
-| Real success without a Payment Link id | no | `UNKNOWN` | `missing_payment_link_id` |
-| Simulated execution | no | `UNKNOWN` | `simulated_execution` |
-| Verified recovery with no persisted prediction | no | `RECOVERED` | `missing_prediction` |
-| Verified webhook that matched no execution | no observation exists | — | — |
+Three separate properties are tracked per observation, and they are deliberately not collapsed:
 
-Every ineligible observation carries exactly one reason, and the API reports the counts. Nothing is silently dropped, and the UI shows the breakdown.
+| Property | Meaning |
+| --- | --- |
+| `verified_recovery` | Authoritative positive evidence: the provider confirmed payment. |
+| `terminal` | The payment question is settled (`RECOVERED` or `NOT_RECOVERED`). |
+| `calibration_eligible` | Terminal **and** carrying the persisted prediction that drove it. Only these may enter a rate. |
+
+| Situation | Outcome | Terminal | Calibration eligible | Reason code |
+| --- | --- | --- | --- | --- |
+| Real Payment Link, verified paid | `RECOVERED` | yes | yes | `calibration_eligible` |
+| Real Payment Link, waiting for payment | `PENDING` | no | no | `awaiting_outcome` |
+| Ambiguous provider result | `UNKNOWN` | no | no | `ambiguous_provider_result` |
+| Known execution failure | `UNKNOWN` | no | no | `execution_failed` |
+| Real success without a Payment Link id | `UNKNOWN` | no | no | `missing_payment_link_id` |
+| Simulated execution | `UNKNOWN` | no | no | `simulated_execution` |
+| Verified recovery with no persisted prediction | `RECOVERED` | yes | no (still counted as a verified recovery) | `missing_prediction` |
+| Verified webhook that matched no execution | no observation exists | — | — | — |
+
+Every non-eligible observation carries exactly one reason, and the API reports the counts. Nothing is silently dropped, and the UI shows the breakdown.
+
+Note what the table does **not** contain: no row produces `NOT_RECOVERED`. That is the current provider limitation, faithfully represented.
 
 ---
 
 ## Calibration methodology
 
-For each eligible observation: `predicted = the persisted probability in basis points`, `recovered = 1 or 0`.
+For each calibration-eligible observation: `predicted = the persisted probability in basis points`, `recovered = 1 or 0`.
 
 ```
-mean_predicted_probability = mean(predicted over eligible observations)
-observed_recovery_rate     = recovered_observations / eligible_observations
+terminal_outcomes          = RECOVERED + NOT_RECOVERED   (PENDING and UNKNOWN excluded)
+mean_predicted_probability = mean(predicted over terminal outcomes)
+observed_recovery_rate     = RECOVERED / (RECOVERED + NOT_RECOVERED)
 calibration_gap            = observed_recovery_rate - mean_predicted_probability
 ```
+
+A rate is reported only when **both** conditions hold:
+
+1. there are at least `MIN_OBSERVATIONS` calibration-eligible terminal outcomes, **and**
+2. at least one of them is an authoritative `NOT_RECOVERED`.
+
+The second condition is the censoring guard. A population made only of confirmed successes is not a small sample — it is a one-sided one, and no amount of additional positive evidence makes it two-sided. The API distinguishes the two situations in `status_detail`.
 
 The gap is displayed in percentage points. **The sign is never reversed: a negative gap means observed recovery came in below prediction.** Predicted 70%, observed 65% is a gap of `-5 pp`.
 
 Arithmetic is integer-safe: probabilities stay in the basis points the optimizer persisted, means are computed as exact rationals (`fractions.Fraction`) and rounded once for display, and the gap is computed from the exact difference rather than from the two rounded means — so a genuinely perfect calibration reports exactly `0` instead of a rounding artefact. Rounding is half-away-from-zero, which is sign-symmetric.
 
-The mean predicted probability is computed over the **same population** as the observed rate (the eligible observations). Mixing populations would produce a gap between two different things.
+The mean predicted probability is computed over the **same population** as the observed rate (the calibration-eligible terminal outcomes). Mixing populations would produce a gap between two different things.
 
 ---
 
 ## Minimum sample threshold
 
-`MIN_OBSERVATIONS = 10`, defined once in `app/recovery_intelligence.py`, applied identically to the overall figure, every intervention row and every segment row, and tested at 0, 1, 9, 10 and above.
+`MIN_OBSERVATIONS = 10`, defined once in `app/recovery_intelligence.py`, applied identically to the overall figure, every intervention row and every segment row.
+
+**The threshold counts calibration-eligible terminal outcomes, not verified recoveries.** Ten confirmed recoveries with no authoritative negative outcome is a *zero*-sample population for this purpose, and is reported as insufficient.
+
+Worked examples, all of which are covered by tests:
+
+| Evidence | Observed rate |
+| --- | --- |
+| 10 `RECOVERED`, 0 `NOT_RECOVERED` | insufficient (one-sided population) |
+| 500 `RECOVERED`, 0 `NOT_RECOVERED` | insufficient (still one-sided) |
+| 9 `RECOVERED`, 0 `NOT_RECOVERED` | insufficient |
+| 8 `RECOVERED`, 1 `NOT_RECOVERED` | insufficient (below threshold) |
+| 9 `RECOVERED`, 1 `NOT_RECOVERED` | 90% |
+| 7 `RECOVERED`, 3 `NOT_RECOVERED` | 70% |
+| 10 `RECOVERED`, 10 `NOT_RECOVERED` | 50% |
 
 Below the threshold the API reports `status: INSUFFICIENT_OBSERVATIONS`, `observed_recovery_rate_bps: null` and `calibration_gap_bps: null`, and the UI renders **Insufficient observations**. No conclusion — "inaccurate", "underperforming", "overperforming" — is drawn.
 
-The predicted probability may still be shown where eligible observations exist, because it is a model estimate and does not depend on sample size. Where there are no eligible observations at all there is nothing to average, and the predicted cell is empty rather than filled from a different population.
+The predicted probability may still be shown where calibration-eligible observations exist, because it is a model estimate and does not depend on sample size. Where there are none there is nothing to average, and the predicted cell is empty rather than filled from a different population.
 
 ---
 
@@ -128,9 +182,11 @@ The predicted probability may still be shown where eligible observations exist, 
 
 Grouped by the intervention actually recorded on each execution, so no intervention list is hardcoded and an intervention that was never executed simply does not appear. Per intervention:
 
-attempts · eligible observations · observed recoveries · observed recovery rate · mean predicted rate · calibration gap · average recovered amount · total recovered amount · average expected recovered value.
+attempts · calibration samples · verified recoveries · observed recovery rate · mean predicted rate · calibration gap · average recovered amount · total recovered amount · average expected recovered value.
 
-`attempts` counts every projected execution including ineligible ones; the statistics use only the eligible subset. Observations whose provider reported no amount are **excluded** from the amount averages, never counted as zero.
+`attempts` counts every projected execution including non-eligible ones. Rates use only the calibration-eligible terminal subset, and the same censoring guard applies per row: an intervention whose only terminal outcomes are recoveries reports `INSUFFICIENT_OBSERVATIONS`, never 100%. Samples are never borrowed from another intervention or segment.
+
+Amount figures use the verified recoveries, since money that actually moved can be reported without a settled negative outcome existing. Observations whose provider reported no amount are **excluded** from the amount averages, never counted as zero.
 
 ---
 
@@ -144,7 +200,7 @@ This is deliberately not a general segmentation engine, a feature store, or a cu
 
 ## Expected vs realized value
 
-Where an eligible verified recovery carries **both** a persisted `expected_recovered_value_paise` and a provider-reported amount, the two are summed and shown side by side.
+Where a verified recovery carries **both** a persisted `expected_recovered_value_paise` and a provider-reported amount, the two are summed and shown side by side.
 
 This is **not profit** and **not revenue uplift**. It places a modelled estimate next to what the provider actually reported, for the recoveries where both figures exist. Observations missing either half are excluded, because a comparison missing one side is not a comparison.
 
@@ -171,6 +227,25 @@ Benchmark ground truth is never used as an observed outcome, never used to calib
 A `SIMULATED` intervention can execute successfully and produce **no operational payment outcome whatsoever**, because no provider was contacted and no money moved. Simulated executions are therefore structurally ineligible.
 
 This is the reason the screen will legitimately read *Insufficient observations* on a demo dataset dominated by simulated executions. That is the honest answer. Fabricating a rate from simulated executions — or borrowing the benchmark's hidden outcomes to fill the gap — would be the single most damaging shortcut available here, and it is explicitly forbidden.
+
+---
+
+## What population the figures describe
+
+The projection is driven by the persisted `execution_outcomes` table, so its population is **every execution RecoveryOS has ever recorded** — not a window of recent events. An execution from a year ago is measured exactly like one from this morning.
+
+A safety bound (`DEFAULT_OBSERVATION_LIMIT = 5000`) caps the working set of a single request. It is a bound on one read, not a reporting window, and whenever it actually bites the payload says so rather than presenting a prefix as the whole history:
+
+```json
+"population": {
+  "total_executions": 165,
+  "projected_executions": 165,
+  "limit": 5000,
+  "complete": true
+}
+```
+
+When `complete` is `false`, the UI states that the figures cover a bounded sample of history and must not be read as overall performance. When it is `true`, the figures describe every recorded execution.
 
 ---
 
@@ -208,7 +283,24 @@ There is no feedback → estimator path, no feedback → optimizer path, no feed
 GET /recovery-intelligence[?include_observations=true]
 ```
 
-Read-only, deterministic, derived entirely from persisted records. Returns `calibration`, `interventions`, `segments`, `expected_vs_realized`, an `evidence` block with the ineligibility breakdown, and a `methodology` block naming the authoritative sources. `include_observations` attaches the per-observation rows so any aggregate can be traced back to the exact event, decision, execution and provider evidence it came from.
+Read-only, deterministic, derived entirely from persisted records. Returns `calibration`, `interventions`, `segments`, `expected_vs_realized`, an `evidence` block with the ineligibility breakdown and the population coverage, and a `methodology` block naming the authoritative sources.
+
+The `calibration` block reports verified evidence and calibration separately, so the two can never be confused:
+
+```json
+{
+  "verified_recoveries": 1,
+  "calibration_observations": 0,
+  "recovered_observations": 0,
+  "not_recovered_observations": 0,
+  "has_terminal_negative_evidence": false,
+  "outcome_counts": { "RECOVERED": 1, "PENDING": 1, "UNKNOWN": 163, "NOT_RECOVERED": 0 },
+  "observed_recovery_rate_bps": null,
+  "calibration_gap_bps": null,
+  "status": "INSUFFICIENT_OBSERVATIONS",
+  "status_detail": "no authoritative terminal binary outcome exists yet…"
+}
+``` `include_observations` attaches the per-observation rows so any aggregate can be traced back to the exact event, decision, execution and provider evidence it came from.
 
 No metric is hardcoded anywhere in the backend or the frontend.
 
