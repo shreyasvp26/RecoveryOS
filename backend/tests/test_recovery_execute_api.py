@@ -476,3 +476,49 @@ def test_recovery_execute_uses_the_active_calibration_snapshot(
     assert stage["estimator_mode"] == "CALIBRATED"
     assert stage["estimator_version"] == version
     assert stage["estimator_reason"] == "active_calibration"
+
+
+def _corrupt_snapshot(db_path: str) -> None:
+    """Persist an unreadable snapshot row, driving calibration_unavailable.
+
+    A snapshot row whose ``active_bps_json`` is not valid JSON makes
+    ``load_active_snapshot`` raise inside ``build_production_estimator``, which
+    (already owning fallback semantics) returns the unavailable wrapper rather
+    than raising. This is the legitimate "calibration cannot be read" state, not
+    a route-level exception.
+    """
+    conn = connect(db_path)
+    try:
+        init_db(conn)
+        conn.execute(
+            "INSERT INTO estimator_calibration_snapshots "
+            "(version, built_at, active_bps_json, evidenced_json) "
+            "VALUES (?, ?, ?, ?)",
+            (1, "2026-01-01T00:00:00+00:00", "NOT_JSON", "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_recovery_execute_preserves_calibration_unavailable(
+    monkeypatch, tmp_path
+) -> None:
+    """A calibration-unavailable snapshot stays CALIBRATION_UNAVAILABLE here.
+
+    The recovery route must not collapse a calibration that exists but cannot
+    be read into ``no_calibration_evidence``. The calibration service owns the
+    fallback and reports ``calibration_unavailable``; the route must carry that
+    provenance through to the persisted decision unchanged.
+    """
+    db_path = _seed(monkeypatch, tmp_path, candidates=["retry_delayed", "payment_link"])
+    _corrupt_snapshot(db_path)
+
+    response = client.post("/recovery/evt_ops/execute")
+    assert response.status_code == 200
+    assert response.json()["status"] == "execution_success"
+
+    stage = _latest_optimizer_decision(db_path)
+    assert stage["estimator_mode"] == "BASELINE"
+    assert stage["estimator_version"] is None
+    assert stage["estimator_reason"] == "calibration_unavailable"

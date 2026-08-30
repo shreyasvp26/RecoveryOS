@@ -186,16 +186,15 @@ def execute_from_recovery_queue(
             )
 
     try:
-        # Phase 23 (additive): when an active calibration snapshot exists, the
-        # operator path ranks with calibrated posteriors, exactly as the Phase 7
-        # execute endpoint does; otherwise it keeps the frozen baseline. A read
-        # failure degrades to the baseline rather than guessing a probability,
-        # never altering authorization or execution.
-        estimator = None
-        try:
-            estimator = calibration_service.build_production_estimator(conn)
-        except Exception:
-            estimator = None
+        # Phase 23 (additive): request the production estimator and let the
+        # calibration service own fallback semantics. When calibration is
+        # available it returns the calibrated wrapper; when no snapshot exists
+        # it returns None (-> BASELINE / no_calibration_evidence); when
+        # calibration cannot be read it returns the unavailable wrapper
+        # (-> BASELINE / calibration_unavailable). The route does not interpret
+        # calibration state itself: it never guesses a probability, which would
+        # alter authorization or execution.
+        estimator = calibration_service.build_production_estimator(conn)
         result = execute_event(
             conn, event_id, now, config, razorpay_client, estimator=estimator
         )
