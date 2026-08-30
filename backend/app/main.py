@@ -9,6 +9,8 @@ Phase 20: the Revenue Health endpoints, which derive revenue-degradation
 incidents from the persisted workload and persist nothing. Phase 21: the
 Recovery Operations endpoints, which project the persisted decision records
 into an operational queue and expose the operator execution entry point.
+Phase 22: the read-only Recovery Intelligence endpoint, which measures the
+persisted predictions against verified outcomes and changes nothing.
 No RecoveryOS business logic beyond event ingestion; the dashboard routes hold
 no decision logic and only READ persisted state.
 """
@@ -18,6 +20,7 @@ from fastapi import FastAPI
 from .routes.dashboard import router as dashboard_router
 from .routes.events import router as events_router
 from .routes.incidents import router as incidents_router
+from .routes.intelligence import router as intelligence_router
 from .routes.recovery import router as recovery_router
 from .routes.replay import router as replay_router
 from .routes.webhook import router as webhook_router
@@ -29,6 +32,7 @@ app.include_router(webhook_router)
 app.include_router(replay_router)
 app.include_router(incidents_router)
 app.include_router(recovery_router)
+app.include_router(intelligence_router)
 
 HEALTH_RESPONSE = {"status": "ok"}
 
