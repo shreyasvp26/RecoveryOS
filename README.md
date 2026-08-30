@@ -85,7 +85,7 @@ cd backend
 uvicorn app.main:app --reload
 ```
 
-Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`.
+Health check: `http://127.0.0.1:8000/health` returns `{"status": "ok"}`. For an operator readiness check use `http://127.0.0.1:8000/health/ready`, which reports whether the SQLite database is usable and whether each external integration (Razorpay Test Mode, Razorpay webhook, OmniRoute classifier) is configured — as booleans only, never exposing any credential value.
 
 ## Environment & Configuration
 
