@@ -195,6 +195,40 @@ CREATE TABLE IF NOT EXISTS execution_claims (
 )
 """
 
+# Phase 23: the durable, provider-observed evidence store for calibration. A
+# row records the TERMINAL settled outcome of one REAL_RAZORPAY payment_link as
+# observed either by the provider poll (a ``paid`` or ``expired`` status) after
+# no verified webhook recovery existed. payment_link_id is the correlation key
+# and PRIMARY KEY, so each link contributes at most ONE terminal observation
+# (SQLite enforces the dedup, not application state). PENDING/UNKNOWN outcomes
+# are never stored here: they are not samples. Positive evidence continues to
+# live authoritatively in webhook_recovery_outcomes; this store holds the
+# provider-polled terminal outcomes that the webhook never reported. It is an
+# OUTCOME/EVIDENCE store only and never drives execution.
+_PROVIDER_PAYMENT_LINK_OUTCOMES_DDL = """
+CREATE TABLE IF NOT EXISTS provider_payment_link_outcomes (
+    payment_link_id TEXT PRIMARY KEY,
+    event_id        TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    outcome         TEXT NOT NULL,
+    observed_at     TEXT NOT NULL
+)
+"""
+
+# Phase 23: the append-only, immutable, versioned calibration snapshot store.
+# Each build appends exactly one row (version 1, 2, ...) holding the gated
+# intervention posteriors and their evidence. Historical snapshots are never
+# overwritten, so the estimator's state at any build time is reconstructable,
+# and historical decisions are never rewritten.
+_ESTIMATOR_CALIBRATION_SNAPSHOTS_DDL = """
+CREATE TABLE IF NOT EXISTS estimator_calibration_snapshots (
+    version          INTEGER PRIMARY KEY,
+    built_at         TEXT NOT NULL,
+    active_bps_json  TEXT NOT NULL,
+    evidenced_json   TEXT NOT NULL
+)
+"""
+
 
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection to the given database path.
@@ -228,6 +262,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_WEBHOOK_RECOVERY_OUTCOMES_DDL)
         conn.execute(_OPTIMIZER_DECISIONS_DDL)
         conn.execute(_EXECUTION_CLAIMS_DDL)
+        conn.execute(_PROVIDER_PAYMENT_LINK_OUTCOMES_DDL)
+        conn.execute(_ESTIMATOR_CALIBRATION_SNAPSHOTS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         conn.commit()
     except sqlite3.Error:
@@ -1484,3 +1520,169 @@ def get_webhook_recovery_outcome_by_payment_link_id(
     if row is None:
         return None
     return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Phase 23 calibration evidence + snapshot persistence (append-only).
+#
+# ``provider_payment_link_outcomes`` records the terminal provider-polled
+# outcome of a REAL_RAZORPAY payment_link (paid / expired) as durable calibration
+# evidence, each link once (payment_link_id PRIMARY KEY). Positive webhook
+# evidence continues to live in webhook_recovery_outcomes.
+#
+# ``estimator_calibration_snapshots`` is append-only and versioned; a build
+# inserts exactly one immutable row and never updates or deletes a past one.
+# ---------------------------------------------------------------------------
+
+
+def insert_provider_payment_link_outcome(
+    conn: sqlite3.Connection,
+    *,
+    payment_link_id: str,
+    event_id: str,
+    status: str,
+    outcome: str,
+    observed_at: str,
+) -> bool:
+    """Record one terminal provider-polled outcome for a Payment Link.
+
+    Idempotent (INSERT OR IGNORE keyed on payment_link_id): the same link can
+    never contribute a second terminal sample, whether discovered by webhook
+    or by poll. Returns True when this call inserted the row, False when it
+    already existed. sqlite3.Error (other than the ignored unique violation)
+    propagates as a persistence failure.
+    """
+    if not isinstance(payment_link_id, str) or not payment_link_id.strip():
+        raise TypeError("payment_link_id must be a non-empty string")
+    try:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO provider_payment_link_outcomes (
+                payment_link_id, event_id, status, outcome, observed_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (payment_link_id, event_id, status, outcome, observed_at),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def get_provider_payment_link_outcome(
+    conn: sqlite3.Connection, payment_link_id: str
+) -> dict[str, Any] | None:
+    """Retrieve the persisted terminal provider outcome for a link, or None."""
+    row = conn.execute(
+        "SELECT * FROM provider_payment_link_outcomes WHERE payment_link_id = ?",
+        (payment_link_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def get_provider_payment_link_outcomes_for_links(
+    conn: sqlite3.Connection, payment_link_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return payment_link_id -> its persisted terminal provider outcome."""
+    if not payment_link_ids:
+        return {}
+    rows: list[sqlite3.Row] = []
+    chunk_size = 400
+    for start in range(0, len(payment_link_ids), chunk_size):
+        chunk = payment_link_ids[start : start + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT * FROM provider_payment_link_outcomes
+                WHERE payment_link_id IN ({placeholders})
+                """,
+                chunk,
+            )
+        )
+    return {row["payment_link_id"]: dict(row) for row in rows}
+
+
+def count_provider_payment_link_outcomes(conn: sqlite3.Connection) -> int:
+    """Count persisted terminal provider-polled outcomes."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM provider_payment_link_outcomes"
+    ).fetchone()
+    return int(row["c"])
+
+
+def insert_calibration_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    version: int,
+    built_at: str,
+    active_bps_json: str,
+    evidenced_json: str,
+) -> None:
+    """Append one immutable, versioned calibration snapshot.
+
+    Append-only: version is the PRIMARY KEY, so inserting an already-existing
+    version raises sqlite3.IntegrityError. Historical snapshots are never
+    overwritten or deleted.
+    """
+    try:
+        conn.execute(
+            """
+            INSERT INTO estimator_calibration_snapshots (
+                version, built_at, active_bps_json, evidenced_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (int(version), built_at, active_bps_json, evidenced_json),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def _snapshot_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "version": int(row["version"]),
+        "built_at": row["built_at"],
+        "active_bps": json.loads(row["active_bps_json"]),
+        "evidenced": json.loads(row["evidenced_json"]),
+    }
+
+
+def get_calibration_snapshot(
+    conn: sqlite3.Connection, version: int
+) -> dict[str, Any] | None:
+    """Retrieve one immutable calibration snapshot by version, or None."""
+    row = conn.execute(
+        "SELECT * FROM estimator_calibration_snapshots WHERE version = ?",
+        (int(version),),
+    ).fetchone()
+    if row is None:
+        return None
+    return _snapshot_row_to_dict(row)
+
+
+def list_calibration_snapshots(
+    conn: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    """Return every persisted calibration snapshot, oldest first."""
+    rows = conn.execute(
+        "SELECT * FROM estimator_calibration_snapshots ORDER BY version ASC"
+    ).fetchall()
+    return [_snapshot_row_to_dict(row) for row in rows]
+
+
+def get_latest_calibration_snapshot(
+    conn: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    """Return the most recently appended calibration snapshot, or None."""
+    row = conn.execute(
+        "SELECT * FROM estimator_calibration_snapshots "
+        "ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    return _snapshot_row_to_dict(row)
