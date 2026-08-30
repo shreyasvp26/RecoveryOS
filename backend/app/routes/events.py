@@ -357,13 +357,14 @@ def execute_event_endpoint(
     try:
         # Phase 23 (additive): when an active calibration snapshot exists, the
         # production chain ranks with calibrated posteriors; otherwise it keeps
-        # the frozen baseline. A read failure degrades to the baseline rather
-        # than guessing a probability, never altering authorization or execution.
-        estimator = None
-        try:
-            estimator = calibration_service.build_production_estimator(conn)
-        except Exception:
-            estimator = None
+        # the frozen baseline. The calibration service owns fallback semantics:
+        # when calibration is available it returns the calibrated wrapper; when
+        # no snapshot exists it returns None (-> BASELINE / no_calibration_evidence);
+        # when calibration cannot be read it returns the unavailable wrapper
+        # (-> BASELINE / calibration_unavailable). The route does not interpret
+        # calibration state itself: it never guesses a probability, which would
+        # alter authorization or execution.
+        estimator = calibration_service.build_production_estimator(conn)
         result = execute_event(conn, event_id, now, config, razorpay_client, estimator=estimator)
     except (EconomicsError, OptimizerError, OptimizerAuditError) as exc:
         # An unusable estimate, an unusable economic decision, or an
