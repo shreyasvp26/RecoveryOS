@@ -31,6 +31,7 @@ from ..classifier import (
     classify_event,
 )
 from ..config import build_policy_config, build_razorpay_client
+from .. import calibration_service
 from ..db import (
     connect_database,
     get_classification_result,
@@ -354,7 +355,16 @@ def execute_event_endpoint(
     an arbitrary intervention and never trusts client-supplied authorization.
     """
     try:
-        result = execute_event(conn, event_id, now, config, razorpay_client)
+        # Phase 23 (additive): when an active calibration snapshot exists, the
+        # production chain ranks with calibrated posteriors; otherwise it keeps
+        # the frozen baseline. A read failure degrades to the baseline rather
+        # than guessing a probability, never altering authorization or execution.
+        estimator = None
+        try:
+            estimator = calibration_service.build_production_estimator(conn)
+        except Exception:
+            estimator = None
+        result = execute_event(conn, event_id, now, config, razorpay_client, estimator=estimator)
     except (EconomicsError, OptimizerError, OptimizerAuditError) as exc:
         # An unusable estimate, an unusable economic decision, or an
         # unrecordable one. Each stops the flow before the executor runs, and

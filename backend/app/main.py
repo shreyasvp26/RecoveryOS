@@ -18,6 +18,7 @@ no decision logic and only READ persisted state.
 from fastapi import FastAPI
 
 from .routes.dashboard import router as dashboard_router
+from .routes.estimation import router as estimation_router
 from .routes.events import router as events_router
 from .routes.incidents import router as incidents_router
 from .routes.intelligence import router as intelligence_router
@@ -33,6 +34,7 @@ app.include_router(replay_router)
 app.include_router(incidents_router)
 app.include_router(recovery_router)
 app.include_router(intelligence_router)
+app.include_router(estimation_router)
 
 HEALTH_RESPONSE = {"status": "ok"}
 

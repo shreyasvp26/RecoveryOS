@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import './App.css'
 import CommandCenter from './components/CommandCenter.jsx'
+import EstimatorEvidence from './components/EstimatorEvidence.jsx'
 import EventTrace from './components/EventTrace.jsx'
 import PolicyBlocks from './components/PolicyBlocks.jsx'
 import PolicyLab from './components/PolicyLab.jsx'
@@ -17,6 +18,12 @@ const NAV = [
     label: 'Recovery Intelligence',
     icon: '◎',
     Component: RecoveryIntelligence,
+  },
+  {
+    key: 'estimate',
+    label: 'Estimator Evidence',
+    icon: '≈',
+    Component: EstimatorEvidence,
   },
   { key: 'trace', label: 'Event Decision Trace', icon: '◈', Component: EventTrace },
   { key: 'blocks', label: 'Policy & Blocks', icon: '⛔', Component: PolicyBlocks },

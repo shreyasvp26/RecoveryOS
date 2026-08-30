@@ -8,9 +8,11 @@ import pytest
 
 from app.razorpay_client import (
     PaymentLinkResult,
+    PaymentLinkStatus,
     RazorpayConfigurationError,
     RazorpayExecutionError,
     RazorpayPaymentLinkClient,
+    RazorpayResultUnknownError,
     RazorpayUnexpectedResponseError,
     reference_id_from,
 )
@@ -30,6 +32,16 @@ class FakeSdk:
 
     def create(self, data: dict[str, Any]) -> Any:
         self.calls.append(data)
+        if self.raises is not None:
+            raise self.raises
+        if self.responses:
+            response = self.responses.pop(0)
+            if response is not ...:
+                return response
+        return self.responses
+
+    def fetch(self, link_id: str) -> Any:
+        self.calls.append({"fetch": link_id})
         if self.raises is not None:
             raise self.raises
         if self.responses:
@@ -203,3 +215,61 @@ def test_reference_id_sanitized_for_razorpay() -> None:
     assert len(reference_id_from(long_id)) == 40
     with pytest.raises(ValueError):
         reference_id_from("_")
+
+
+# ---------------------------------------------------------------------------
+# Phase 23: GET Payment Link (provider status evidence read)
+# ---------------------------------------------------------------------------
+
+
+def test_get_payment_link_returns_observed_status() -> None:
+    sdk = FakeSdk(responses=[{"id": "plink_ABC", "status": "paid"}])
+    status = _client(sdk).get_payment_link("plink_ABC")
+    assert isinstance(status, PaymentLinkStatus)
+    assert status.link_id == "plink_ABC"
+    assert status.status == "paid"
+
+
+def test_get_payment_link_returns_full_status_vocabulary() -> None:
+    for status in ("created", "partially_paid", "expired", "cancelled"):
+        sdk = FakeSdk(responses=[{"id": "plink_S", "status": status}])
+        assert _client(sdk).get_payment_link("plink_S").status == status
+
+
+def test_get_payment_link_attaches_requested_id_not_response_id() -> None:
+    # The requested id is authoritative even if the response disagrees.
+    sdk = FakeSdk(responses=[{"id": "plink_OTHER", "status": "paid"}])
+    status = _client(sdk).get_payment_link("plink_REQUESTED")
+    assert status.link_id == "plink_REQUESTED"
+
+
+def test_get_payment_link_rejects_missing_status_as_unexpected() -> None:
+    sdk = FakeSdk(responses=[{"id": "plink_A"}])
+    with pytest.raises(RazorpayUnexpectedResponseError):
+        _client(sdk).get_payment_link("plink_A")
+
+
+def test_get_payment_link_rejects_non_object_response() -> None:
+    sdk = FakeSdk(responses=[None])
+    with pytest.raises(RazorpayUnexpectedResponseError):
+        _client(sdk).get_payment_link("plink_A")
+
+
+def test_get_payment_link_invalid_id_is_explicit() -> None:
+    with pytest.raises(RazorpayExecutionError):
+        _client(FakeSdk()).get_payment_link("")
+
+
+def test_get_payment_link_unreadable_provider_is_unknown_not_failed() -> None:
+    # A timeout/connection error is an UNKNOWN outcome, not a definitive one.
+    sdk = FakeSdk(raises=RuntimeError("connection reset"))
+    with pytest.raises(RazorpayResultUnknownError):
+        _client(sdk).get_payment_link("plink_A")
+
+
+def test_get_payment_link_provider_exception_text_stays_contained() -> None:
+    marker = "SECRET_MARKER"
+    sdk = FakeSdk(raises=RuntimeError(marker))
+    with pytest.raises(RazorpayResultUnknownError) as exc_info:
+        _client(sdk).get_payment_link("plink_A")
+    assert marker not in str(exc_info.value)

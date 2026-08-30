@@ -260,6 +260,7 @@ def select_for_strategy(
     classification: ClassificationResult,
     decisions: Mapping[str, PolicyDecision],
     strategy: str,
+    estimator: RecoveryProbabilityEstimator | None = None,
 ) -> tuple[str, OptimizerDecision | None]:
     """Choose one intervention from the policy-authorized candidates.
 
@@ -272,6 +273,13 @@ def select_for_strategy(
     pure — no database, no execution, no provider — so the benchmark can reuse
     it without borrowing the persistence and Razorpay boundary that
     ``execute_event`` necessarily carries.
+
+    Phase 23 (additive): ``estimator`` may inject the calibration-driven
+    adaptive estimator. When omitted (the default), the frozen Phase 16
+    ``RecoveryProbabilityEstimator`` is used, so existing V1/V2 benchmark and
+    replay arms reproduce their recorded results exactly. The optimizer's rule
+    and the policy authorization boundary are unchanged; the estimator only
+    ranks, it never authorizes or executes.
     """
     if strategy == SELECTION_V2_ECONOMIC:
         # The optimizer only ever sees candidates the policy gate authorized:
@@ -281,7 +289,7 @@ def select_for_strategy(
             classification.candidate_interventions, decisions
         )
         decision = EconomicInterventionOptimizer(
-            estimator=RecoveryProbabilityEstimator(),
+            estimator=estimator or RecoveryProbabilityEstimator(),
             model=DEFAULT_ECONOMIC_MODEL,
         ).select(event, classification, allowed_candidates)
         return decision.selected_intervention, decision
@@ -305,6 +313,7 @@ def execute_event(
     config: PolicyConfig,
     razorpay_client: object | None,
     selection_strategy: str = SELECTION_V2_ECONOMIC,
+    estimator: RecoveryProbabilityEstimator | None = None,
 ) -> ExecutionServiceResult:
     """Run the deterministic selection + bounded execution flow for one event.
 
@@ -314,6 +323,12 @@ def execute_event(
     reproducible and the V2 arm can be introduced deliberately in Phase 17
     against a signal-bearing outcome model. The strategy affects RANKING ONLY:
     it can never widen the authorized set.
+
+    Phase 23 (additive): ``estimator`` may inject the calibration-driven
+    adaptive estimator through to ``select_for_strategy``. Omitted (the default)
+    preserves the frozen Phase 16 behaviour exactly. Only the estimator that
+    produces ranking probabilities is swapped; policy authorization, the
+    optimizer rule, and the executor are unchanged.
     """
     event = get_payment_event(conn, event_id)
     if event is None:
@@ -343,7 +358,7 @@ def execute_event(
         decisions[candidate] = _persist_decision(conn, decision)
 
     selected, optimizer_decision = select_for_strategy(
-        event, classification, decisions, selection_strategy
+        event, classification, decisions, selection_strategy, estimator
     )
     if optimizer_decision is not None:
         # Audit before action: the economic decision exists independently of

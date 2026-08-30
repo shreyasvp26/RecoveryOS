@@ -108,6 +108,30 @@ class PaymentLinkResult:
                 )
 
 
+@dataclass(frozen=True)
+class PaymentLinkStatus:
+    """The provider-observed status of one Payment Link (Test Mode read).
+
+    Phase 23: the boundary answers only "what did the provider say this link's
+    status is?". It does not interpret the status into a recovery outcome — that
+    mapping lives in the calibration module where the terminal contract is
+    owned. ``status`` is the raw Razorpay status string (e.g. ``paid``,
+    ``expired``, ``created``, ``partially_paid``, ``cancelled``); ``link_id``
+    echoes the requested id so a caller can never misattribute a response.
+    """
+
+    link_id: str
+    status: str
+
+    def __post_init__(self) -> None:
+        for name in ("link_id", "status"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise RazorpayUnexpectedResponseError(
+                    f"payment link {name} must be a non-empty string"
+                )
+
+
 def reference_id_from(event_id: str) -> str:
     """Build a Razorpay-compatible unique reference from an event_id.
 
@@ -235,3 +259,45 @@ class RazorpayPaymentLinkClient:
         # The URL is returned exactly as provided by Razorpay; it is never
         # generated, guessed, or cached on the client side.
         return PaymentLinkResult(id=link_id, short_url=short_url)
+
+    def get_payment_link(self, link_id: str) -> PaymentLinkStatus:
+        """Read the provider-observed status of one Payment Link (Test Mode).
+
+        Phase 23 evidence read. This is a STRICTLY read-only provider call: it
+        creates nothing, changes nothing provider-side, and its result is only
+        ever used to observe what happened to a link RecoveryOS already created.
+        It never authorizes and never executes an intervention.
+
+        A failure — invalid id, network error, provider rejection, or an
+        unexpected response — surfaces as an explicit ``RazorpayError`` and
+        never as a fabricated status. The caller is responsible for mapping any
+        raised error to an unknown outcome.
+        """
+        if not isinstance(link_id, str) or not link_id.strip():
+            raise RazorpayExecutionError("payment link id must be a non-empty string")
+
+        try:
+            response = self._sdk.payment_link.fetch(link_id)
+        except RazorpayError:
+            raise
+        except Exception as exc:
+            # Fail conservatively on the same axis as creation: only a proven
+            # refusal is a plain failure; anything unreadable is an unknown
+            # provider result, because the link may exist in a state RecoveryOS
+            # could not read.
+            if _is_definitive_provider_rejection(exc):
+                raise RazorpayExecutionError("razorpay_api_error") from exc
+            raise RazorpayResultUnknownError("razorpay_api_error") from exc
+
+        if not isinstance(response, dict):
+            raise RazorpayUnexpectedResponseError(
+                "razorpay_api_unexpected_response: response was not an object"
+            )
+        status = response.get("status")
+        if not isinstance(status, str) or not status.strip():
+            raise RazorpayUnexpectedResponseError(
+                "razorpay_api_unexpected_response: payment link status missing"
+            )
+        # The id in the response is never trusted over the requested id: the
+        # request names the link, and the response is attributed to it.
+        return PaymentLinkStatus(link_id=link_id, status=status)

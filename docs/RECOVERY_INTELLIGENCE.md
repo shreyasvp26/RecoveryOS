@@ -77,6 +77,16 @@ A failed execution is a failed *intervention*, not an observed payment failure. 
 
 **This is the single most important limitation of Phase 22 and it is stated again below.**
 
+> **Phase 23 note.** This Projection — `outcome_feedback` → Recovery Intelligence —
+> remains strictly webhook-based and still never emits `NOT_RECOVERED`; the rule
+> above is unchanged. Phase 23 adds a **separate** calibration layer
+> (`docs/ADAPTIVE_ESTIMATION.md`) that independently accepts a provider-confirmed
+> `expired` as an authoritative negative *calibration* outcome via an additive
+> read-only `get_payment_link` poll. That is a distinct system: the intelligence
+> projection and the calibration evidence feed different consumers and are never
+> conflated. `NOT_RECOVERED` is still never inferred from absence in either layer —
+> an `expired` status must be observed from the provider.
+
 ---
 
 ## A verified recovery is not a recovery rate

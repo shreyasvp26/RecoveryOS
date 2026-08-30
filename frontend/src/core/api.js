@@ -117,3 +117,14 @@ export const executeRecovery = (eventId) =>
  * change a decision.
  */
 export const recoveryIntelligence = (params) => get('/recovery-intelligence', params)
+/**
+ * Estimator evidence — the calibration-driven adaptive estimator's state.
+ *
+ * Estimator evidence is read-only unless the operator explicitly triggers a
+ * recalibrate, which appends ONE new immutable, versioned snapshot. It never
+ * executes or authorizes anything; it only changes the probabilities that rank
+ * policy-allowed decisions, and only when the evidence gate is met.
+ */
+export const estimatorEvidence = () => get('/estimator-evidence')
+export const recalibrateEstimator = () =>
+  post('/estimator-evidence/recalibrate', {})
