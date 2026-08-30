@@ -22,9 +22,16 @@ from . import db
 from .adaptive_estimation import CalibrationSnapshot
 from .calibration import (
     OUTCOME_RECOVERED,
+    CalibrationError,
+    CalibrationObservation,
+    EVIDENCE_SOURCE_PROVIDER_POLL,
+    EVIDENCE_SOURCE_WEBHOOK,
+    TERMINAL_OUTCOMES,
     calibrate,
     calibration_samples,
+    canonical_terminal_outcome,
     outcome_counts,
+    validate_provider_outcome,
 )
 
 # The ONLY intervention calibration ever applies to: REAL_RAZORPAY payment_link.
@@ -65,11 +72,12 @@ def _reconcile_provider_outcomes(
 
     A link with a verified webhook recovery is already settled positive and is
     never re-polled. For every other link, a read-only provider poll resolves
-    the current status; a TERMINAL result (paid/expired) is persisted once into
-    ``provider_payment_link_outcomes`` (idempotent, keyed by link id). Non-
-    terminal (created/partially_paid) and unreadable (cancelled/failure) results
-    are never persisted: they are not samples. Returns the merged terminal
-    provider-outcome mapping for the projection.
+    the current status; a TERMINAL canonical result (``paid``/``expired``) is
+    validated against the provider contract and only then persisted once into
+    ``provider_payment_link_outcomes`` (idempotent, keyed by link id).
+    Non-terminal (``created``/``partially_paid``) and unreadable
+    (``cancelled``/failure) results are never persisted: they are not samples.
+    Returns the merged terminal provider-outcome mapping for the projection.
     """
     # Include the already-persisted terminal provider outcomes.
     link_ids = [row["payment_link_id"] for row in executions]
@@ -84,21 +92,30 @@ def _reconcile_provider_outcomes(
     if provider is None:
         return existing
 
-    from .calibration import map_provider_status
-
+    # Only a provider-polled TERMINAL status may be persisted. A malformed or
+    # contradicting provider observation is excluded here, at the write
+    # boundary, so corrupt rows never reach the durable store.
     for link_id in unresolved:
         try:
             status = provider.get_payment_link(link_id).status
         except Exception:
             continue
-        outcome = map_provider_status(status)
-        if outcome not in (OUTCOME_RECOVERED, "NOT_RECOVERED"):
+        if not isinstance(status, str):
+            continue
+        outcome = canonical_terminal_outcome(status)
+        if outcome is None:
             # PENDING / UNKNOWN are not terminal samples; do not persist.
             continue
         event_id = next(
-            (row["event_id"] for row in executions if row["payment_link_id"] == link_id),
+            (str(row["event_id"]) for row in executions if row["payment_link_id"] == link_id),
             "",
         )
+        if not event_id:
+            continue
+        try:
+            validate_provider_outcome(status, outcome)
+        except CalibrationError:
+            continue
         try:
             db.insert_provider_payment_link_outcome(
                 conn,
@@ -114,41 +131,103 @@ def _reconcile_provider_outcomes(
     return existing
 
 
+def _events_with_prediction(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> set[str]:
+    """The events that carry a persisted payment_link prediction.
+
+    Calibration evidence is sampled per REAL_RAZORPAY payment_link execution,
+    and such an execution is only meaningfully observable when the decision that
+    predicted it is durably recorded. An execution with NO persisted decision
+    (e.g. a synthetic/testing row, or a non-economic selection path that left no
+    prediction) is missing the prediction that drove it and is excluded rather
+    than calibrated against an outcome it never predicted.
+    """
+    if not event_ids:
+        return set()
+    decisions = db.get_optimizer_decisions_for_events(
+        conn, [str(event_id) for event_id in event_ids]
+    )
+    return {
+        event_id
+        for event_id, rows in decisions.items()
+        if any(
+            str(row.get("selected_intervention")) == PAYMENT_LINK_INTERVENTION
+            for row in rows
+        )
+    }
+
+
 def build_calibration_observations(
     conn: sqlite3.Connection,
     provider: Any,
     observed_at: str | None = None,
-) -> list[Any]:
+) -> list[CalibrationObservation]:
     """Project the durable calibration evidence into calibration observations.
 
-    Positive outcomes come from the authoritative webhook recoveries; negative
-    and poll-discovered outcomes come from the durable provider store (freshly
-    reconciled via a read-only poll). Only REAL_RAZORPAY payment_link successes
-    are considered. Returns ``CalibrationObservation`` objects.
-    """
-    from .calibration import (
-        EVIDENCE_SOURCE_WEBHOOK,
-        EVIDENCE_SOURCE_PROVIDER_POLL,
-        TERMINAL_OUTCOMES,
-        CalibrationObservation,
-    )
+    THE single authoritative projection path for Phase 23 evidence: execution
+    rows (REAL_RAZORPAY payment_link SUCCESS, link present) are intersected
+    with the events that carried a persisted payment_link prediction, resolved
+    against verified webhook recoveries (authoritative positive) or validated,
+    durable provider-polled terminal outcomes, and emitted as at most ONE
+    observation PER PAYMENT LINK — never per execution row.
 
+    Every persisted evidence row is validated before it can enter a sample:
+
+      * the execution must be REAL_RAZORPAY, payment_link, SUCCESS, with a link;
+      * the event must carry a persisted payment_link prediction;
+      * a webhook recovery is authoritative positive ONLY when it is tied to
+        that exact execution's event;
+      * a provider outcome is admitted ONLY when its status is recognized, its
+        outcome is the canonical mapping, and its event matches the execution;
+      * a link appears at most once, so duplicates cannot inflate samples;
+      * a verified recovery wins over any contradictory provider-polled outcome
+        (authoritative chronology: a provider-confirmed payment or the webhook
+        that proves it);
+
+    Anything malformed — an unknown status, a contradictory status/outcome
+    pair, a linked-to-another-execution row, a simulated/failed/foreign
+    execution — is excluded outright. NOT_RECOVERED is never inferred.
+    """
     executions = _executed_links(conn)
-    link_ids = [row["payment_link_id"] for row in executions]
+    if not executions:
+        return []
+
+    predicted = _events_with_prediction(
+        conn, [str(row["event_id"]) for row in executions]
+    )
+    eligible = [
+        row for row in executions if str(row["event_id"]) in predicted
+    ]
+    if not eligible:
+        return []
+
+    link_ids = [row["payment_link_id"] for row in eligible]
     webhook_recoveries = db.get_webhook_recovery_outcomes_for_payment_links(
         conn, link_ids
     )
     observed = observed_at or datetime.now(timezone.utc).isoformat()
     provider_outcomes = _reconcile_provider_outcomes(
-        conn, executions, webhook_recoveries, observed, provider
+        conn, eligible, webhook_recoveries, observed, provider
     )
 
+    # One observation per Payment Link, never per execution row: the durable
+    # evidence is keyed by link, so a link that appears in several executions
+    # contributes at most ONE terminal sample to the calibration rate.
+    by_link: dict[str, dict[str, Any]] = {}
+    for execution in eligible:
+        by_link.setdefault(execution["payment_link_id"], execution)
+
     observations: list[CalibrationObservation] = []
-    for execution in executions:
-        link_id = execution["payment_link_id"]
+    for link_id, execution in by_link.items():
         event_id = str(execution["event_id"])
         recovery = webhook_recoveries.get(link_id)
         if recovery is not None:
+            # A verified webhook recovery is authoritative positive evidence and
+            # settles any provider-polled outcome for this link. It is admitted
+            # only when it is tied to the eligible execution's event.
+            if str(recovery.get("referenced_event_id")) != event_id:
+                continue
             observations.append(
                 CalibrationObservation(
                     event_id=event_id,
@@ -163,19 +242,32 @@ def build_calibration_observations(
             )
             continue
         provider_outcome = provider_outcomes.get(link_id)
-        if provider_outcome is not None:
-            observations.append(
-                CalibrationObservation(
-                    event_id=event_id,
-                    intervention=PAYMENT_LINK_INTERVENTION,
-                    outcome=str(provider_outcome["outcome"]),
-                    terminal=(provider_outcome["outcome"] in TERMINAL_OUTCOMES),
-                    amount_paid_paise=None,
-                    observed_at=provider_outcome.get("observed_at"),
-                    evidence_id=None,
-                    evidence_source=EVIDENCE_SOURCE_PROVIDER_POLL,
-                )
+        if provider_outcome is None:
+            continue
+        # The outcome must belong to THIS execution, not to a different one
+        # that happens to share the link id.
+        if str(provider_outcome.get("event_id")) != event_id:
+            continue
+        try:
+            outcome = validate_provider_outcome(
+                provider_outcome.get("status"), str(provider_outcome["outcome"])
             )
+        except CalibrationError:
+            # Malformed or contradictory persisted evidence is excluded, never
+            # guessed and never turned into a negative sample.
+            continue
+        observations.append(
+            CalibrationObservation(
+                event_id=event_id,
+                intervention=PAYMENT_LINK_INTERVENTION,
+                outcome=outcome,
+                terminal=outcome in TERMINAL_OUTCOMES,
+                amount_paid_paise=None,
+                observed_at=provider_outcome.get("observed_at"),
+                evidence_id=None,
+                evidence_source=EVIDENCE_SOURCE_PROVIDER_POLL,
+            )
+        )
     return observations
 
 
@@ -283,13 +375,34 @@ def build_production_estimator(
 ) -> Any | None:
     """Build the estimator the production decision chain should use, or None.
 
-    Returns a ``CalibratedRecoveryProbabilityEstimator`` when the latest
-    snapshot has at least one active (gated) intervention, so production ranks
-    with calibrated posteriors; otherwise returns None, meaning the chain keeps
-    the frozen baseline estimator unchanged. Read-only.
+    The decision chain is never allowed to guess a probability, so every state
+    here degrades to the frozen baseline — the ONLY thing that changes is the
+    observable provenance recorded on the decision:
+
+    * No snapshot has ever been built -> ``None``: the chain keeps the plain
+      frozen baseline and decisions record ``BASELINE / no_calibration_evidence``.
+    * A snapshot exists (whether or not any intervention is active) -> the
+      calibrated wrapper: active posteriors rank when their gate is met, every
+      other intervention ranks on its baseline, and decisions record
+      ``CALIBRATED`` or ``BASELINE / threshold_not_met`` accordingly.
+    * The latest snapshot is corrupt/unreadable or the read failed -> a wrapper
+      flagged unavailable: behaviour is identical to the baseline, but decisions
+      record ``BASELINE / calibration_unavailable`` so the fallback is observable.
+
+    This function never raises; a read/parse failure is surfaced through the
+    wrapper's provenance rather than as execution failure.
     """
-    snapshot = load_active_snapshot(conn)
-    if snapshot is None or not snapshot.active_bps:
+    try:
+        snapshot = load_active_snapshot(conn)
+    except Exception:
+        # Calibration could not be read or parsed. Decision behaviour stays on
+        # the baseline; only the recorded reason says it was unavailable.
+        from .adaptive_estimation import CalibratedRecoveryProbabilityEstimator
+
+        return CalibratedRecoveryProbabilityEstimator(
+            baseline=None, snapshot=None, available=False
+        )
+    if snapshot is None:
         return None
     from .adaptive_estimation import CalibratedRecoveryProbabilityEstimator
 

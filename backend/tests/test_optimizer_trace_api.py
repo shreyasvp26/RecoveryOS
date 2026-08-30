@@ -245,7 +245,15 @@ def test_the_economic_stage_exposes_only_estimated_fields(db_conn) -> None:
         "candidates_considered",
         "allowed_candidates",
         "evaluations",
+        "estimator_mode",
+        "estimator_version",
+        "estimator_reason",
     }
+    # Phase 23 hardening: a decision records WHICH estimator produced it. The
+    # trace runs the plain baseline, so the record must be honest about that.
+    assert stage["estimator_mode"] == "LEGACY_BASELINE" or stage["estimator_mode"] == "BASELINE"
+    if stage["estimator_mode"] == "CALIBRATED":
+        assert stage["estimator_version"] >= 1
     for item in stage["evaluations"]:
         assert set(item) == {
             "intervention",

@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from .adaptive_estimation import REASON_LEGACY
 from .economics import CandidateEvaluation
 from .optimizer import OptimizerDecision
 
@@ -44,6 +45,11 @@ _EVALUATION_FIELDS: tuple[str, ...] = (
     "friction_cost_paise",
     "expected_value_paise",
 )
+
+# The provenance a decision recorded before Phase 23 hardening. A pre-hardening
+# decision could not have used calibration, so it is never reconstructed as
+# calibrated: mode is LEGACY_BASELINE and there is no estimator version.
+_LEGACY_MODE = "LEGACY_BASELINE"
 
 
 class OptimizerAuditError(Exception):
@@ -86,6 +92,9 @@ class OptimizerDecisionRecord:
     candidates_considered: tuple[str, ...]
     allowed_candidates: tuple[str, ...]
     evaluations: tuple[CandidateEvaluation, ...]
+    estimator_mode: str = _LEGACY_MODE
+    estimator_version: int | None = None
+    estimator_reason: str = REASON_LEGACY
 
     def __post_init__(self) -> None:
         _require_identifier(self.event_id, "event_id")
@@ -124,16 +133,64 @@ class OptimizerDecisionRecord:
                     f"allowed candidate {candidate!r} was never considered"
                 )
 
+        self._validate_estimator_provenance()
+
+    def _validate_estimator_provenance(self) -> None:
+        """Reject an impossible estimator provenance on a persisted decision.
+
+        A CALIBRATED decision must name the exact snapshot version it used; a
+        BASELINE decision must not pretend it used a version it could not have
+        (version stays None for a no-snapshot or unavailable baseline, and is
+        allowed only when the baseline was reached under a known snapshot whose
+        gate was simply not met).
+        """
+        mode = self.estimator_mode
+        if not isinstance(mode, str) or not mode:
+            raise OptimizerAuditError("estimator_mode must be a non-empty string")
+        if mode not in ("CALIBRATED", "BASELINE", "LEGACY_BASELINE"):
+            raise OptimizerAuditError(f"unknown estimator_mode {mode!r}")
+        version = self.estimator_version
+        if version is not None and (
+            isinstance(version, bool) or not isinstance(version, int) or version < 1
+        ):
+            raise OptimizerAuditError("estimator_version must be None or a positive integer")
+        if not isinstance(self.estimator_reason, str) or not self.estimator_reason:
+            raise OptimizerAuditError("estimator_reason must be a non-empty string")
+        if mode == "CALIBRATED":
+            if version is None:
+                raise OptimizerAuditError(
+                    "a CALIBRATED decision must record the estimator version it used"
+                )
+        elif mode == "LEGACY_BASELINE":
+            # A pre-hardening decision could not have used calibration. It has
+            # no version and its reason is fixed.
+            if version is not None or self.estimator_reason != REASON_LEGACY:
+                raise OptimizerAuditError(
+                    "a LEGACY_BASELINE decision cannot carry a version or a "
+                    "non-legacy reason"
+                )
+
     @classmethod
     def from_decision(
-        cls, event_id: str, decided_at: str, decision: OptimizerDecision
+        cls,
+        event_id: str,
+        decided_at: str,
+        decision: OptimizerDecision,
+        estimator_provenance: Mapping[str, Any] | None = None,
     ) -> "OptimizerDecisionRecord":
-        """Wrap the optimizer's own output; nothing is recalculated."""
+        """Wrap the optimizer's own output; nothing is recalculated.
+
+        ``estimator_provenance`` (Phase 23 hardening) is the estimator state
+        captured AT DECISION TIME (``estimator_mode`` / ``estimator_version`` /
+        ``estimator_reason``). When omitted, the record is a legacy decision
+        that predates provenance capture and is stored as LEGACY_BASELINE — it
+        is never mislabeled as calibrated.
+        """
         if not isinstance(decision, OptimizerDecision):
             raise OptimizerAuditError(
                 "decision must be an OptimizerDecision produced by the optimizer"
             )
-        return cls(
+        record = cls(
             event_id=event_id,
             decided_at=decided_at,
             selected_intervention=decision.selected_intervention,
@@ -142,6 +199,29 @@ class OptimizerDecisionRecord:
             allowed_candidates=decision.allowed_candidates,
             evaluations=decision.evaluations,
         )
+        if estimator_provenance is not None:
+            if not isinstance(estimator_provenance, Mapping):
+                raise OptimizerAuditError(
+                    "estimator_provenance must be a mapping"
+                )
+            try:
+                return cls(
+                    event_id=record.event_id,
+                    decided_at=record.decided_at,
+                    selected_intervention=record.selected_intervention,
+                    selection_reason=record.selection_reason,
+                    candidates_considered=record.candidates_considered,
+                    allowed_candidates=record.allowed_candidates,
+                    evaluations=record.evaluations,
+                    estimator_mode=str(estimator_provenance["estimator_mode"]),
+                    estimator_version=estimator_provenance["estimator_version"],
+                    estimator_reason=str(estimator_provenance["estimator_reason"]),
+                )
+            except KeyError as exc:
+                raise OptimizerAuditError(
+                    f"estimator_provenance is missing field {exc}"
+                ) from exc
+        return record
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the record for persistence and trace output."""
@@ -155,6 +235,9 @@ class OptimizerDecisionRecord:
             "evaluations": [
                 evaluation.to_dict() for evaluation in self.evaluations
             ],
+            "estimator_mode": self.estimator_mode,
+            "estimator_version": self.estimator_version,
+            "estimator_reason": self.estimator_reason,
         }
 
     @classmethod
@@ -166,6 +249,15 @@ class OptimizerDecisionRecord:
         if not isinstance(evaluations, Sequence) or isinstance(evaluations, str):
             raise OptimizerAuditError("evaluations must be a sequence")
         try:
+            mode = data.get("estimator_mode")
+            if not isinstance(mode, str) or not mode:
+                # A pre-hardening row (or a NULL column on an existing database)
+                # recorded no estimator provenance: it is a legacy baseline and
+                # is never reconstructed as calibrated.
+                mode = _LEGACY_MODE
+            reason = data.get("estimator_reason")
+            if not isinstance(reason, str) or not reason:
+                reason = REASON_LEGACY
             return cls(
                 event_id=data["event_id"],
                 decided_at=data["decided_at"],
@@ -176,6 +268,9 @@ class OptimizerDecisionRecord:
                 evaluations=tuple(
                     _evaluation_from_dict(item) for item in evaluations
                 ),
+                estimator_mode=mode,
+                estimator_version=data.get("estimator_version"),
+                estimator_reason=reason,
             )
         except KeyError as exc:
             raise OptimizerAuditError(f"record is missing field {exc}") from exc

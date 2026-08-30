@@ -16,6 +16,14 @@ import pytest
 from app.adaptive_estimation import (
     CalibratedRecoveryProbabilityEstimator,
     CalibrationSnapshot,
+    PROVENANCE_BASELINE,
+    PROVENANCE_CALIBRATED,
+    PROVENANCE_LEGACY_BASELINE,
+    REASON_CALIBRATION_UNAVAILABLE,
+    REASON_CALIBRATED_ACTIVE,
+    REASON_LEGACY,
+    REASON_NO_CALIBRATION,
+    REASON_THRESHOLD_NOT_MET,
 )
 from app.economics import PROBABILITY_SCALE, RecoveryProbability
 from app.estimator import BASE_RECOVERY_BPS, RecoveryProbabilityEstimator
@@ -142,3 +150,82 @@ def test_provenance_is_read_only_never_writes():
     before = est.snapshot.active_bps
     est.provenance("payment_link")
     assert est.snapshot.active_bps == before
+
+
+# ---------------------------------------------------------------------------
+# Hardening: fallback observability (Issue #3) & decision provenance (Issue #1)
+# ---------------------------------------------------------------------------
+
+def test_no_snapshot_is_a_normal_baseline_not_unavailable():
+    est = _estimator(snapshot=None)
+    assert est.available is True
+    prov = est.provenance("payment_link")
+    assert prov["status"] == PROVENANCE_BASELINE
+    assert prov["reason"] == REASON_NO_CALIBRATION
+
+
+def test_inactive_snapshot_is_threshold_not_met_baseline():
+    est = _estimator(_snapshot(active_bps={}))  # gate unmet / inactive
+    assert est.available is True
+    prov = est.provenance("payment_link")
+    assert prov["status"] == PROVENANCE_BASELINE
+    assert prov["reason"] == REASON_THRESHOLD_NOT_MET
+
+
+def test_unavailable_estimator_is_calibration_unavailable():
+    est = CalibratedRecoveryProbabilityEstimator(
+        baseline=_StubEstimator(), snapshot=None, available=False
+    )
+    assert est.available is False
+    prov = est.provenance("payment_link")
+    assert prov["status"] == PROVENANCE_BASELINE
+    assert prov["reason"] == REASON_CALIBRATION_UNAVAILABLE
+
+
+def test_calibrated_provenance_reports_active_reason():
+    est = _estimator(_snapshot(active_bps={"payment_link": 4400}))
+    prov = est.provenance("payment_link")
+    assert prov["status"] == PROVENANCE_CALIBRATED
+    assert prov["reason"] == REASON_CALIBRATED_ACTIVE
+
+
+def test_decision_provenance_calibrated():
+    est = _estimator(
+        _snapshot(
+            active_bps={"payment_link": 4400},
+            evidenced={
+                "payment_link": {
+                    "observed_total": 12,
+                    "observed_recovered": 7,
+                    "observed_not_recovered": 5,
+                    "baseline_bps": 3800,
+                }
+            },
+        )
+    )
+    dp = est.decision_provenance("payment_link")
+    assert dp["estimator_mode"] == PROVENANCE_CALIBRATED
+    assert dp["estimator_reason"] == REASON_CALIBRATED_ACTIVE
+    assert dp["estimator_version"] == 1
+
+
+def test_decision_provenance_baseline_reason_no_calibration():
+    est = _estimator(snapshot=None)
+    dp = est.decision_provenance("payment_link")
+    assert dp["estimator_mode"] == PROVENANCE_BASELINE
+    assert dp["estimator_reason"] == REASON_NO_CALIBRATION
+    assert dp["estimator_version"] is None
+
+
+def test_decision_provenance_baseline_reason_unavailable():
+    est = CalibratedRecoveryProbabilityEstimator(
+        baseline=_StubEstimator(), snapshot=None, available=False
+    )
+    dp = est.decision_provenance("payment_link")
+    assert dp["estimator_mode"] == PROVENANCE_BASELINE
+    assert dp["estimator_reason"] == REASON_CALIBRATION_UNAVAILABLE
+
+
+def test_legacy_baseline_constant_is_distinct():
+    assert PROVENANCE_LEGACY_BASELINE != PROVENANCE_BASELINE
+    assert REASON_LEGACY == "legacy_decision"

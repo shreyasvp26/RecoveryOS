@@ -166,11 +166,43 @@ def _persist_decision(
     return decision
 
 
+def _decision_estimator_provenance(
+    estimator: RecoveryProbabilityEstimator | None,
+    intervention: str,
+) -> dict[str, Any]:
+    """Capture the estimator state that produced a decision, at decision time.
+
+    The injected calibrated estimator reports its own mode/version/reason. A
+    missing estimator (or one without the adaptive surface) is the frozen
+    baseline: the decision is BASELINE, reason ``no_calibration_evidence``. This
+    value is recorded immutably with the decision and never recomputed later, so
+    a decision made under snapshot v1 still names v1 after v2 becomes active.
+    """
+    if estimator is not None and hasattr(estimator, "decision_provenance"):
+        provenance = estimator.decision_provenance(intervention)
+        if isinstance(provenance, Mapping):
+            return {
+                "estimator_mode": str(provenance.get("estimator_mode", "BASELINE")),
+                "estimator_version": provenance.get("estimator_version"),
+                "estimator_reason": str(
+                    provenance.get("estimator_reason", "no_calibration_evidence")
+                ),
+            }
+    from .adaptive_estimation import REASON_NO_CALIBRATION
+
+    return {
+        "estimator_mode": "BASELINE",
+        "estimator_version": None,
+        "estimator_reason": REASON_NO_CALIBRATION,
+    }
+
+
 def _persist_optimizer_decision(
     conn: sqlite3.Connection,
     event_id: str,
     decided_at: str,
     decision: OptimizerDecision,
+    estimator_provenance: dict[str, Any] | None = None,
 ) -> OptimizerDecisionRecord:
     """Record the economic decision (Phase 18), reusing an identical record.
 
@@ -182,7 +214,9 @@ def _persist_optimizer_decision(
     the same timestamp is a contradiction and is raised, never silently
     dropped.
     """
-    record = OptimizerDecisionRecord.from_decision(event_id, decided_at, decision)
+    record = OptimizerDecisionRecord.from_decision(
+        event_id, decided_at, decision, estimator_provenance
+    )
     try:
         insert_optimizer_decision(conn, record)
     except sqlite3.IntegrityError:
@@ -363,8 +397,15 @@ def execute_event(
     if optimizer_decision is not None:
         # Audit before action: the economic decision exists independently of
         # whether the executor later succeeds, fails, or never runs at all.
+        # Phase 23 hardening: the estimator state is captured HERE, at decision
+        # time, and recorded immutably so the decision stays explainable after
+        # the active calibration snapshot changes.
         _persist_optimizer_decision(
-            conn, event.event_id, evaluation_time.isoformat(), optimizer_decision
+            conn,
+            event.event_id,
+            evaluation_time.isoformat(),
+            optimizer_decision,
+            _decision_estimator_provenance(estimator, selected),
         )
     if selected == NO_ACTION:
         return ExecutionServiceResult(
