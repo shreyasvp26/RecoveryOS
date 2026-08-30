@@ -64,7 +64,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from datetime import datetime, timezone
+
 from . import db
+# The repository's single timezone-aware ISO8601 parser, reused rather than
+# reimplemented so feedback interprets a stored timestamp exactly as the rest
+# of RecoveryOS does. It is a pure parsing utility: importing it grants this
+# module no policy authority, and the integrity tests pin that no other policy
+# symbol may be imported here.
+from .policy import PolicyValidationError, parse_aware_datetime
 from .razorpay_client import marks_provider_result_unknown
 
 # Observed payment outcomes.
@@ -112,6 +120,9 @@ INELIGIBILITY_REASONS: tuple[str, ...] = (
 
 REAL_EXECUTION_MODE = "REAL_RAZORPAY"
 EXECUTION_SUCCESS = "SUCCESS"
+
+# Sorts an unparseable timestamp last without discarding the record.
+_UNORDERABLE_INSTANT = datetime.max.replace(tzinfo=timezone.utc)
 
 DEFAULT_SCAN_LIMIT = 500
 
@@ -210,18 +221,42 @@ def find_prediction(
     cannot have been driven by a decision made after it, and a decision that
     selected a different intervention did not drive this action.
 
-    Ties on ``decided_at`` are broken by the order the records were read, which
-    is itself ordered by ``decided_at`` in SQL, so repeated runs agree.
+    Timestamps are compared as INSTANTS, never as strings. ISO8601 text is not
+    ordered the same way as the moments it denotes: ``2026-08-30T10:00:00+05:30``
+    sorts after ``2026-08-30T04:30:00+00:00`` as text while being the very same
+    instant, so a string comparison could discard the decision that actually
+    drove an execution, or admit one made after it.
+
+    A decision whose stored timestamp cannot be parsed as a timezone-aware
+    instant is SKIPPED rather than trusted or guessed at, and an execution with
+    an unusable timestamp joins to nothing. Fail-closed: an unreadable
+    timestamp produces no prediction, never a wrong one.
+
+    Ties on the same instant are broken by the raw ``decided_at`` text, which
+    is a total, stable order over the persisted rows.
     """
-    candidates = [
-        decision
-        for decision in optimizer_decisions
-        if decision.get("selected_intervention") == intervention
-        and str(decision.get("decided_at") or "") <= str(executed_at)
-    ]
+    execution_instant = _instant(executed_at)
+    if execution_instant is None:
+        return None
+    candidates = []
+    for decision in optimizer_decisions:
+        if decision.get("selected_intervention") != intervention:
+            continue
+        decided_instant = _instant(decision.get("decided_at"))
+        if decided_instant is None or decided_instant > execution_instant:
+            continue
+        candidates.append((decided_instant, str(decision.get("decided_at")), decision))
     if not candidates:
         return None
-    return max(candidates, key=lambda decision: str(decision.get("decided_at") or ""))
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
+def _instant(value: Any) -> datetime | None:
+    """Parse a persisted timestamp into a UTC instant, or None if unusable."""
+    try:
+        return parse_aware_datetime(value)
+    except PolicyValidationError:
+        return None
 
 
 def _evaluation_for(
@@ -470,12 +505,18 @@ def build_observations_for_event(
     """Project every execution of one event, oldest first.
 
     An event can be intervened on more than once, and each attempt is its own
-    observation paired with the decision that drove it. Ordering is total
-    (reported time, then intervention) so repeated runs agree exactly.
+    observation paired with the decision that drove it. Ordering is by the
+    actual instant, then by the raw timestamp text and the intervention, which
+    is total — so repeated runs agree exactly even across mixed UTC offsets.
+    An unparseable timestamp sorts last rather than crashing the projection.
     """
     ordered = sorted(
         executions,
-        key=lambda row: (str(row.get("reported_at") or ""), str(row.get("intervention") or "")),
+        key=lambda row: (
+            _instant(row.get("reported_at")) or _UNORDERABLE_INSTANT,
+            str(row.get("reported_at") or ""),
+            str(row.get("intervention") or ""),
+        ),
     )
     return [
         build_observation(event, execution, optimizer_decisions, recoveries)

@@ -293,6 +293,60 @@ def test_prediction_join_ignores_decisions_made_after_the_execution():
     assert prediction["decided_at"] == before["decided_at"]
 
 
+def test_prediction_join_matches_the_same_instant_across_offsets():
+    """+05:30 and the equivalent UTC text denote one instant, not two."""
+    # 2026-08-30T09:00:00+00:00 == 2026-08-30T14:30:00+05:30.
+    decision = _decision(decided_at=None)
+    decision["decided_at"] = "2026-08-30T14:30:00+05:30"
+    prediction = find_prediction(
+        [decision], "payment_link", "2026-08-30T09:00:00+00:00"
+    )
+    assert prediction is not None
+    # Text-wise "14:30" sorts after "09:00", so a string comparison would have
+    # rejected this decision as being after the execution.
+    assert prediction["decided_at"] > "2026-08-30T09:00:00+00:00"
+
+
+def test_prediction_join_respects_offsets_when_ordering_candidates():
+    earlier = _decision(probability_bps=4_000)
+    earlier["decided_at"] = "2026-08-30T08:00:00+00:00"
+    # Later instant (08:30 UTC) written in a different offset, and its text
+    # sorts BEFORE the earlier decision's text.
+    later = _decision(probability_bps=7_000)
+    later["decided_at"] = "2026-08-30T05:00:00-03:30"
+    prediction = find_prediction(
+        [earlier, later], "payment_link", "2026-08-30T09:00:00+00:00"
+    )
+    assert prediction is not None
+    assert prediction["evaluations"][0]["estimated_probability_bps"] == 7_000
+
+
+def test_prediction_join_rejects_a_decision_made_after_in_another_offset():
+    # 16:00+05:30 is 10:30 UTC, which is after the 09:00 UTC execution, so the
+    # decision cannot have driven it however the timestamp is written.
+    late = _decision()
+    late["decided_at"] = "2026-08-30T16:00:00+05:30"
+    assert find_prediction([late], "payment_link", "2026-08-30T09:00:00+00:00") is None
+
+
+def test_prediction_join_skips_unparseable_and_naive_timestamps():
+    naive = _decision(probability_bps=9_000)
+    naive["decided_at"] = "2026-08-30T08:00:00"
+    garbage = _decision(probability_bps=9_900)
+    garbage["decided_at"] = "not-a-timestamp"
+    usable = _decision(probability_bps=4_000)
+    usable["decided_at"] = "2026-08-30T08:00:00+00:00"
+    prediction = find_prediction(
+        [naive, garbage, usable], "payment_link", "2026-08-30T09:00:00+00:00"
+    )
+    assert prediction is not None
+    assert prediction["evaluations"][0]["estimated_probability_bps"] == 4_000
+
+
+def test_an_unusable_execution_timestamp_joins_to_nothing():
+    assert find_prediction([_decision()], "payment_link", "not-a-timestamp") is None
+
+
 def test_prediction_join_never_crosses_interventions():
     other = _decision(intervention="reminder", probability_bps=9_000)
     assert find_prediction([other], "payment_link", NOW.isoformat()) is None

@@ -31,7 +31,6 @@ FORBIDDEN_IMPORTS: dict[str, str] = {
     "app.execution_service": "execution authority",
     "app.razorpay_webhook": "webhook verification authority",
     "app.webhook_service": "webhook processing authority",
-    "app.policy": "policy authority",
     "app.policy_scenario": "policy simulation authority",
     "app.estimator": "recovery probability estimation",
     "app.optimizer": "economic decision authority",
@@ -71,6 +70,31 @@ def test_feedback_modules_import_no_forbidden_authority(module):
             f"{module.__name__} imports {forbidden} ({why}); the feedback "
             "layer must not acquire it"
         )
+
+
+# The feedback layer reuses exactly one thing from the policy module: its
+# timezone-aware ISO8601 parser (and the error it raises), so a stored
+# timestamp is interpreted the same way everywhere. Nothing else from policy
+# may cross this boundary, or measurement starts carrying authority.
+ALLOWED_POLICY_SYMBOLS: frozenset[str] = frozenset(
+    {"parse_aware_datetime", "PolicyValidationError"}
+)
+
+
+@pytest.mark.parametrize("module", PHASE_22_MODULES, ids=lambda m: m.__name__)
+def test_feedback_modules_import_only_the_policy_timestamp_parser(module):
+    imported = _imported_modules(module)
+    policy_symbols = {
+        name.split(".")[-1]
+        for name in imported
+        if name.startswith("app.policy.")
+    }
+    assert policy_symbols <= ALLOWED_POLICY_SYMBOLS, (
+        f"{module.__name__} imports {sorted(policy_symbols - ALLOWED_POLICY_SYMBOLS)} "
+        "from the policy module; only the timestamp parser is permitted"
+    )
+    for forbidden in ("PolicyConfig", "evaluate_policy", "PolicyDecision"):
+        assert forbidden not in policy_symbols
 
 
 @pytest.mark.parametrize("module", PHASE_22_MODULES, ids=lambda m: m.__name__)
