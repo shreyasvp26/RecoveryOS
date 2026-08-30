@@ -36,6 +36,27 @@ outcome but is never inferred: the only supported provider evidence is
 ``payment_link.paid``, so RecoveryOS currently has no authoritative evidence
 that a customer declined to pay. Fabricating it would corrupt every
 calibration number downstream.
+
+VERIFIED RECOVERY IS NOT A CALIBRATION SAMPLE
+---------------------------------------------
+These are two different facts and the projection keeps them apart:
+
+``verified_recovery``
+    Authoritative positive evidence: the provider confirmed this link was
+    paid. Always worth reporting, and reported on its own terms.
+
+``calibration_eligible``
+    This observation may enter a recovery-RATE denominator. That requires a
+    TERMINAL BINARY outcome — RECOVERED or NOT_RECOVERED — plus the prediction
+    that drove it.
+
+Conflating them is the specific error this module must not make. Counting only
+verified recoveries as the denominator makes the observed recovery rate 100% by
+construction, because absence of a paid webhook is not evidence of non-payment.
+Since the current provider contract yields no authoritative negative outcome,
+the terminal-outcome population is normally EMPTY, and the honest result is
+that no recovery rate can be computed yet — while the verified recoveries are
+still counted and shown.
 """
 
 from __future__ import annotations
@@ -61,10 +82,18 @@ OUTCOMES: tuple[str, ...] = (
     OUTCOME_NOT_RECOVERED,
 )
 
-# Why an execution produced no eligible operational observation. Every
-# ineligible observation carries exactly one of these, so nothing is ever
+# The outcomes that are TERMINAL: the payment question is settled, one way or
+# the other. Only these can form a recovery-rate denominator. PENDING and
+# UNKNOWN are explicitly absent, because "not observed yet" and "cannot tell"
+# are not observations of a result.
+TERMINAL_OUTCOMES: frozenset[str] = frozenset(
+    {OUTCOME_RECOVERED, OUTCOME_NOT_RECOVERED}
+)
+
+# Why an execution produced no calibration-eligible observation. Every
+# non-eligible observation carries exactly one of these, so nothing is ever
 # silently dropped.
-REASON_ELIGIBLE = "eligible"
+REASON_CALIBRATION_ELIGIBLE = "calibration_eligible"
 REASON_SIMULATED_EXECUTION = "simulated_execution"
 REASON_AWAITING_OUTCOME = "awaiting_outcome"
 REASON_AMBIGUOUS_PROVIDER_RESULT = "ambiguous_provider_result"
@@ -96,10 +125,16 @@ class FeedbackObservation:
     dimensions the aggregations group by, and every value is copied verbatim
     from an authoritative persisted record.
 
-    ``eligible`` means this observation may enter a calibration or performance
-    statistic. ``recovered`` is the binary calibration target and is only ever
-    True/False on an eligible observation; it is None whenever the evidence
-    does not establish an outcome.
+    Three separate facts, deliberately not collapsed into one flag:
+
+    ``verified_recovery``  authoritative positive provider evidence exists.
+    ``terminal``           the payment question is settled (RECOVERED or
+                           NOT_RECOVERED), so it could form a rate denominator.
+    ``calibration_eligible``  terminal AND carrying the prediction that drove
+                           it, so it can be compared against a prediction.
+
+    ``recovered`` is the binary calibration target: True on RECOVERED, False on
+    NOT_RECOVERED, and None whenever the evidence settles nothing.
     """
 
     event_id: str
@@ -119,7 +154,9 @@ class FeedbackObservation:
     failure_reason: str | None
     payment_link_id: str | None
     outcome: str
-    eligible: bool
+    terminal: bool
+    calibration_eligible: bool
+    verified_recovery: bool
     reason: str
     recovered: bool | None
     # The TRUSTED amount the provider reported as paid. None when the provider
@@ -147,7 +184,9 @@ class FeedbackObservation:
             "failure_reason": self.failure_reason,
             "payment_link_id": self.payment_link_id,
             "outcome": self.outcome,
-            "eligible": self.eligible,
+            "terminal": self.terminal,
+            "calibration_eligible": self.calibration_eligible,
+            "verified_recovery": self.verified_recovery,
             "reason": self.reason,
             "recovered": self.recovered,
             "recovered_amount_paise": self.recovered_amount_paise,
@@ -195,7 +234,7 @@ def _evaluation_for(
     return None
 
 
-def _ineligible(
+def _non_terminal(
     *,
     event: Mapping[str, Any],
     execution: Mapping[str, Any],
@@ -205,15 +244,20 @@ def _ineligible(
     reason: str,
     note: str,
 ) -> FeedbackObservation:
+    """An observation whose payment question is not settled either way.
+
+    Only PENDING and UNKNOWN reach here, and both carry ``recovered=None``: an
+    unsettled outcome contributes to no numerator and no denominator.
+    """
     return _observation(
         event=event,
         execution=execution,
         prediction=prediction,
         evaluation=evaluation,
         outcome=outcome,
-        eligible=False,
         reason=reason,
         recovered=None,
+        verified_recovery=False,
         recovered_amount_paise=None,
         observed_at=None,
         evidence_id=None,
@@ -228,14 +272,19 @@ def _observation(
     prediction: Mapping[str, Any] | None,
     evaluation: Mapping[str, Any] | None,
     outcome: str,
-    eligible: bool,
     reason: str,
     recovered: bool | None,
+    verified_recovery: bool,
     recovered_amount_paise: int | None,
     observed_at: str | None,
     evidence_id: str | None,
     note: str,
 ) -> FeedbackObservation:
+    # Derived here, never passed in: a caller cannot mark an unsettled outcome
+    # as a calibration sample, which is exactly the mistake this projection
+    # must be structurally unable to make.
+    terminal = outcome in TERMINAL_OUTCOMES and recovered is not None
+    calibration_eligible = terminal and evaluation is not None
     return FeedbackObservation(
         event_id=str(event["event_id"]),
         intervention=str(execution["intervention"]),
@@ -261,7 +310,9 @@ def _observation(
         failure_reason=event.get("failure_reason"),
         payment_link_id=execution.get("payment_link_id"),
         outcome=outcome,
-        eligible=eligible,
+        terminal=terminal,
+        calibration_eligible=calibration_eligible,
+        verified_recovery=verified_recovery,
         reason=reason,
         recovered=recovered,
         recovered_amount_paise=recovered_amount_paise,
@@ -292,7 +343,7 @@ def build_observation(
     )
 
     if execution["execution_mode"] != REAL_EXECUTION_MODE:
-        return _ineligible(
+        return _non_terminal(
             event=event,
             execution=execution,
             prediction=prediction,
@@ -307,7 +358,7 @@ def build_observation(
 
     if execution["status"] != EXECUTION_SUCCESS:
         if marks_provider_result_unknown(execution.get("detail")):
-            return _ineligible(
+            return _non_terminal(
                 event=event,
                 execution=execution,
                 prediction=prediction,
@@ -320,7 +371,7 @@ def build_observation(
                     "not counted as a failure"
                 ),
             )
-        return _ineligible(
+        return _non_terminal(
             event=event,
             execution=execution,
             prediction=prediction,
@@ -335,7 +386,7 @@ def build_observation(
 
     payment_link_id = execution.get("payment_link_id")
     if not payment_link_id:
-        return _ineligible(
+        return _non_terminal(
             event=event,
             execution=execution,
             prediction=prediction,
@@ -350,7 +401,7 @@ def build_observation(
 
     recovery = recoveries.get(payment_link_id)
     if recovery is None:
-        return _ineligible(
+        return _non_terminal(
             event=event,
             execution=execution,
             prediction=prediction,
@@ -364,18 +415,19 @@ def build_observation(
         )
 
     if prediction is None or evaluation is None:
-        # The recovery is real, but there is no persisted prediction to judge
-        # it against. Calibration needs both halves, so it is excluded rather
-        # than paired with a recomputed (and therefore different) estimate.
+        # The recovery is real and is still counted as verified evidence, but
+        # there is no persisted prediction to judge it against. Calibration
+        # needs both halves, so it is excluded from the rate rather than
+        # paired with a recomputed (and therefore different) estimate.
         return _observation(
             event=event,
             execution=execution,
             prediction=prediction,
             evaluation=evaluation,
             outcome=OUTCOME_RECOVERED,
-            eligible=False,
             reason=REASON_MISSING_PREDICTION,
-            recovered=None,
+            recovered=True,
+            verified_recovery=True,
             recovered_amount_paise=recovery.get("amount_paid_paise"),
             observed_at=recovery.get("recovered_at"),
             evidence_id=recovery.get("delivery_id"),
@@ -399,9 +451,9 @@ def build_observation(
         prediction=prediction,
         evaluation=evaluation,
         outcome=OUTCOME_RECOVERED,
-        eligible=True,
-        reason=REASON_ELIGIBLE,
+        reason=REASON_CALIBRATION_ELIGIBLE,
         recovered=True,
+        verified_recovery=True,
         recovered_amount_paise=amount_paid,
         observed_at=recovery.get("recovered_at"),
         evidence_id=recovery.get("delivery_id"),
@@ -470,20 +522,46 @@ def build_observations(
     return observations
 
 
-def eligible_observations(
+def calibration_observations(
     observations: Sequence[FeedbackObservation],
 ) -> list[FeedbackObservation]:
-    """Filter to the observations that may enter a statistic."""
-    return [observation for observation in observations if observation.eligible]
+    """Filter to the terminal, predicted observations a rate may be built from.
+
+    This is the ONLY population a recovery rate may be computed over. It is
+    deliberately not "the verified recoveries": a denominator made of positive
+    evidence alone is 100% by construction.
+    """
+    return [
+        observation for observation in observations if observation.calibration_eligible
+    ]
+
+
+def verified_recoveries(
+    observations: Sequence[FeedbackObservation],
+) -> list[FeedbackObservation]:
+    """Filter to authoritative positive provider evidence.
+
+    Reported on its own terms, independently of whether it can be calibrated:
+    a verified recovery with no persisted prediction is still a real recovery.
+    """
+    return [observation for observation in observations if observation.verified_recovery]
 
 
 def ineligibility_counts(
     observations: Sequence[FeedbackObservation],
 ) -> dict[str, int]:
-    """Count why observations were excluded (every reason key is present)."""
+    """Count why observations are not calibration samples (all keys present)."""
     counts = {reason: 0 for reason in INELIGIBILITY_REASONS}
     for observation in observations:
-        if observation.eligible:
+        if observation.calibration_eligible:
             continue
         counts[observation.reason] = counts.get(observation.reason, 0) + 1
+    return counts
+
+
+def outcome_counts(observations: Sequence[FeedbackObservation]) -> dict[str, int]:
+    """Count observations per observed outcome (every outcome key is present)."""
+    counts = {outcome: 0 for outcome in OUTCOMES}
+    for observation in observations:
+        counts[observation.outcome] = counts.get(observation.outcome, 0) + 1
     return counts

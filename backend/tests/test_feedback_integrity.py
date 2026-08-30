@@ -143,7 +143,9 @@ def test_simulated_execution_can_never_become_an_observed_recovery():
             }
         },
     )
-    assert observation.eligible is False
+    assert observation.calibration_eligible is False
+    assert observation.verified_recovery is False
+    assert observation.terminal is False
     assert observation.reason == outcome_feedback.REASON_SIMULATED_EXECUTION
     assert observation.recovered is None
     assert observation.recovered_amount_paise is None
