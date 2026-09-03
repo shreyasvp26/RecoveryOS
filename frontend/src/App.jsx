@@ -3,6 +3,7 @@ import './App.css'
 import CommandCenter from './components/CommandCenter.jsx'
 import EstimatorEvidence from './components/EstimatorEvidence.jsx'
 import EventTrace from './components/EventTrace.jsx'
+import LandingPage from './components/LandingPage.jsx'
 import PolicyBlocks from './components/PolicyBlocks.jsx'
 import PolicyLab from './components/PolicyLab.jsx'
 import RecoveryIntelligence from './components/RecoveryIntelligence.jsx'
@@ -31,6 +32,7 @@ const NAV = [
 ]
 
 function App() {
+  const [showLanding, setShowLanding] = useState(true)
   // A screen can hand the operator to another screen with context: Revenue
   // Health opens an affected payment in the EXISTING Event Decision Trace
   // rather than growing a second event view of its own.
@@ -38,6 +40,10 @@ function App() {
   const active = NAV.find((n) => n.key === route.tab) || NAV[0]
   const Active = active.Component
   const navigate = (tab, params = {}) => setRoute({ tab, params })
+
+  if (showLanding) {
+    return <LandingPage onEnterDashboard={() => setShowLanding(false)} />
+  }
 
   return (
     <div className="app">
