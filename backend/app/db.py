@@ -819,6 +819,23 @@ def list_payment_events(
     return [_row_to_event(row).to_dict() for row in rows]
 
 
+def get_payment_events_for_customer(
+    conn: sqlite3.Connection, customer_id: str
+) -> list[PaymentEvent]:
+    """Return every persisted PaymentEvent for a customer, oldest first.
+
+    Used to derive an honest ``CustomerHistory`` for a customer whose payment
+    history is not supplied by an external ingestion channel (e.g. a real
+    Razorpay ``payment.failed`` webhook). This is decision-time persisted state
+    only; it never fabricates recovery truth.
+    """
+    rows = conn.execute(
+        "SELECT * FROM payment_events WHERE customer_id = ? ORDER BY timestamp ASC",
+        (customer_id,),
+    ).fetchall()
+    return [_row_to_event(row) for row in rows]
+
+
 def count_payment_events(conn: sqlite3.Connection) -> int:
     """Count persisted payment events."""
     row = conn.execute(
