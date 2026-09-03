@@ -29,8 +29,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import db
+from .failed_payment_ingestion import map_failed_payment_to_event
+from .ingestion import IngestionStatus, ingest_event
 from .razorpay_webhook import (
     SUPPORTED_WEBHOOK_EVENT,
+    INGESTION_WEBHOOK_EVENT,
+    FailedPaymentEvent,
     WebhookEvent,
     WebhookPayloadError,
 )
@@ -43,11 +47,17 @@ S_UNMATCHED = "unmatched"
 S_PROCESSED = "processed"
 S_PERSISTENCE_FAILURE = "persistence_failure"
 
+# INGESTION-path statuses surfaced to the HTTP layer for a verified
+# payment.failed webhook.
+S_INGESTED = "ingested"
+S_DUPLICATE_EVENT = "duplicate_event"
+
 # Persisted delivery-row statuses.
 _DELIVERY_CLAIMED = "claimed"
 _DELIVERY_IGNORED = "ignored"
 _DELIVERY_PROCESSED = "processed"
 _DELIVERY_UNMATCHED = "unmatched"
+_DELIVERY_INGESTED = "ingested"
 
 
 @dataclass(frozen=True)
@@ -79,7 +89,7 @@ def _body_sha256(raw_body: bytes) -> str:
 
 
 def claim_webhook_delivery(
-    conn: sqlite3.Connection, event: WebhookEvent, body_sha256: str, received_at: str
+    conn: sqlite3.Connection, event: WebhookEvent | FailedPaymentEvent, body_sha256: str, received_at: str
 ) -> str:
     """Durably claim a delivery id, returning a claim disposition.
 
@@ -106,7 +116,7 @@ def claim_webhook_delivery(
             delivery_id=event.delivery_id,
             body_sha256=body_sha256,
             event_type=event.event_type,
-            payment_link_id=event.payment_link_id,
+            payment_link_id=getattr(event, "payment_link_id", None),
             status=claim_status,
             received_at=received_at,
         )
@@ -257,3 +267,92 @@ def _correlate_supported_event(
             detail="persistence_failure during correlation; returning error so "
             "Razorpay retries",
         )
+
+
+def process_payment_failed(
+    conn: sqlite3.Connection,
+    failed: FailedPaymentEvent,
+    raw_body: bytes,
+    received_at: str,
+) -> WebhookProcessResult:
+    """Map a verified ``payment.failed`` webhook into an ingested PaymentEvent.
+
+    This is the INGESTION channel: a genuinely failed payment is turned into a
+    ``PaymentEvent`` so the existing detect->diagnose->policy->optimize loop can
+    run. It shares the durable idempotency/claim machinery of the OUTCOME
+    channel so the same failure delivery is never ingested twice, but it never
+    records a recovery and never authorizes or executes an intervention.
+
+    Returns:
+      * ``ingested`` — the failure was mapped and persisted as a PaymentEvent.
+      * ``deduplicated`` / ``conflict`` — durable idempotency outcomes from the
+        shared delivery-claim machinery (delivery id already handled).
+      * ``duplicate_event`` — the delivery was fresh, but a PaymentEvent with
+        the derived event_id already exists (should not normally happen).
+    """
+    body_sha256 = _body_sha256(raw_body)
+
+    try:
+        claim = claim_webhook_delivery(conn, failed, body_sha256, received_at)
+    except sqlite3.Error:
+        return WebhookProcessResult(
+            status=S_PERSISTENCE_FAILURE,
+            delivery_id=failed.delivery_id,
+            event_type=failed.event_type,
+            detail="persistence_failure: could not record webhook delivery; "
+            "returning error so Razorpay retries",
+        )
+
+    if claim == "deduplicated":
+        return WebhookProcessResult(
+            status=S_DEDUPLICATED,
+            delivery_id=failed.delivery_id,
+            event_type=failed.event_type,
+            detail="duplicate payment.failed delivery (same event id and body); "
+            "acknowledged as a no-op",
+            previous_status="deduplicated",
+        )
+    if claim == "conflict":
+        return WebhookProcessResult(
+            status=S_CONFLICT,
+            delivery_id=failed.delivery_id,
+            event_type=failed.event_type,
+            detail="same event id delivered with a different body; refusing to "
+            "overwrite and refusing a second ingestion",
+        )
+
+    event = map_failed_payment_to_event(conn, failed)
+    try:
+        result = ingest_event(conn, event)
+    except sqlite3.Error:
+        db.update_webhook_delivery_status(conn, failed.delivery_id, _DELIVERY_INGESTED)
+        return WebhookProcessResult(
+            status=S_PERSISTENCE_FAILURE,
+            delivery_id=failed.delivery_id,
+            event_type=failed.event_type,
+            detail="persistence_failure during payment.failed ingestion; "
+            "returning error so Razorpay retries",
+        )
+
+    if result.status is not IngestionStatus.SUCCESS:
+        # A fresh delivery whose mapped event already exists (rare) or is
+        # invalid (should not happen given strict parsing). The delivery is
+        # still marked handled so Razorpay does not retry a non-recoverable
+        # condition; the event itself is not double-counted.
+        db.update_webhook_delivery_status(conn, failed.delivery_id, _DELIVERY_INGESTED)
+        already = result.status is IngestionStatus.DUPLICATE
+        return WebhookProcessResult(
+            status=S_DUPLICATE_EVENT if already else S_IGNORED,
+            delivery_id=failed.delivery_id,
+            event_type=failed.event_type,
+            detail=result.detail or "payment.failed could not be ingested",
+        )
+
+    db.update_webhook_delivery_status(conn, failed.delivery_id, _DELIVERY_INGESTED)
+    return WebhookProcessResult(
+        status=S_INGESTED,
+        delivery_id=failed.delivery_id,
+        event_type=failed.event_type,
+        detail=f"payment.failed from payment {failed.payment_id!r} ingested as "
+        f"PaymentEvent {event.event_id!r}; the recovery loop can now process it",
+    )
