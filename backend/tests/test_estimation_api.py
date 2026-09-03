@@ -126,6 +126,13 @@ def test_recalibrate_builds_versioned_snapshot_and_activates(monkeypatch, tmp_pa
     assert body["snapshot_count"] == 2
     assert body["active_version"] == 2
     assert body["latest"]["version"] == 2
+    # The GET must expose the same `samples` block the frontend calibration
+    # screen reads from latest (total + per-outcome counts). Without it the
+    # frontend crashes accessing latest.samples.total.
+    assert "samples" in body["latest"]
+    assert "total" in body["latest"]["samples"]
+    assert "outcome_counts" in body["latest"]["samples"]
+    assert body["latest"]["samples"]["outcome_counts"]["RECOVERED"] >= 0
 
 
 def test_estimator_evidence_never_reports_active_when_below_gate(monkeypatch, tmp_path):

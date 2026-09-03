@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 
 from .. import calibration_service, db
+from ..calibration import calibration_samples, outcome_counts
 from ..config import build_razorpay_client
 from ..razorpay_client import RazorpayConfigurationError
 
@@ -77,6 +78,22 @@ def estimator_evidence(
         if latest is not None and latest.get("active_bps", {})
         else None
     )
+
+    # The frontend's calibration screen reads a `samples` block from the latest
+    # snapshot (total + per-outcome counts). The persisted snapshot row stores
+    # only active_bps/evidenced, not the per-observation samples it was built
+    # from, so the GET reconstructs them from the CURRENT durable evidence.
+    # Read-only: provider is None, so no live poll and no write occurs — only
+    # already-persisted webhook recoveries and provider outcomes are counted.
+    if latest is not None:
+        observations = calibration_service.build_calibration_observations(
+            conn, provider=None
+        )
+        latest = {**latest, "samples": {
+            "total": len(calibration_samples(observations)),
+            "outcome_counts": outcome_counts(observations),
+        }}
+
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
