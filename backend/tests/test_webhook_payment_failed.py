@@ -19,7 +19,7 @@ import sqlite3
 
 from fastapi.testclient import TestClient
 
-from app.db import connect, init_db, get_payment_event
+from app.db import connect, init_db, get_classification_result, get_payment_event
 from app.failed_payment_ingestion import map_failed_payment_to_event
 from app.main import app
 from app.models import CustomerHistory, PaymentEvent
@@ -27,6 +27,7 @@ from app.razorpay_webhook import (
     FailedPaymentEvent,
     parse_payment_failed_payload,
 )
+import app.webhook_service as webhook_service
 
 client = TestClient(app)
 
@@ -361,5 +362,97 @@ def test_ingestion_path_writes_no_recovery_outcome(monkeypatch, tmp_path) -> Non
         assert recs["c"] == 0
         execs = conn.execute("SELECT COUNT(*) AS c FROM execution_outcomes").fetchone()
         assert execs["c"] == 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Auto-Diagnose: ingestion kicks off the advisory AI diagnosis best-effort
+# ---------------------------------------------------------------------------
+
+
+class _StubAdapter:
+    """Duck-typed classifier adapter controlling generate()/close()."""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.closed = False
+
+    def generate(self, prompt: str) -> str:
+        if not self._responses:
+            raise RuntimeError("stub adapter exhausted")
+        return self._responses.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _stub_classifier(monkeypatch, *responses):
+    stub = _StubAdapter(*responses)
+    monkeypatch.setattr(webhook_service, "build_omniroute_adapter", lambda: stub)
+    return stub
+
+
+def test_ingestion_auto_runs_ai_diagnosis(monkeypatch, tmp_path) -> None:
+    """After ingesting a payment.failed, the advisory diagnosis runs and persists."""
+    response_json = json.dumps(
+        {
+            "event_id": "evt_pfail_ea320c78aa7a",
+            "root_cause_category": "terminal",
+            "confidence": 0.85,
+            "reasoning": "bad request error on an unsupported card",
+            "candidate_interventions": ["no_action"],
+        }
+    )
+    stub = _stub_classifier(monkeypatch, response_json)
+
+    _set_env(monkeypatch, tmp_path)
+    body = _raw()
+    response = client.post(
+        "/webhook/razorpay",
+        content=body,
+        headers={SIGNATURE_HEADER: _sign(body), DELIVERY_ID_HEADER: DELIVERY_ID},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingested"
+    assert stub.closed is True  # adapter lifecycle is not leaked
+
+    # The diagnosis was persisted for the derived event id.
+    conn = _conn(tmp_path)
+    try:
+        failed = parse_payment_failed_payload(body, DELIVERY_ID)
+        event_id = map_failed_payment_to_event(conn, failed).event_id
+        persisted = get_classification_result(conn, event_id)
+        assert persisted is not None
+        assert persisted.root_cause_category == "terminal"
+        assert list(persisted.candidate_interventions) == ["no_action"]
+    finally:
+        conn.close()
+
+
+def test_ingestion_survives_classifier_failure(monkeypatch, tmp_path) -> None:
+    """A classifier outage is best-effort: ingestion still succeeds as 'ingested'."""
+    _stub_classifier(monkeypatch)  # generate() raises immediately
+
+    _set_env(monkeypatch, tmp_path)
+    body = _raw()
+    response = client.post(
+        "/webhook/razorpay",
+        content=body,
+        headers={SIGNATURE_HEADER: _sign(body), DELIVERY_ID_HEADER: DELIVERY_ID},
+    )
+    # The webhook must be acknowledged as ingested; a model failure must NOT
+    # fail ingestion or trigger a Razorpay retry.
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingested"
+
+    conn = _conn(tmp_path)
+    try:
+        failed = parse_payment_failed_payload(body, DELIVERY_ID)
+        event_id = map_failed_payment_to_event(conn, failed).event_id
+        # Event still ingested.
+        assert get_payment_event(conn, event_id) is not None
+        # No (failed) classification persisted.
+        assert get_classification_result(conn, event_id) is None
     finally:
         conn.close()

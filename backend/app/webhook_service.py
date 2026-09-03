@@ -24,11 +24,13 @@ deduplicated.
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
 from . import db
+from .classifier import build_omniroute_adapter, classify_event
 from .failed_payment_ingestion import map_failed_payment_to_event
 from .ingestion import IngestionStatus, ingest_event
 from .razorpay_webhook import (
@@ -38,6 +40,8 @@ from .razorpay_webhook import (
     WebhookEvent,
     WebhookPayloadError,
 )
+
+logger = logging.getLogger("uvicorn.webhook")
 
 # Closed-loop statuses surfaced to the HTTP layer.
 S_DEDUPLICATED = "deduplicated"
@@ -349,6 +353,14 @@ def process_payment_failed(
         )
 
     db.update_webhook_delivery_status(conn, failed.delivery_id, _DELIVERY_INGESTED)
+
+    # Kick off the Detect+Diagnose stage of the recovery loop automatically.
+    # Classification is ADVISORY only (it never authorizes/executes), so it is
+    # run here as a best-effort side effect: a classifier outage or model
+    # failure must NEVER fail the ingestion or make Razorpay retry, and never
+    # hides the committed ingestion result. The event is ingested regardless.
+    _auto_classify_best_effort(conn, event)
+
     return WebhookProcessResult(
         status=S_INGESTED,
         delivery_id=failed.delivery_id,
@@ -356,3 +368,49 @@ def process_payment_failed(
         detail=f"payment.failed from payment {failed.payment_id!r} ingested as "
         f"PaymentEvent {event.event_id!r}; the recovery loop can now process it",
     )
+
+
+def _auto_classify_best_effort(
+    conn: sqlite3.Connection, event
+) -> None:
+    """Run the advisory AI diagnosis (classification) for an ingested event.
+
+    Best-effort and isolated from the ingestion result: any failure to build the
+    adapter, call the model, or persist the classification is logged and
+    swallowed so it never fails the webhook and never triggers a Razorpay retry.
+    A successful classification is persisted for the Diagnose stage.
+    """
+    try:
+        adapter = build_omniroute_adapter()
+    except Exception as exc:  # noqa: BLE001 - best effort by contract
+        logger.warning(
+            "auto-classify skipped for %s (adapter unavailable): %s",
+            getattr(event, "event_id", "?"),
+            exc,
+        )
+        return
+    try:
+        result = classify_event(event, adapter)
+    except Exception as exc:  # noqa: BLE001 - best effort by contract
+        logger.warning(
+            "auto-classify failed for %s: %s",
+            getattr(event, "event_id", "?"),
+            exc,
+        )
+        return
+    finally:
+        adapter.close()
+    try:
+        db.insert_classification_result(conn, result)
+        logger.info(
+            "auto-classified %s as %s (%.2f)",
+            result.event_id,
+            result.root_cause_category,
+            result.confidence,
+        )
+    except Exception as exc:  # noqa: BLE001 - best effort by contract
+        logger.warning(
+            "auto-classify persistence failed for %s: %s",
+            getattr(event, "event_id", "?"),
+            exc,
+        )
