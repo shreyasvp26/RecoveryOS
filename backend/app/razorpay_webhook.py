@@ -1,12 +1,25 @@
 """Razorpay webhook signature verification and payload parsing boundary.
 
 Phase 12: verifies the HMAC-SHA256 signature over the exact raw request body
-and parses a *verified* Razorpay webhook into a structured ``WebhookEvent``.
+and parses a *verified* Razorpay webhook into a structured event.
 
-This is an OUTCOME channel only. Nothing in this module — or anywhere on the
-webhook path — creates Payment Links, calls the executor, the policy engine,
-the selector, or any intervention. Cryptographic verification and payload
-shape are isolated here so the HTTP route stays free of business logic.
+Two architecturally distinct webhook channels live here:
+
+  * ``payment_link.paid`` — an OUTCOME channel. This is the closed-loop
+    recovery channel: it creates Payment Links, calls the executor, the policy
+    engine, the selector, or any intervention NEVER. It only records verified
+    recovery evidence. (Phase 12.)
+
+  * ``payment.failed`` — an INGESTION channel. A genuine failed-payment event
+    is the INPUT that feeds the recovery loop: once verified, it is mapped to
+    a ``PaymentEvent`` so the existing detect->diagnose->policy->optimize
+    pipeline can run against a real failed payment. It is advisory input only;
+    it never authorizes or executes anything on its own.
+
+Cryptographic verification and payload shape are isolated here so the HTTP
+route stays free of business logic. The two channels SHARE the signature gate
+(both verify before parsing) but are processed with distinct semantics further
+down the path.
 
 Security invariants (non-negotiable):
   * The signature is HMAC-SHA256 computed over the UNPARSED raw request body;
@@ -20,12 +33,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
 
-# The Razorpay webhook event this closed loop consumes. Unsupported events are
-# explicitly ignored/recorded further down the path, never executed.
+# The OUTCOME webhook event this recovered-revenue loop consumes (Phase 12).
 SUPPORTED_WEBHOOK_EVENT: str = "payment_link.paid"
+
+# The INGESTION webhook event that carries a genuinely failed payment into the
+# recovery loop. It is semantically an INPUT channel, never an OUTCOME: it
+# feeds a PaymentEvent into detection rather than recording recovery evidence.
+INGESTION_WEBHOOK_EVENT: str = "payment.failed"
 
 
 class WebhookSignatureError(Exception):
@@ -225,4 +243,154 @@ def parse_webhook_payload(raw_body: bytes, delivery_id: str) -> WebhookEvent:
         currency=currency,
         payment_id=payment_id,
         reference_id=reference_id,
+    )
+
+
+@dataclass(frozen=True)
+class FailedPaymentEvent:
+    """A *verified* Razorpay ``payment.failed`` webhook mapped to the fields a
+    ``PaymentEvent`` needs. This is an INGESTION-channel event: it feeds the
+    recovery loop, never records an outcome.
+
+    The amount, currency, payment method, order, customer and failure detail
+    are taken from the trusted, signature-verified payload. ``failure_reason``
+    is derived from Razorpay's ``error_code``/``error_description`` (never
+    fabricated), and the customer/order identifiers come straight from the
+    payment entity. ``delivery_id`` (X-Razorpay-Event-Id) is the canonical
+    idempotency key so the same failure is never ingested twice.
+    """
+
+    delivery_id: str
+    event_type: str
+    payment_id: str
+    order_id: str
+    customer_id: str | None
+    amount_paise: int | None
+    currency: str | None
+    payment_method: str | None
+    failure_reason: str | None
+    bank: str | None
+    failed_at: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.delivery_id, str) or not self.delivery_id.strip():
+            raise WebhookPayloadError("delivery_id (X-Razorpay-Event-Id) is required")
+        if not isinstance(self.event_type, str) or not self.event_type.strip():
+            raise WebhookPayloadError("webhook event type is required")
+        if not isinstance(self.payment_id, str) or not self.payment_id.strip():
+            raise WebhookPayloadError(
+                "payment.failed event must carry a payment id"
+            )
+        if not isinstance(self.order_id, str) or not self.order_id.strip():
+            raise WebhookPayloadError(
+                "payment.failed event must carry an order id"
+            )
+        for name in ("customer_id", "currency", "payment_method", "failure_reason", "bank", "failed_at"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise WebhookPayloadError(
+                    f"{name} must be None or a non-empty string"
+                )
+        if self.amount_paise is not None and not isinstance(self.amount_paise, int):
+            raise WebhookPayloadError("amount_paise must be None or an integer")
+
+
+def _validate_failed_shape(payload: dict[str, Any]) -> None:
+    """Strictly validate the shape of a ``payment.failed`` event.
+
+    A genuinely failed payment is the input to the recovery loop, so its shape
+    must be complete enough to build a ``PaymentEvent``: it must carry a real
+    payment entity whose status is ``failed``. Any structural gap raises
+    ``WebhookPayloadError`` (mapped to a 4xx) so an under-specified failure is
+    never silently turned into a fabricated event.
+    """
+    payload_obj = _child_dict(payload, "payload", "payload")
+    payment_obj = _child_dict(payload_obj, "payment", "payload.payment")
+    payment_entity = _child_dict(payment_obj, "entity", "payload.payment.entity")
+    payment_id = payment_entity.get("id")
+    if not isinstance(payment_id, str) or not payment_id.strip():
+        raise WebhookPayloadError(
+            "payment.failed event is missing a payment id"
+        )
+    status = payment_entity.get("status")
+    if status != "failed":
+        raise WebhookPayloadError(
+            f"payment.failed event must have status 'failed', got {status!r}"
+        )
+
+
+def parse_payment_failed_payload(raw_body: bytes, delivery_id: str) -> FailedPaymentEvent:
+    """Parse and validate a verified ``payment.failed`` webhook raw body.
+
+    Assumes the signature has already been verified. Raises
+    ``WebhookPayloadError`` for malformed/unsupported shape. This is the
+    INGESTION path: it produces the fields for a ``PaymentEvent`` and never
+    records an outcome or authorizes anything.
+    """
+    if not isinstance(raw_body, bytes) or not raw_body:
+        raise WebhookPayloadError("webhook request body is empty")
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WebhookPayloadError(f"webhook body is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise WebhookPayloadError("webhook payload must be a JSON object")
+
+    event_type = _event_field(data)
+    if event_type != INGESTION_WEBHOOK_EVENT:
+        raise WebhookPayloadError(
+            f"expected {INGESTION_WEBHOOK_EVENT!r}, got {event_type!r}"
+        )
+    _validate_failed_shape(data)
+
+    payload_obj = _child_dict(data, "payload", "payload")
+    payment_obj = _child_dict(payload_obj, "payment", "payload.payment")
+    payment_entity = _child_dict(payment_obj, "entity", "payload.payment.entity")
+
+    payment_id = payment_entity.get("id")
+    order_id = payment_entity.get("order_id") or ""
+    customer_id = payment_entity.get("customer_id")
+    amount = payment_entity.get("amount")
+    currency = payment_entity.get("currency")
+    method = payment_entity.get("method")
+    error_code = payment_entity.get("error_code")
+    error_desc = payment_entity.get("error_description")
+    created_at = payment_entity.get("created_at")
+
+    # Razorpay reports created_at as a Unix epoch (seconds). The locked
+    # PaymentEvent contract needs an ISO8601 date-time string, so convert the
+    # epoch to one. A missing or non-integer created_at falls back to None and
+    # the mapper supplies a deterministic placeholder rather than inventing a
+    # wall-clock time.
+    failed_at: str | None = None
+    if isinstance(created_at, int) and not isinstance(created_at, bool):
+        failed_at = datetime.fromtimestamp(
+            created_at, tz=timezone.utc
+        ).isoformat()
+
+    # Derive a decision-time failure_reason from Razorpay's provider-reported
+    # error code/description. This is never fabricated — it comes from the
+    # signed payload. If neither is present we fall back to a generic reason.
+    failure_reason: str | None = None
+    if isinstance(error_code, str) and error_code.strip():
+        failure_reason = error_code.strip()
+    elif isinstance(error_desc, str) and error_desc.strip():
+        failure_reason = error_desc.strip()
+    if not failure_reason:
+        failure_reason = "payment_failed"
+
+    return FailedPaymentEvent(
+        delivery_id=delivery_id,
+        event_type=event_type,
+        payment_id=payment_id,
+        order_id=order_id,
+        customer_id=customer_id,
+        amount_paise=amount,
+        currency=currency,
+        payment_method=method,
+        failure_reason=failure_reason,
+        bank=None,
+        failed_at=failed_at,
     )
