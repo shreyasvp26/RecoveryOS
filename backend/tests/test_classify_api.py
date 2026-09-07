@@ -150,7 +150,13 @@ def test_classify_validation_failure_is_explicit(monkeypatch, tmp_path) -> None:
     assert response.json()["status"] == "classification_validation_failure"
 
 
-def test_classify_persistence_failure_is_explicit(monkeypatch, tmp_path) -> None:
+def test_classify_partial_success_retry_recovers_not_a_500_loop(
+    monkeypatch, tmp_path
+) -> None:
+    """A prior classify attempt persisted the classification but crashed before
+    its 200. The retry hits a duplicate insert (IntegrityError) but must
+    recover with the durably persisted classification instead of answering
+    classification_persistence_failure forever."""
     db_path = _seed_event(monkeypatch, tmp_path)
     conn = connect(db_path)
     try:
@@ -161,6 +167,35 @@ def test_classify_persistence_failure_is_explicit(monkeypatch, tmp_path) -> None
     finally:
         conn.close()
     _stub_classifier(json.dumps(VALID_RESULT))
+    response = client.post("/events/evt_api_1/classify")
+    assert response.status_code == 200
+    assert response.json()["status"] == "classification_success"
+    assert response.json()["classification"]["root_cause_category"] == "transient"
+    conn = connect(db_path)
+    try:
+        init_db(conn)
+        persisted = get_classification_result(conn, "evt_api_1")
+        assert persisted == ClassificationResult.from_dict(VALID_RESULT)
+    finally:
+        conn.close()
+
+
+def test_classify_genuine_persistence_failure_is_explicit(
+    monkeypatch, tmp_path
+) -> None:
+    """A genuinely unpersisted classification failure (no prior row exists and
+    the write fails) remains an explicit classification_persistence_failure."""
+    import sqlite3
+
+    from app.routes import events as events_routes
+
+    _seed_event(monkeypatch, tmp_path)
+    _stub_classifier(json.dumps(VALID_RESULT))
+
+    def raise_persist(conn, result, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(events_routes, "insert_classification_result", raise_persist)
     response = client.post("/events/evt_api_1/classify")
     assert response.status_code == 500
     assert response.json()["status"] == "classification_persistence_failure"
