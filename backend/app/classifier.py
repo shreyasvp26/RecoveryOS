@@ -10,6 +10,7 @@ retried at most once and never coerced into a fake classification.
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any, Protocol
 
 import httpx
@@ -126,6 +127,37 @@ def classify_event(event: PaymentEvent, adapter: ClassifierAdapter) -> Classific
             ) from exc
 
 
+def _validate_base_url(base_url: str) -> str:
+    """Validate and normalize the outbound provider base URL.
+
+    ``OMNIROUTE_BASE_URL`` is operator-controlled configuration, but this is
+    the single outbound HTTP sink in the classification path, so the sink is
+    validated at the boundary: HTTPS is required, ``http`` is tolerated only
+    for loopback (local development against a local model gateway), the URL
+    must include a host, and the normalized form (trailing slash stripped) is
+    what gets concatenated into the request path. Invalid values fail here,
+    explicitly, rather than producing an unexpected outbound request.
+    """
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise OmniRouteError("OmniRoute base URL is required")
+    url = base_url.strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if scheme not in ("https", "http"):
+        raise OmniRouteError(
+            f"OmniRoute base URL scheme must be https:// (or http:// for "
+            f"localhost), got {parsed.scheme!r}"
+        )
+    if not host:
+        raise OmniRouteError("OmniRoute base URL must include a host")
+    if scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
+        raise OmniRouteError(
+            "OmniRoute base URL over http is only allowed for localhost"
+        )
+    return url
+
+
 class OmniRouteClassifier:
     """Thin HTTP adapter over an OpenAI-compatible OmniRoute completions endpoint."""
 
@@ -141,7 +173,7 @@ class OmniRouteClassifier:
         if not api_key:
             raise OmniRouteError("OmniRoute API key is required")
         self._model = model
-        self._base_url = base_url.rstrip("/")
+        self._base_url = _validate_base_url(base_url)
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=timeout_seconds,
