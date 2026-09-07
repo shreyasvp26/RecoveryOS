@@ -94,6 +94,11 @@ STATUS_EXECUTION_FAILED = "execution_failed"
 STATUS_EXECUTION_IN_PROGRESS = "execution_in_progress"
 STATUS_ALREADY_EXECUTED = "already_executed"
 STATUS_PROVIDER_RESULT_UNKNOWN = "provider_result_unknown"
+# A concurrent attempt won the claim, then finished and RELEASED it (a known
+# failure that provably created no side effect). Nothing executed, so this is
+# neither "already executed" nor blocked — the action stays retryable. The
+# claim row is gone, so this is reported explicitly rather than guessed.
+STATUS_EXECUTION_CLAIM_RELEASED = "execution_claim_released"
 
 CLAIM_STATUS_HELD = "claimed"
 CLAIM_STATUS_COMPLETED = "completed"
@@ -243,8 +248,14 @@ def _claim_conflict_result(
         status = STATUS_PROVIDER_RESULT_UNKNOWN
     elif existing is not None and existing["status"] == CLAIM_STATUS_HELD:
         status = STATUS_EXECUTION_IN_PROGRESS
-    else:
+    elif existing is not None and existing["status"] == CLAIM_STATUS_COMPLETED:
         status = STATUS_ALREADY_EXECUTED
+    else:
+        # The claim row no longer exists: the concurrent winner completed and
+        # RELEASED it, which only happens after a known failure that provably
+        # created no provider-side effect. Nothing was executed, so this is
+        # retryable — reporting ALREADY_EXECUTED here would be a fabrication.
+        status = STATUS_EXECUTION_CLAIM_RELEASED
     return ExecutionServiceResult(
         status=status,
         event_id=event_id,
