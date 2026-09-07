@@ -259,9 +259,21 @@ def connect(path: str) -> sqlite3.Connection:
     on the event-loop thread. Every connection is created per request and
     closed after use (never shared across requests), so disabling the
     thread-affinity guard is safe here and standard for FastAPI + SQLite.
+
+    Concurrency hardening: each connection enables a generous ``busy_timeout``
+    so a transient writer lock backs off instead of failing immediately, and
+    the database runs in WAL journal mode (persistent per database file) so
+    concurrent readers and a single writer do not serialize on one file lock.
     """
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 10000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.Error:
+        # WAL is unavailable for unusual storage (e.g. read-only or memory
+        # databases); the connection still works, just without WAL concurrency.
+        pass
     return conn
 
 
@@ -271,7 +283,14 @@ def connect_database() -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create the tables if they do not already exist."""
+    """Create the tables if they do not already exist (per-request safe).
+
+    This path is deliberately non-destructive: it creates missing tables, adds
+    missing nullable columns and installs idempotent indexes/constraints. The
+    Phase-23 recovery-dedupe DELETE scan is a data migration and lives in
+    ``run_migrations`` (deploy-time, once), not here, so a per-request
+    connection never takes a table-scoped write lock.
+    """
     try:
         conn.execute(_PAYMENT_EVENTS_DDL)
         conn.execute(_CLASSIFICATION_RESULTS_DDL)
@@ -288,7 +307,25 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_ESTIMATOR_CALIBRATION_SNAPSHOTS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         _migrate_optimizer_decisions_estimator_provenance(conn)
-        _init_webhook_recovery_outcome_uniqueness(conn)
+        _ensure_webhook_recovery_outcome_uniqueness(conn)
+        _ensure_policy_history_index(conn)
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
+def run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply deploy-time data migrations exactly once, at startup.
+
+    These are the destructive/expensive steps (a full-table de-duplication scan
+    with ``DELETE``) that must never run on a per-request connection. They are
+    idempotent and safe to call again (e.g. on the next deploy), but are only
+    invoked from the application lifespan and the database-seeding entrypoints.
+    """
+    try:
+        _collapse_webhook_recovery_duplicates(conn)
+        _ensure_webhook_recovery_outcome_uniqueness(conn)
         conn.commit()
     except sqlite3.Error:
         conn.rollback()
@@ -341,17 +378,27 @@ def _migrate_optimizer_decisions_estimator_provenance(
 
 
 def _init_webhook_recovery_outcome_uniqueness(conn: sqlite3.Connection) -> None:
-    """Enforce at most ONE verified recovery per Payment Link.
+    """Enforce at most ONE verified recovery per Payment Link (full migration).
+
+    Kept as the public migration entrypoint (used by ``run_migrations`` and the
+    migration regression test): collapses historical duplicates, then installs
+    the unique index. Per-request code must use
+    ``_ensure_webhook_recovery_outcome_uniqueness`` (index only) instead, which
+    is non-destructive.
+    """
+    _collapse_webhook_recovery_duplicates(conn)
+    _ensure_webhook_recovery_outcome_uniqueness(conn)
+
+
+def _collapse_webhook_recovery_duplicates(conn: sqlite3.Connection) -> None:
+    """Delete historical double-counted recovery rows, newest per link kept.
 
     Each Payment Link settles exactly once, so a second
     ``webhook_recovery_outcomes`` row for the same ``payment_link_id`` is a
     duplicate (a ``payment_link.paid`` redelivered under a different delivery
     id). Historically the delivery id was the only uniqueness key, so a
-    redelivery could double-count one link's recovery. This migration:
-      1. collapses any historical duplicate rows to the newest per link, and
-      2. installs a UNIQUE index so the database — not application state —
-         rejects double-counting from now on (``INSERT OR IGNORE`` in the
-         webhook path makes the second write a safe no-op).
+    redelivery could double-count one link's recovery. This runs once at
+    deploy-time, not per request.
     """
     try:
         conn.execute(
@@ -390,10 +437,53 @@ def _init_webhook_recovery_outcome_uniqueness(conn: sqlite3.Connection) -> None:
             )
             """
         )
+
+
+def _ensure_webhook_recovery_outcome_uniqueness(conn: sqlite3.Connection) -> None:
+    """Ensure the per-link UNIQUE index exists (idempotent, per-request safe).
+
+    The database — not application state — rejects double-counting from now on
+    (``INSERT OR IGNORE`` in the webhook path makes the second write a safe
+    no-op). Creating the index is a no-op once it exists, so this is safe on a
+    per-request connection. Historical duplicates are collapsed separately by
+    ``run_migrations`` — which runs BEFORE this is invoked with duplicates
+    present on the startup path.
+
+    One transitional state is tolerated, deliberately: a legacy database where
+    the collapse has not yet run still contains duplicate rows, so building the
+    unique index would fail. ``init_db`` is invoked per-request and BEFORE
+    ``run_migrations`` in the application lifespan, so this helper skips the
+    index build when duplicates block it (inside a savepoint, so only that
+    statement is undone — surrounding DDL is untouched). Deploy-time migration
+    then collapses the rows and installs the index before the app serves.
+    """
+    try:
+        conn.execute("SAVEPOINT ensure_webhook_recovery_unique_index")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_webhook_recovery_outcomes_link "
+            "ON webhook_recovery_outcomes(payment_link_id)"
+        )
+        conn.execute("RELEASE SAVEPOINT ensure_webhook_recovery_unique_index")
+    except sqlite3.IntegrityError:
+        # Historical duplicates present; deploy-time run_migrations collapses
+        # them and installs this index. Skip non-destructively.
+        conn.execute("ROLLBACK TO SAVEPOINT ensure_webhook_recovery_unique_index")
+        conn.execute("RELEASE SAVEPOINT ensure_webhook_recovery_unique_index")
+
+
+def _ensure_policy_history_index(conn: sqlite3.Connection) -> None:
+    """Ensure the intervention-history index used by policy evaluation exists.
+
+    ``get_policy_history`` bounds its rolling 24h window with a
+    ``attempted_at >= ?`` predicate (finding hardens the full-table scan); this
+    index makes that bound usable as the table grows. Idempotent and cheap once
+    present, so it is safe on a per-request connection.
+    """
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS "
-        "ux_webhook_recovery_outcomes_link "
-        "ON webhook_recovery_outcomes(payment_link_id)"
+        "CREATE INDEX IF NOT EXISTS "
+        "idx_intervention_attempts_attempted_at "
+        "ON intervention_attempts(attempted_at)"
     )
 
 
@@ -840,18 +930,30 @@ def get_policy_history(
             "evaluation_time must be a timezone-aware datetime"
         )
     window_start = evaluation_time - timedelta(hours=24)
+    # All persisted attempted_at timestamps are canonical UTC ISO8601
+    # (``evaluation_time.astimezone(timezone.utc).isoformat()`` from the
+    # execution boundary), so string comparison against the same canonical
+    # encoding is exact. Bounding the window in SQL — instead of scanning the
+    # whole table and filtering in Python — keeps evaluation O(window), not
+    # O(history). The attempt rows are still parsed and compared as datetimes
+    # below, so this bound is a safe pruning predicate, never a correctness
+    # change by itself.
+    window_start_iso = window_start.astimezone(timezone.utc).isoformat()
+    evaluation_iso = evaluation_time.astimezone(timezone.utc).isoformat()
 
-    rows = conn.execute(
+    window_rows = conn.execute(
         """
         SELECT event_id, intervention, customer_id, cost_paise,
                attempted_at, status
         FROM intervention_attempts
-        """
+        WHERE attempted_at >= ? AND attempted_at <= ?
+        """,
+        (window_start_iso, evaluation_iso),
     ).fetchall()
 
     customer_count_24h = 0
     existing_daily_spend_paise = 0
-    for row in rows:
+    for row in window_rows:
         attempt = InterventionAttempt.from_dict(dict(row))
         attempted_at = parse_aware_datetime(attempt.attempted_at)
         if window_start <= attempted_at <= evaluation_time:
@@ -861,14 +963,19 @@ def get_policy_history(
 
     most_recent: datetime | None = None
     has_successful_intervention = False
-    for row in rows:
-        attempt = InterventionAttempt.from_dict(dict(row))
-        if attempt.event_id != event.event_id:
-            continue
-        attempted_at = parse_aware_datetime(attempt.attempted_at)
+    event_rows = conn.execute(
+        """
+        SELECT attempted_at, status
+        FROM intervention_attempts
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchall()
+    for row in event_rows:
+        attempted_at = parse_aware_datetime(row["attempted_at"])
         if most_recent is None or attempted_at > most_recent:
             most_recent = attempted_at
-        if attempt.status == "successful":
+        if row["status"] == "successful":
             has_successful_intervention = True
 
     return PolicyHistory(
@@ -886,6 +993,18 @@ def get_policy_history(
 # ---------------------------------------------------------------------------
 
 
+def _escape_like_literal(value: str) -> str:
+    """Escape a user-supplied search term for SQL LIKE.
+
+    ``%`` and ``_`` are LIKE wildcards; the dashboard search is documented as a
+    literal substring match, so a client-supplied ``%``/``_`` must match those
+    characters literally instead of probing for id structures or matching
+    every row. The backslash is escaped first so it cannot defeat the escape
+    character itself.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def list_payment_events(
     conn: sqlite3.Connection,
     *,
@@ -895,18 +1014,19 @@ def list_payment_events(
 ) -> list[dict[str, Any]]:
     """Return event summaries (newest first), optionally filtered.
 
-    ``query`` matches a substring against event/customer/order/payment ids.
-    ``risk_flag`` filters on the locked risk_flag value set. Limit caps the
-    response; the returned records are the full PaymentEvent contract so the
-    Command Center can render real persisted events.
+    ``query`` matches a literal substring against event/customer/order/payment
+    ids; LIKE magic characters in the query are escaped so the match is always
+    literal. ``risk_flag`` filters on the locked risk_flag value set. Limit caps
+    the response; the returned records are the full PaymentEvent contract so
+    the Command Center can render real persisted events.
     """
     sql = "SELECT * FROM payment_events WHERE 1 = 1"
     params: list[Any] = []
     if query:
-        like = f"%{query}%"
+        like = f"%{_escape_like_literal(query)}%"
         sql += (
-            " AND (event_id LIKE ? OR customer_id LIKE ? OR "
-            "order_id LIKE ? OR payment_id LIKE ?)"
+            " AND (event_id LIKE ? ESCAPE '\\' OR customer_id LIKE ? ESCAPE '\\' OR "
+            "order_id LIKE ? ESCAPE '\\' OR payment_id LIKE ? ESCAPE '\\')"
         )
         params.extend([like, like, like, like])
     if risk_flag:

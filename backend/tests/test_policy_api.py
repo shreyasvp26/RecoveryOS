@@ -1,6 +1,8 @@
 """Phase 6 API tests for the POST /events/{event_id}/policy endpoint."""
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import json
 
@@ -19,7 +21,7 @@ from app.main import app
 from app.policy import InterventionAttempt
 from app.routes.events import get_classifier
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 VALID_EVENT = {
     "event_id": "evt_policy_1",

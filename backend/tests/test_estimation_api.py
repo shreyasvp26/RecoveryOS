@@ -1,6 +1,8 @@
 """Phase 23 API tests for /estimator-evidence (read + recalibrate)."""
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 from fastapi.testclient import TestClient
 
@@ -16,7 +18,7 @@ from app.executor import ExecutionOutcome
 from app.main import app
 from app.optimizer_audit import OptimizerDecisionRecord
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 
 def _seed_prediction(conn, *, event_id: str) -> None:

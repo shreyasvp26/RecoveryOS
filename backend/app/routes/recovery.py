@@ -37,6 +37,7 @@ from .. import db
 from ..economics import EconomicsError
 from ..execution_service import (
     STATUS_ALREADY_EXECUTED,
+    STATUS_EXECUTION_CLAIM_RELEASED,
     STATUS_EXECUTION_FAILED,
     STATUS_EXECUTION_IN_PROGRESS,
     STATUS_EXECUTION_SUCCESS,
@@ -261,6 +262,13 @@ def execute_from_recovery_queue(
         content["detail"] = (
             "no intervention was authorized and economically selected for this "
             "event; nothing was executed"
+        )
+    elif result.status == STATUS_EXECUTION_CLAIM_RELEASED:
+        # The concurrent winner completed and released the claim after a known
+        # failure; nothing executed, and this action may be retried.
+        content["detail"] = (
+            "a concurrent execution for this action finished without recording "
+            "a side effect; this action was not executed and may be retried"
         )
     elif result.status not in (STATUS_EXECUTION_SUCCESS, STATUS_EXECUTION_FAILED):
         content["detail"] = "the execution flow returned an unrecognized state"

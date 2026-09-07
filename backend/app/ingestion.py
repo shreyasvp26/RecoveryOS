@@ -62,6 +62,19 @@ def ingest_event(conn: sqlite3.Connection, payload: Any) -> IngestionResult:
                 detail="payment event already ingested",
             )
         insert_payment_event(conn, event)
+    except sqlite3.IntegrityError:
+        # A concurrent request persisted the SAME event_id between our check
+        # and insert (e.g. two webhook deliveries of one failure processed in
+        # parallel). The event exists and is durable, so this is a benign
+        # duplicate — never a persistence failure that triggers an error retry.
+        conn.rollback()
+        if get_payment_event(conn, event.event_id) is not None:
+            return IngestionResult(
+                status=IngestionStatus.DUPLICATE,
+                event_id=event.event_id,
+                detail="payment event already ingested (by a concurrent request)",
+            )
+        raise
     except sqlite3.Error as exc:
         return IngestionResult(
             status=IngestionStatus.ERROR,

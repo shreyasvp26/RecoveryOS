@@ -61,6 +61,7 @@ from .config import (
     DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE,
     DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H,
     build_policy_config,
+    default_intervention_cost_paise,
 )
 from .policy import (
     RULE_COOLDOWN,
@@ -327,12 +328,19 @@ def _scenario_config(
     ``PolicyConfig.__post_init__`` is the authoritative validator; this only
     translates its error into the scenario vocabulary so an operator sees one
     consistent failure type.
+
+    The intervention cost model is NOT a lab knob — it is the same economic
+    model the runtime policy uses (``default_intervention_cost_paise``), wired
+    in here so an operator-defined scenario that echoes the active policy's
+    three knobs replays with identical spend accounting, and so replay spend
+    accounting is never structurally silenced with all-zero costs.
     """
     try:
         return PolicyConfig(
             max_interventions_per_customer_24h=max_interventions,
             event_cooldown_minutes=cooldown_minutes,
             daily_spend_cap_paise=spend_cap_paise,
+            intervention_cost_paise=default_intervention_cost_paise(),
         )
     except PolicyValidationError as exc:
         raise PolicyScenarioError(str(exc)) from exc

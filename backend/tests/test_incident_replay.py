@@ -6,6 +6,8 @@ deterministic, and must change nothing about the running system.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,7 +27,7 @@ from app.policy_scenario import (
     current_scenario,
 )
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 WORKLOAD_SEED = 42
 WORKLOAD_COUNT = 500

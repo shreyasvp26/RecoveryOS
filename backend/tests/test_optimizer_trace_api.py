@@ -9,6 +9,8 @@ truth or an economic figure the backend did not compute.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import json
 import pathlib
@@ -285,7 +287,7 @@ def client(tmp_path):
     app.dependency_overrides[events_routes.get_now] = lambda: NOW
     app.dependency_overrides[events_routes.get_razorpay_client] = lambda: None
     try:
-        yield TestClient(app), conn
+        yield TestClient(app, headers=TEST_OPERATOR_HEADERS), conn
     finally:
         app.dependency_overrides.clear()
         conn.close()

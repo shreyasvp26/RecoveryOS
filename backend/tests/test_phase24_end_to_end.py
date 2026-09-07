@@ -21,6 +21,8 @@ immutability, and ``threshold_not_met`` was only asserted at the unit level.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import hashlib
 import hmac
@@ -54,7 +56,7 @@ from app.policy import InterventionAttempt
 from app.razorpay_client import PaymentLinkResult
 from app.routes.events import get_classifier, get_now, get_razorpay_client
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 NOW = datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc)
 

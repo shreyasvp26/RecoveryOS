@@ -1,6 +1,8 @@
 """Phase 21 API tests for GET /recovery/queue."""
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 from datetime import datetime, timedelta, timezone
 
@@ -21,7 +23,7 @@ from app.main import app
 from app.models import PaymentEvent
 from app.policy import PolicyDecision
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
 

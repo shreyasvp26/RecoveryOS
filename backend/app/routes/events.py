@@ -15,6 +15,7 @@ no SQL; they only wire HTTP to the services.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -65,6 +66,8 @@ from ..policy import (
 from ..razorpay_client import RazorpayConfigurationError
 
 router = APIRouter(tags=["events"])
+
+logger = logging.getLogger("uvicorn.events")
 
 
 def get_db() -> Iterator[sqlite3.Connection]:
@@ -202,13 +205,25 @@ def classify_event_endpoint(
             },
         )
     except Exception as exc:
+        # An unexpected classification failure is recorded durably for the
+        # operator queue, but its detail is NOT echoed to the client verbatim:
+        # provider URLs, internal identifiers or stack fragments must not
+        # leak to an unauthenticated observer. The stable title is returned;
+        # the detail is logged server-side.
         _record_classify_failure(conn, event_id, exc)
+        logger.warning(
+            "classification failed for event %s: %s",
+            event_id,
+            exc,
+            exc_info=True,
+        )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "status": "classification_error",
                 "event_id": event_id,
-                "detail": f"unexpected classification failure: {exc}",
+                "detail": "unexpected classification failure; details recorded "
+                "server-side for the operator",
             },
         )
 

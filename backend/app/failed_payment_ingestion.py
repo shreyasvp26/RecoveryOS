@@ -79,18 +79,36 @@ def map_failed_payment_to_event(
     failed: FailedPaymentEvent,
     *,
     event_id_prefix: str = "evt_pfail",
+    observed_at: str | None = None,
 ) -> PaymentEvent:
     """Map a verified ``payment.failed`` into a locked ``PaymentEvent``.
 
     ``event_id`` is derived deterministically (and idempotently) from the
     delivery id so the same delivery always maps to the same event — duplicate
     deliveries of the same failure never create a second event.
+
+    ``observed_at`` is the RecoveryOS observation time passed by the webhook
+    boundary. A real Razorpay delivery does not always carry ``created_at``; a
+    ``PaymentEvent`` requires a valid timestamp with a time component, so the
+    observation time (never a fabricated provider time) is used when the
+    provider did not supply one. No timestamp is invented: without either a
+    provider ``created_at`` or a supplied ``observed_at`` this raises an
+    explicit ValueError instead of emitting a placeholder that cannot satisfy
+    the contract (the historical fixed-midnight fallback produced a
+    permanent 500 retry loop because it could never validate).
     """
     customer_id = failed.customer_id or f"cust_{failed.payment_id}"
     history = derive_customer_history(conn, customer_id)
 
     digest = hashlib.sha1(failed.delivery_id.encode("utf-8")).hexdigest()[:12]
     event_id = f"{event_id_prefix}_{digest}"
+
+    event_timestamp = failed.failed_at or observed_at
+    if not event_timestamp:
+        raise ValueError(
+            "payment.failed webhook carried no created_at and no observation "
+            "time was available; refusing to fabricate an event timestamp"
+        )
 
     return PaymentEvent(
         event_id=event_id,
@@ -110,6 +128,5 @@ def map_failed_payment_to_event(
         bank=failed.bank or _NEUTRAL_BANK,
         risk_flag="normal",
         customer_history=history,
-        timestamp=failed.failed_at
-        or "1970-01-01T00:00:00+00:00",
+        timestamp=event_timestamp,
     )

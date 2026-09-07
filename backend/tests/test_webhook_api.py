@@ -1,6 +1,8 @@
 """Phase 12 webhook boundary & security tests (raw body + signature)."""
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import hashlib
 import hmac
@@ -29,7 +31,7 @@ from app.razorpay_webhook import (
 )
 from app.routes import webhook as webhook_routes
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 TEST_WEBHOOK_SECRET = "test-webhook-secret"
 

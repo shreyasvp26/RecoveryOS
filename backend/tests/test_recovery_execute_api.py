@@ -7,6 +7,8 @@ protection must survive, and execution must never be reported as recovery.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -32,7 +34,7 @@ from app.optimizer_audit import OptimizerDecisionRecord
 from app.razorpay_client import PaymentLinkResult, RazorpayExecutionError
 from app.routes.events import get_classifier, get_now, get_razorpay_client
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 NOW = datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc)
 

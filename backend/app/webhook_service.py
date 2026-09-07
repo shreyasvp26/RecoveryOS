@@ -331,7 +331,9 @@ def process_payment_failed(
         )
 
     try:
-        event = map_failed_payment_to_event(conn, failed)
+        event = map_failed_payment_to_event(
+            conn, failed, observed_at=received_at
+        )
         result = ingest_event(conn, event)
     except sqlite3.Error:
         # Mapping or persistence raised outside ingest_event's own handling

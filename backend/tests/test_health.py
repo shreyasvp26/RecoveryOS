@@ -1,5 +1,7 @@
 """Health/readiness endpoint tests for the RecoveryOS backend foundation."""
 
+from conftest import TEST_OPERATOR_HEADERS
+
 import sqlite3
 
 import pytest
@@ -7,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.main import HEALTH_RESPONSE, app
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 
 def test_health_endpoint_returns_deterministic_response() -> None:
