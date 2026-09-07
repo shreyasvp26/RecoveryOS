@@ -23,6 +23,8 @@ Each test locks a confirmed reliability fix:
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import hashlib
 import hmac
@@ -59,7 +61,7 @@ from app.recovery_operations import (
 )
 import app.webhook_service as webhook_service
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 TEST_WEBHOOK_SECRET = "test-webhook-secret"
 SIGNATURE_HEADER = "X-Razorpay-Signature"
@@ -169,7 +171,7 @@ def test_payment_failed_sqlite_error_on_map_leaves_delivery_recoverable(
     body = _raw()
     failed = parse_payment_failed_payload(body, "delivery_sqlite_b")
 
-    def raise_sqlite(c, failed_event):
+    def raise_sqlite(c, failed_event, observed_at):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(webhook_service, "map_failed_payment_to_event", raise_sqlite)
