@@ -813,15 +813,28 @@ def test_operator_endpoints_require_an_existing_event(monkeypatch, tmp_path) -> 
     fabricate classification, authorization, or execution for an event that
     does not exist."""
     _set_env(monkeypatch, tmp_path)
-    forged = [
-        ("/events/evt_ghost/classify", 404),
-        ("/events/evt_ghost/policy", 404),
-        ("/events/evt_ghost/execute", 404),
-    ]
-    for path, code in forged:
-        response = client.post(path, json={"authorized": True, "intervention": "payment_link"})
-        assert response.status_code == code, path
-        assert response.json()["status"] == "not_found"
+    from app.routes import events as events_routes
+
+    # The classify endpoint resolves get_classifier BEFORE the 404 check, and a
+    # fresh CI environment has no OMNIROUTE_API_KEY. Stub the dependency so the
+    # ghost-event 404 is what is actually asserted, not the provider setup.
+    app.dependency_overrides[events_routes.get_classifier] = lambda: _GoodAdapter(
+        "evt_ghost"
+    )
+    try:
+        forged = [
+            ("/events/evt_ghost/classify", 404),
+            ("/events/evt_ghost/policy", 404),
+            ("/events/evt_ghost/execute", 404),
+        ]
+        for path, code in forged:
+            response = client.post(
+                path, json={"authorized": True, "intervention": "payment_link"}
+            )
+            assert response.status_code == code, path
+            assert response.json()["status"] == "not_found"
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_live_razorpay_key_blocks_execution_at_the_boundary(
