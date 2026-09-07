@@ -1488,6 +1488,11 @@ button:focus-visible {
   color: var(--warn);
   font-size: 12px;
 }
+.ops-failed {
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+}
 .ops-recovered {
   color: var(--success);
   font-size: 12px;

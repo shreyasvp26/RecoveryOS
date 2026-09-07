@@ -112,6 +112,14 @@ export const recoveryQueue = (params) => get('/recovery/queue', params)
 export const executeRecovery = (eventId) =>
   post(`/recovery/${encodeURIComponent(eventId)}/execute`, {})
 /**
+ * Re-run the advisory diagnosis (classification) for one event. Advisory only
+ * by design: classification never selects, authorizes or executes anything.
+ * It re-fills the Diagnose stage so an operator can recover an event whose
+ * automatic diagnosis failed and was durably recorded.
+ */
+export const classifyEvent = (eventId) =>
+  post(`/events/${encodeURIComponent(eventId)}/classify`, {})
+/**
  * Recovery Intelligence evidence. Read-only by design: the intelligence layer
  * measures outcomes and has no endpoint that could execute, authorize, or
  * change a decision.

@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { Card, Badge, LoadingBlock, ErrorState, EmptyState } from './ui.jsx'
-import { recoveryQueue, executeRecovery, useAsync } from '../core/api.js'
+import { recoveryQueue, executeRecovery, classifyEvent, useAsync } from '../core/api.js'
 import { formatINR, formatTime, humanize } from '../core/format.js'
 
 /**
@@ -69,12 +69,24 @@ function PolicyCell({ policy }) {
 }
 
 /** What the operator can do with this row, given only what the server recorded. */
-function RowActions({ row, busy, onExecute, onOpenTrace, onExplain }) {
+function RowActions({ row, busy, onExecute, onOpenTrace, onExplain, onRetryDiagnosis }) {
   const state = row.lifecycle_state
   const hasHistory = row.execution !== null || state === 'BLOCKED'
 
   return (
     <div className="ops-actions">
+      {row.diagnosis_error && (
+        // The automatic diagnosis failed and was recorded durably. This button
+        // re-runs the advisory diagnosis only — it never selects, authorizes
+        // or executes anything; the server keeps full authority.
+        <button
+          className="btn btn--ghost"
+          disabled={busy}
+          onClick={() => onRetryDiagnosis(row.event_id)}
+        >
+          Retry diagnosis
+        </button>
+      )}
       {row.actionable && (
         <button
           className="btn btn--primary"
@@ -109,7 +121,7 @@ function RowActions({ row, busy, onExecute, onOpenTrace, onExplain }) {
   )
 }
 
-function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, expanded, onToggle }) {
+function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, onRetryDiagnosis, expanded, onToggle }) {
   const action =
     row.selection?.selected_intervention ??
     row.execution?.intervention ??
@@ -132,6 +144,15 @@ function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, expanded, onTo
               {humanize(row.diagnosis.root_cause_category)}
               <div className="ops-sub">
                 confidence {(Number(row.diagnosis.confidence) * 100).toFixed(0)}%
+              </div>
+            </>
+          ) : row.diagnosis_error ? (
+            <>
+              <span className="ops-failed">Diagnosis failed</span>
+              <div className="ops-sub">
+                {row.diagnosis_error.attempt_count}{' '}
+                {row.diagnosis_error.attempt_count === 1 ? 'attempt' : 'attempts'} ·{' '}
+                {row.diagnosis_error.last_error}
               </div>
             </>
           ) : (
@@ -164,6 +185,7 @@ function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, expanded, onTo
             onExecute={onExecute}
             onOpenTrace={onOpenTrace}
             onExplain={onExplain}
+            onRetryDiagnosis={onRetryDiagnosis}
           />
         </td>
       </tr>
@@ -241,6 +263,23 @@ export default function RecoveryOps({ onNavigate }) {
       .then((body) => {
         // The server's own words for what it did. Nothing here infers success.
         setNotice({ tone: 'ok', message: describeResult(body) })
+      })
+      .catch((err) => setNotice({ tone: 'error', message: err.message }))
+      .finally(() => {
+        setBusyId(null)
+        reload()
+      })
+  }
+
+  const retryDiagnosis = (eventId) => {
+    setBusyId(eventId)
+    setNotice(null)
+    classifyEvent(eventId)
+      .then(() => {
+        setNotice({
+          tone: 'ok',
+          message: `Diagnosis re-run for ${eventId}; reloading the queue.`,
+        })
       })
       .catch((err) => setNotice({ tone: 'error', message: err.message }))
       .finally(() => {
@@ -376,8 +415,9 @@ export default function RecoveryOps({ onNavigate }) {
                     busy={busyId === row.event_id}
                     expanded={expanded === row.event_id}
                     onToggle={(id) => setExpanded(expanded === id ? null : id)}
-                    onExecute={execute}
-                    onOpenTrace={openTrace}
+onExecute={execute}
+            onOpenTrace={openTrace}
+            onRetryDiagnosis={retryDiagnosis}
                     onExplain={(id) => setExpanded(id)}
                   />
                 ))}
