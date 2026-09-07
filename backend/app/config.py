@@ -33,6 +33,12 @@ DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H = 2
 DEFAULT_POLICY_EVENT_COOLDOWN_MINUTES = 30
 DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE = 5_000_000  # ₹50,000.00 in paise
 
+# Operator authentication. A single shared API key protects every operator/data
+# endpoint; it is required (fail-closed when unset) and never defaults to a
+# known value. Values are read from the environment at request time, never
+# cached, compared in constant time, and never exposed.
+OPERATOR_API_KEY_ENV = "RECOVERYOS_OPERATOR_API_KEY"
+
 
 def get_database_url() -> str:
     """Return the configured database URL, or the development default."""
@@ -62,6 +68,29 @@ def get_omniroute_model() -> str:
 def get_omniroute_base_url() -> str:
     """Return the configured OmniRoute base URL."""
     return os.environ.get("OMNIROUTE_BASE_URL", DEFAULT_OMNIROUTE_BASE_URL)
+
+
+def get_operator_api_key() -> str:
+    """Return the configured operator API key, or an empty string when unset.
+
+    An empty value is an explicit, fail-closed configuration state: operator
+    endpoints refuse to serve (HTTP 503) until a real key is configured rather
+    than running unauthenticated.
+    """
+    return os.environ.get(OPERATOR_API_KEY_ENV, "")
+
+
+def get_cors_origins() -> list[str]:
+    """Return the explicit cross-origin allow-list for browser access.
+
+    Implements the DEPLOYMENT.md cross-origin contract: a frontend served from
+    a different origin can reach the API only when the operator explicitly
+    lists that origin in ``RECOVERYOS_CORS_ORIGINS`` (comma-separated). When
+    unset, no cross-origin browser access is allowed — the supported topology
+    is the same-origin reverse proxy (/api), exactly as in local development.
+    """
+    raw = os.environ.get("RECOVERYOS_CORS_ORIGINS", "")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
 def _resolve_policy_int(env_name: str, default: int) -> int:
@@ -138,12 +167,44 @@ def build_razorpay_client() -> Any | None:
     return RazorpayPaymentLinkClient(key_id, key_secret)
 
 
+def default_intervention_cost_paise() -> dict[str, int]:
+    """The modelled cost of every candidate intervention, in paise.
+
+    Spend-cap accounting and the optimizer share one source of truth: the
+    economic model (``DEFAULT_ECONOMIC_MODEL``). Costs are resolved here once
+    and wired into the runtime policy (``build_policy_config``) and into replay
+    scenario configs (``policy_scenario``) so the two methodologies cannot drift
+    apart — an unchanged policy whose label is renamed must replay identically.
+    An intervention with no economic assumption (e.g. ``no_action``) costs 0.
+    """
+    from .classification import CANDIDATE_INTERVENTIONS
+    from .economics import DEFAULT_ECONOMIC_MODEL
+
+    return {
+        intervention: (
+            DEFAULT_ECONOMIC_MODEL.assumptions[intervention].cost_paise
+            if intervention in DEFAULT_ECONOMIC_MODEL.assumptions
+            else 0
+        )
+        for intervention in CANDIDATE_INTERVENTIONS
+    }
+
+
 def build_policy_config() -> "PolicyConfig":
-    """Build the deterministic policy configuration from the environment."""
+    """Build the deterministic policy configuration from the environment.
+
+    The spend-cap rule is backed by the SAME economic cost model the optimizer
+    uses (``DEFAULT_ECONOMIC_MODEL``), so a persisted attempt accumulates the
+    real modelled cost of its intervention and the cap is genuinely enforced —
+    never structurally disabled with all-zero costs. Costs are resolved here,
+    once, from the economic model; operators tune the cap itself via
+    ``POLICY_DAILY_SPEND_CAP_PAISE``.
+    """
     from .policy import PolicyConfig
 
     return PolicyConfig(
         max_interventions_per_customer_24h=get_policy_max_interventions_per_customer_24h(),
         event_cooldown_minutes=get_policy_event_cooldown_minutes(),
         daily_spend_cap_paise=get_policy_daily_spend_cap_paise(),
+        intervention_cost_paise=default_intervention_cost_paise(),
     )
