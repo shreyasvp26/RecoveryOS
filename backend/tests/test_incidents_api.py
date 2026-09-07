@@ -6,6 +6,8 @@ side effect on the database or on policy.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,7 +16,7 @@ from app import db
 from app.generator import generate_events
 from app.main import app
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 WORKLOAD_SEED = 42
 WORKLOAD_COUNT = 500

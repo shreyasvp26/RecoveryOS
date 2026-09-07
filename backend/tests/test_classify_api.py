@@ -1,6 +1,8 @@
 """Phase 5 API tests for the POST /events/{event_id}/classify endpoint."""
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import json
 
@@ -13,7 +15,7 @@ from app.db import connect, get_classification_result, init_db, insert_classific
 from app.main import app
 from app.routes.events import get_classifier
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 VALID_EVENT = {
     "event_id": "evt_api_1",

@@ -11,6 +11,8 @@ Payment Link.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import hashlib
 import hmac
@@ -29,7 +31,7 @@ from app.razorpay_webhook import (
 )
 import app.webhook_service as webhook_service
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 TEST_WEBHOOK_SECRET = "test-webhook-secret"
 SIGNATURE_HEADER = "X-Razorpay-Signature"

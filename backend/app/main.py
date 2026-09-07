@@ -15,18 +15,24 @@ No RecoveryOS business logic beyond event ingestion; the dashboard routes hold
 no decision logic and only READ persisted state.
 """
 
+import logging
 import sqlite3
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import require_operator
 from .config import (
     build_policy_config,
+    get_cors_origins,
     get_omniroute_api_key,
     get_razorpay_key_id,
     get_razorpay_key_secret,
     get_razorpay_webhook_secret,
 )
-from .db import connect_database, init_db
+from .db import connect_database, init_db, run_migrations
 from .routes.dashboard import router as dashboard_router
 from .routes.estimation import router as estimation_router
 from .routes.events import router as events_router
@@ -36,15 +42,52 @@ from .routes.recovery import router as recovery_router
 from .routes.replay import router as replay_router
 from .routes.webhook import router as webhook_router
 
-app = FastAPI(title="RecoveryOS API", version="0.1.0")
-app.include_router(events_router)
-app.include_router(dashboard_router)
+logger = logging.getLogger("uvicorn.error")
+
+# Deploy-time migration: the recovery-dedupe DELETE and schema upgrades run ONCE
+# here, at startup, never per-request. A migration failure is logged and the app
+# still serves (the health boundary reports degraded database state); the
+# per-request init_db path stays cheap and read-mostly.
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    try:
+        conn = connect_database()
+        try:
+            init_db(conn)
+            run_migrations(conn)
+        finally:
+            conn.close()
+    except (sqlite3.Error, ValueError) as exc:
+        logger.warning("startup database migration skipped: %s", exc)
+    yield
+
+
+app = FastAPI(title="RecoveryOS API", version="0.1.0", lifespan=lifespan)
+
+# Cross-origin browser access is opt-in and explicit: when RECOVERYOS_CORS_ORIGINS
+# is unset (the default), no cross-origin origin is allowed and the supported
+# topology is same-origin proxying, exactly as in local development. When set,
+# each listed origin is allowed with credentials. Fail-closed by default.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Every operator/data router is gated by the operator bearer credential. The
+# webhook router is deliberately excluded: it authenticates through its own
+# Razorpay signature verification. Health endpoints are defined on `app`
+# directly and stay public for liveness/readiness probes.
+app.include_router(events_router, dependencies=[Depends(require_operator)])
+app.include_router(dashboard_router, dependencies=[Depends(require_operator)])
 app.include_router(webhook_router)
-app.include_router(replay_router)
-app.include_router(incidents_router)
-app.include_router(recovery_router)
-app.include_router(intelligence_router)
-app.include_router(estimation_router)
+app.include_router(replay_router, dependencies=[Depends(require_operator)])
+app.include_router(incidents_router, dependencies=[Depends(require_operator)])
+app.include_router(recovery_router, dependencies=[Depends(require_operator)])
+app.include_router(intelligence_router, dependencies=[Depends(require_operator)])
+app.include_router(estimation_router, dependencies=[Depends(require_operator)])
 
 HEALTH_RESPONSE = {"status": "ok"}
 

@@ -5,6 +5,8 @@ route may leak hidden ground truth, touch the database, or reach a provider.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,7 +23,7 @@ from app.routes.replay import MAX_SCENARIOS_PER_COMPARISON
 
 @pytest.fixture(scope="module")
 def client() -> TestClient:
-    return TestClient(app)
+    return TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 
 def valid_custom(**overrides) -> dict:

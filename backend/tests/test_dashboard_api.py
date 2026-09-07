@@ -9,6 +9,8 @@ never replaced with a fabricated zero or winning number.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import json
 
@@ -19,7 +21,7 @@ from app.db import connect, init_db
 from app.main import app
 from app.routes.events import get_classifier
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 VALID_EVENT = {
     "event_id": "evt_dash_1",

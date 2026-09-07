@@ -7,6 +7,8 @@ benchmark and the active policy exactly as they found them.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import io
 import pathlib
@@ -31,7 +33,7 @@ from app.policy_scenario import (
     current_scenario,
 )
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 PHASE20_SOURCES = (
     "app/incidents.py",

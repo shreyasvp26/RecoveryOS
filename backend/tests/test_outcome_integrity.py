@@ -6,6 +6,8 @@ that contract behaviorally and at the source/API level.
 """
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 import json
 import re
@@ -29,7 +31,7 @@ from app.razorpay_client import PaymentLinkResult
 from app.routes.events import get_classifier, get_now, get_razorpay_client
 from app.selector import NO_ACTION, select_intervention
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 EVALUATION_TIME = datetime(2026, 8, 27, 13, 0, tzinfo=timezone.utc)
 

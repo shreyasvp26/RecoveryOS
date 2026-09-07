@@ -1,6 +1,8 @@
 """Phase 22 API tests for GET /recovery-intelligence."""
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 from datetime import datetime, timedelta, timezone
 
@@ -26,7 +28,7 @@ from app.recovery_intelligence import (
     POSITIVE_EVIDENCE_ONLY,
 )
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 NOW = datetime(2026, 8, 30, 9, 0, tzinfo=timezone.utc)
 

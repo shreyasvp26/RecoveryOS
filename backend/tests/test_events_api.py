@@ -1,12 +1,14 @@
 """Phase 4 API tests for the minimal POST /events ingestion endpoint."""
 
 from __future__ import annotations
+from conftest import TEST_OPERATOR_HEADERS
+
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 
-client = TestClient(app)
+client = TestClient(app, headers=TEST_OPERATOR_HEADERS)
 
 
 def _set_test_db(monkeypatch, tmp_path) -> None:
