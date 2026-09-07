@@ -307,11 +307,18 @@ def build_queue_row(
     optimizer_decisions: Sequence[Mapping[str, Any]],
     executions: Sequence[Mapping[str, Any]],
     recoveries: Mapping[str, Mapping[str, Any]],
+    *,
+    classification_failures: Mapping[str, Mapping[str, Any]] | None = None,
+    provider_outcomes: Mapping[str, Mapping[str, Any]] | None = None,
+    claims: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Project one payment event and its persisted evidence into a queue row.
 
     Pure: the same records always produce the same row, so the projection can
-    be tested without a database and can never introduce hidden state.
+    be tested without a database and can never introduce hidden state. The
+    ``classification_failures`` / ``provider_outcomes`` / ``claims`` maps are
+    additive context surfaced for observability only; every row is valid
+    without them (all three derived fields read back as None).
     """
     policy = _policy_view(policy_decisions)
     selection = _selection_view(optimizer_decisions)
@@ -330,6 +337,17 @@ def build_queue_row(
                 classification.get("candidate_interventions") or ()
             ),
         }
+    diagnosis_error = None
+    if diagnosis is None and classification_failures:
+        failure = classification_failures.get(event["event_id"])
+        if failure is not None:
+            diagnosis_error = {
+                "attempt_count": failure.get("attempt_count"),
+                "last_failed_at": failure.get("last_failed_at"),
+                "last_error": failure.get("last_error"),
+            }
+    provider_outcome = _provider_outcome_view(execution, provider_outcomes)
+    claim = _claim_view(claims.get(event["event_id"]) if claims else None)
     return {
         "event_id": event["event_id"],
         "customer_id": event.get("customer_id"),
@@ -342,10 +360,13 @@ def build_queue_row(
         "risk_flag": event.get("risk_flag"),
         "event_timestamp": event.get("timestamp"),
         "diagnosis": diagnosis,
+        "diagnosis_error": diagnosis_error,
         "policy": policy,
         "selection": selection,
         "execution": execution,
         "outcome": outcome,
+        "provider_outcome": provider_outcome,
+        "claim": claim,
         "lifecycle_state": lifecycle_state,
         # An operator can only act where the authoritative state leaves room to
         # act. This is a UI affordance derived from persisted evidence — it is
@@ -356,6 +377,61 @@ def build_queue_row(
         "actionable": lifecycle_state
         in (STATE_RECOMMENDED, STATE_POLICY_ALLOWED, STATE_SELECTED, STATE_FAILED)
         and outcome["state"] != STATE_PROVIDER_RESULT_UNKNOWN,
+    }
+
+
+def _provider_outcome_view(
+    execution: Mapping[str, Any] | None,
+    provider_outcomes: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Surface a provider-polled terminal outcome for a real Payment Link.
+
+    Read-only observability: the authoritative recovery stays webhook-verified
+    (``_outcome_view``), and this field only reports what the provider's own
+    poll has observed so an operator is never misled into thinking an
+    expiring/waiting link is still open-ended when it has already settled.
+    """
+    if not provider_outcomes or execution is None:
+        return None
+    if execution.get("execution_mode") != "REAL_RAZORPAY":
+        return None
+    payment_link_id = execution.get("payment_link_id")
+    if not payment_link_id:
+        return None
+    record = provider_outcomes.get(payment_link_id)
+    if record is None:
+        return None
+    return {
+        "status": record.get("status"),
+        "outcome": record.get("outcome"),
+        "observed_at": record.get("observed_at"),
+        "note": (
+            "provider-observed terminal outcome via reconciliation poll; not "
+            "webhook-verified, so no recovery is claimed from it"
+        ),
+    }
+
+
+def _claim_view(
+    claim: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Surface a held (in-flight/stuck) execution claim for observability.
+
+    A claim still held as ``claimed`` means the most recent execution attempt
+    did not durably record its outcome (e.g. the process died mid-flight); the
+    duplicate-execution guard keeps refusing a retry for exactly that reason.
+    Surfacing it lets an operator distinguish "executing right now" from
+    "stuck/crashed and must be reconciled".
+    """
+    if claim is None or claim.get("status") != "claimed":
+        return None
+    return {
+        "status": claim.get("status"),
+        "intervention": claim.get("intervention"),
+        "execution_mode": claim.get("execution_mode"),
+        "claimed_at": claim.get("claimed_at"),
+        "resolved_at": claim.get("resolved_at"),
+        "detail": claim.get("detail"),
     }
 
 
@@ -452,6 +528,9 @@ def build_recovery_queue(
     )
     event_ids = [event["event_id"] for event in events]
     classifications = db.get_classification_results_for_events(conn, event_ids)
+    classification_failures = db.get_classification_failures_for_events(
+        conn, event_ids
+    )
     policy_decisions = db.get_policy_decisions_for_events(conn, event_ids)
     optimizer_decisions = db.get_optimizer_decisions_for_events(conn, event_ids)
     executions = db.get_execution_outcomes_for_events(conn, event_ids)
@@ -464,6 +543,10 @@ def build_recovery_queue(
         }
     )
     recoveries = db.get_webhook_recovery_outcomes_for_payment_links(conn, link_ids)
+    provider_outcomes = db.get_provider_payment_link_outcomes_for_links(
+        conn, link_ids
+    )
+    claims = db.get_execution_claim_for_events(conn, event_ids)
 
     rows = [
         build_queue_row(
@@ -473,6 +556,9 @@ def build_recovery_queue(
             optimizer_decisions.get(event["event_id"], []),
             executions.get(event["event_id"], []),
             recoveries,
+            classification_failures=classification_failures,
+            provider_outcomes=provider_outcomes,
+            claims=claims,
         )
         for event in events
     ]
@@ -537,4 +623,11 @@ def build_queue_row_for_event(conn, event_id: str) -> dict[str, Any] | None:
         db.get_optimizer_decisions_for_event(conn, event_id),
         executions,
         db.get_webhook_recovery_outcomes_for_payment_links(conn, link_ids),
+        classification_failures=db.get_classification_failures_for_events(
+            conn, [event_id]
+        ),
+        provider_outcomes=db.get_provider_payment_link_outcomes_for_links(
+            conn, link_ids
+        ),
+        claims=db.get_execution_claim_for_events(conn, [event_id]),
     )

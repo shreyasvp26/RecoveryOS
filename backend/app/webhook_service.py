@@ -27,6 +27,7 @@ import hashlib
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from . import db
@@ -293,6 +294,10 @@ def process_payment_failed(
         shared delivery-claim machinery (delivery id already handled).
       * ``duplicate_event`` — the delivery was fresh, but a PaymentEvent with
         the derived event_id already exists (should not normally happen).
+      * ``persistence_failure`` — the event could not be durably recorded or
+        its persistence could not be confirmed. The delivery is deliberately
+        left in-flight (never marked terminal) so Razorpay's retry reprocesses
+        it; only a recorded terminal delivery is deduplicated.
     """
     body_sha256 = _body_sha256(raw_body)
 
@@ -325,11 +330,15 @@ def process_payment_failed(
             "overwrite and refusing a second ingestion",
         )
 
-    event = map_failed_payment_to_event(conn, failed)
     try:
+        event = map_failed_payment_to_event(conn, failed)
         result = ingest_event(conn, event)
     except sqlite3.Error:
-        db.update_webhook_delivery_status(conn, failed.delivery_id, _DELIVERY_INGESTED)
+        # Mapping or persistence raised outside ingest_event's own handling
+        # (e.g. the customer-history read). No event is durably recorded. The
+        # delivery is left in-flight (NOT marked terminal) and an error is
+        # surfaced so Razorpay's retry reprocesses it to completion; marking
+        # it terminal here would silently lose the payment forever.
         return WebhookProcessResult(
             status=S_PERSISTENCE_FAILURE,
             delivery_id=failed.delivery_id,
@@ -338,11 +347,26 @@ def process_payment_failed(
             "returning error so Razorpay retries",
         )
 
+    if result.status is IngestionStatus.ERROR:
+        # The event was NOT persisted (or its persistence could not be
+        # confirmed). This is a transient, recoverable condition. The delivery
+        # stays in-flight and an error is surfaced so Razorpay retries; a
+        # terminal 2xx here would silently drop a failed payment from the
+        # recovery pipeline forever.
+        return WebhookProcessResult(
+            status=S_PERSISTENCE_FAILURE,
+            delivery_id=failed.delivery_id,
+            event_type=failed.event_type,
+            detail=result.detail
+            or "persistence_failure during payment.failed ingestion; "
+            "returning error so Razorpay retries",
+        )
+
     if result.status is not IngestionStatus.SUCCESS:
         # A fresh delivery whose mapped event already exists (rare) or is
-        # invalid (should not happen given strict parsing). The delivery is
-        # still marked handled so Razorpay does not retry a non-recoverable
-        # condition; the event itself is not double-counted.
+        # invalid (should not happen given strict parsing). Both are
+        # non-recoverable conditions: the delivery is marked handled so
+        # Razorpay does not retry, and the event is never double-counted.
         db.update_webhook_delivery_status(conn, failed.delivery_id, _DELIVERY_INGESTED)
         already = result.status is IngestionStatus.DUPLICATE
         return WebhookProcessResult(
@@ -378,39 +402,76 @@ def _auto_classify_best_effort(
     Best-effort and isolated from the ingestion result: any failure to build the
     adapter, call the model, or persist the classification is logged and
     swallowed so it never fails the webhook and never triggers a Razorpay retry.
-    A successful classification is persisted for the Diagnose stage.
+    A successful classification is persisted for the Diagnose stage. A failure
+    is recorded durably (``classification_failures``) so it surfaces in the
+    operations queue instead of silently stalling the event at NOT_CLASSIFIED.
     """
+    event_id = getattr(event, "event_id", None)
+    if event_id is None:
+        logger.warning("auto-classify skipped for a malformed event (no event_id)")
+        return
     try:
         adapter = build_omniroute_adapter()
     except Exception as exc:  # noqa: BLE001 - best effort by contract
-        logger.warning(
-            "auto-classify skipped for %s (adapter unavailable): %s",
-            getattr(event, "event_id", "?"),
-            exc,
-        )
+        _record_auto_classify_failure(conn, event_id, "adapter_unavailable", exc)
         return
     try:
         result = classify_event(event, adapter)
     except Exception as exc:  # noqa: BLE001 - best effort by contract
-        logger.warning(
-            "auto-classify failed for %s: %s",
-            getattr(event, "event_id", "?"),
-            exc,
-        )
+        _record_auto_classify_failure(conn, event_id, "classify_failed", exc)
         return
     finally:
         adapter.close()
     try:
         db.insert_classification_result(conn, result)
-        logger.info(
-            "auto-classified %s as %s (%.2f)",
-            result.event_id,
-            result.root_cause_category,
-            result.confidence,
-        )
     except Exception as exc:  # noqa: BLE001 - best effort by contract
+        # The model call produced a classification but it could not be
+        # persisted — this is a durable per-event failure, not just a log line.
+        _record_auto_classify_failure(conn, event_id, "persistence_failed", exc)
+        return
+    try:
+        db.clear_classification_failure(conn, event_id)
+    except Exception as exc:  # noqa: BLE001 - best effort by contract
+        # The classification IS durably persisted. A failed clear is cosmetic
+        # (the stale record never renders while a diagnosis exists and the next
+        # successful classification removes it); it must NOT fabricate a
+        # classification failure.
         logger.warning(
-            "auto-classify persistence failed for %s: %s",
-            getattr(event, "event_id", "?"),
-            exc,
+            "could not clear classification failure for %s: %s", event_id, exc
+        )
+    logger.info(
+        "auto-classified %s as %s (%.2f)",
+        result.event_id,
+        result.root_cause_category,
+        result.confidence,
+    )
+
+
+def _record_auto_classify_failure(
+    conn: sqlite3.Connection, event_id: str, stage: str, exc: Exception
+) -> None:
+    """Durably record a failed advisory-classification attempt.
+
+    Recording is itself best-effort: if the failure row cannot be written the
+    condition is still logged, because a classification failure must never fail
+    the webhook ingestion that triggered it.
+    """
+    logger.warning(
+        "auto-classify failed for %s (%s): %s",
+        event_id,
+        stage,
+        exc,
+    )
+    try:
+        db.record_classification_failure(
+            conn,
+            event_id=event_id,
+            failed_at=datetime.now(timezone.utc).isoformat(),
+            error=f"{stage}: {exc}",
+        )
+    except Exception as record_exc:  # noqa: BLE001 - never fail the webhook
+        logger.error(
+            "could not record classification failure for %s: %s",
+            event_id,
+            record_exc,
         )

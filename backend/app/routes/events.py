@@ -34,12 +34,14 @@ from ..config import build_policy_config, build_razorpay_client
 from .. import calibration_service
 from ..db import (
     connect_database,
+    clear_classification_failure,
     get_classification_result,
     get_payment_event,
     get_policy_history,
     init_db,
     insert_classification_result,
     insert_policy_decision,
+    record_classification_failure,
 )
 from ..execution_service import (
     STATUS_EXECUTION_FAILED,
@@ -180,6 +182,7 @@ def classify_event_endpoint(
     try:
         result = classify_event(event, classifier)
     except ClassificationValidationError as exc:
+        _record_classify_failure(conn, event_id, exc)
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
             content={
@@ -189,6 +192,7 @@ def classify_event_endpoint(
             },
         )
     except OmniRouteError as exc:
+        _record_classify_failure(conn, event_id, exc)
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
             content={
@@ -198,6 +202,7 @@ def classify_event_endpoint(
             },
         )
     except Exception as exc:
+        _record_classify_failure(conn, event_id, exc)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
@@ -209,12 +214,30 @@ def classify_event_endpoint(
 
     try:
         insert_classification_result(conn, result)
+        clear_classification_failure(conn, event_id)
     except sqlite3.Error:
+        # Crash-retry of a partial success: a prior attempt may already have
+        # durably persisted the classification before its response was lost.
+        # Recover by confirming the persisted classification rather than
+        # answering 500 forever on a retry.
+        already = get_classification_result(conn, event_id)
+        if already is None:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "status": "classification_persistence_failure",
+                    "event_id": event_id,
+                },
+            )
+        try:
+            clear_classification_failure(conn, event_id)
+        except sqlite3.Error:
+            pass
         return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_200_OK,
             content={
-                "status": "classification_persistence_failure",
-                "event_id": event_id,
+                "status": "classification_success",
+                "classification": already.to_dict(),
             },
         )
 
@@ -225,6 +248,24 @@ def classify_event_endpoint(
             "classification": result.to_dict(),
         },
     )
+
+
+def _record_classify_failure(
+    conn: sqlite3.Connection, event_id: str, exc: Exception
+) -> None:
+    """Durably record a failed manual classification so it never stalls silently."""
+    try:
+        record_classification_failure(
+            conn,
+            event_id=event_id,
+            failed_at=datetime.now(timezone.utc).isoformat(),
+            error=str(exc) or exc.__class__.__name__,
+        )
+    except sqlite3.Error:
+        # The failure is still returned to the operator over HTTP; the durable
+        # record is a best effort so an unrecordable write cannot mask the
+        # underlying classification error.
+        pass
 
 
 @router.post("/events/{event_id}/policy")

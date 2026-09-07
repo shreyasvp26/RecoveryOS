@@ -160,3 +160,16 @@ async def razorpay_webhook(
                 "detail": str(exc),
             },
         )
+    except sqlite3.Error:
+        # A crash at a persistence boundary — e.g. between a committed event
+        # or recovery insert and the delivery's terminal status write — is
+        # surfaced as the canonical persistence_failure (500) so Razorpay's
+        # redelivery reprocesses the still-in-flight delivery and converges to
+        # exactly-once, instead of an opaque error with no retry contract.
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "persistence_failure",
+                "delivery_id": delivery_id,
+            },
+        )

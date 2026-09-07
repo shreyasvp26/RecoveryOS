@@ -58,6 +58,21 @@ CREATE TABLE IF NOT EXISTS classification_results (
 )
 """
 
+# Phase-hardening: the durable record of a FAILED advisory classification
+# attempt, so a swallowed classifier failure can never silently stall the
+# recovery pipeline. The event is still ingested (classification is
+# best-effort) but the failure is recorded, surfaced in the operations queue,
+# and re-drivable by the operator. A successful classification clears the row;
+# the same event keeps incrementing attempt_count across consecutive failures.
+_CLASSIFICATION_FAILURES_DDL = """
+CREATE TABLE IF NOT EXISTS classification_failures (
+    event_id       TEXT PRIMARY KEY,
+    attempt_count  INTEGER NOT NULL,
+    last_failed_at TEXT NOT NULL,
+    last_error     TEXT NOT NULL
+)
+"""
+
 _POLICY_DECISIONS_DDL = """
 CREATE TABLE IF NOT EXISTS policy_decisions (
     event_id                TEXT NOT NULL,
@@ -260,6 +275,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     try:
         conn.execute(_PAYMENT_EVENTS_DDL)
         conn.execute(_CLASSIFICATION_RESULTS_DDL)
+        conn.execute(_CLASSIFICATION_FAILURES_DDL)
         conn.execute(_POLICY_DECISIONS_DDL)
         conn.execute(_INTERVENTION_ATTEMPTS_DDL)
         conn.execute(_EXECUTION_OUTCOMES_DDL)
@@ -272,6 +288,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_ESTIMATOR_CALIBRATION_SNAPSHOTS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         _migrate_optimizer_decisions_estimator_provenance(conn)
+        _init_webhook_recovery_outcome_uniqueness(conn)
         conn.commit()
     except sqlite3.Error:
         conn.rollback()
@@ -321,6 +338,63 @@ def _migrate_optimizer_decisions_estimator_provenance(
         conn.execute(
             f"ALTER TABLE optimizer_decisions ADD COLUMN {column} {column_type}"
         )
+
+
+def _init_webhook_recovery_outcome_uniqueness(conn: sqlite3.Connection) -> None:
+    """Enforce at most ONE verified recovery per Payment Link.
+
+    Each Payment Link settles exactly once, so a second
+    ``webhook_recovery_outcomes`` row for the same ``payment_link_id`` is a
+    duplicate (a ``payment_link.paid`` redelivered under a different delivery
+    id). Historically the delivery id was the only uniqueness key, so a
+    redelivery could double-count one link's recovery. This migration:
+      1. collapses any historical duplicate rows to the newest per link, and
+      2. installs a UNIQUE index so the database — not application state —
+         rejects double-counting from now on (``INSERT OR IGNORE`` in the
+         webhook path makes the second write a safe no-op).
+    """
+    try:
+        conn.execute(
+            """
+            DELETE FROM webhook_recovery_outcomes
+            WHERE delivery_id NOT IN (
+                SELECT delivery_id FROM (
+                    SELECT delivery_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY payment_link_id
+                               ORDER BY recovered_at DESC, delivery_id DESC
+                           ) AS rn
+                    FROM webhook_recovery_outcomes
+                ) WHERE rn = 1
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        # Window functions unavailable (very old SQLite): fall back to an
+        # equivalent self-join that keeps the newest recovered_at per link and
+        # deterministically collapses equality ties.
+        conn.execute(
+            """
+            DELETE FROM webhook_recovery_outcomes
+            WHERE delivery_id NOT IN (
+                SELECT w.delivery_id
+                FROM webhook_recovery_outcomes w
+                LEFT JOIN webhook_recovery_outcomes w2
+                  ON w2.payment_link_id = w.payment_link_id
+                 AND (
+                       w2.recovered_at > w.recovered_at
+                       OR (w2.recovered_at = w.recovered_at
+                           AND w2.delivery_id > w.delivery_id)
+                     )
+                WHERE w2.payment_link_id IS NULL
+            )
+            """
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "ux_webhook_recovery_outcomes_link "
+        "ON webhook_recovery_outcomes(payment_link_id)"
+    )
 
 
 def _optimizer_decision_columns(conn: sqlite3.Connection) -> set[str]:
@@ -677,6 +751,31 @@ def get_execution_claim(
     if row is None:
         return None
     return dict(row)
+
+
+def get_execution_claim_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return the newest unresolved claim per event for the given events.
+
+    The operations queue uses this to surface in-flight/stuck executions: a
+    claim that is neither resolved nor released means the latest attempt
+    crashed before its outcome was durably written.
+    """
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM execution_claims WHERE event_id IN ({ids})",
+        event_ids,
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        data = dict(row)
+        current = out.get(data["event_id"])
+        if current is None or str(data["claimed_at"]) > str(current["claimed_at"]):
+            out[data["event_id"]] = data
+    return out
 
 
 def resolve_execution_claim(
@@ -1102,6 +1201,76 @@ def get_classification_results_for_events(
         data["candidate_interventions"] = json.loads(data["candidate_interventions"])
         out[data["event_id"]] = data
     return out
+
+
+# ---------------------------------------------------------------------------
+# Durable classification-failure tracking. Classification is advisory and
+# best-effort: a classifier outage never fails ingestion or blocks the
+# recovery loop. But a swallowed failure must never silently stall the
+# pipeline, so every failed attempt is recorded here, surfaced in the
+# operations queue, and cleared the moment a classification succeeds.
+# ---------------------------------------------------------------------------
+
+
+def record_classification_failure(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    failed_at: str,
+    error: str,
+) -> None:
+    """Record one failed advisory-classification attempt for an event.
+
+    Idempotent per event: consecutive failures increment ``attempt_count`` so
+    the operator can see how unhealthy the diagnosis path is for this event.
+    sqlite3.Error propagates as a persistence failure (the caller treats the
+    classification as failed regardless).
+    """
+    conn.execute(
+        """
+        INSERT INTO classification_failures (
+            event_id, attempt_count, last_failed_at, last_error
+        ) VALUES (?, 1, ?, ?)
+        ON CONFLICT(event_id) DO UPDATE SET
+            attempt_count = attempt_count + 1,
+            last_failed_at = excluded.last_failed_at,
+            last_error = excluded.last_error
+        """,
+        (event_id, failed_at, error),
+    )
+    conn.commit()
+
+
+def clear_classification_failure(conn: sqlite3.Connection, event_id: str) -> None:
+    """Clear the durable failure record once classification has succeeded."""
+    conn.execute(
+        "DELETE FROM classification_failures WHERE event_id = ?", (event_id,)
+    )
+    conn.commit()
+
+
+def get_classification_failure(
+    conn: sqlite3.Connection, event_id: str
+) -> dict[str, Any] | None:
+    """Return the durable classification-failure record, or None."""
+    row = conn.execute(
+        "SELECT * FROM classification_failures WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_classification_failures_for_events(
+    conn: sqlite3.Connection, event_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return event_id -> classification-failure record for the given events."""
+    if not event_ids:
+        return {}
+    rows = _chunked_in_query(
+        conn,
+        "SELECT * FROM classification_failures WHERE event_id IN ({ids})",
+        event_ids,
+    )
+    return {row["event_id"]: dict(row) for row in rows}
 
 
 def get_policy_decisions_for_events(
