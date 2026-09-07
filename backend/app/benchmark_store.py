@@ -88,6 +88,7 @@ def _main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     conn = db.connect_database()
     db.init_db(conn)
+    db.run_migrations(conn)
     try:
         persist = persist_benchmark if args.phase9 else persist_phase17_benchmark
         result = persist(conn, seed=args.seed, event_count=args.count)

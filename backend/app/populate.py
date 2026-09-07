@@ -50,6 +50,7 @@ def populate(
     owns_connection = conn is None
     conn = conn or db.connect_database()
     db.init_db(conn)
+    db.run_migrations(conn)
     try:
         config = build_policy_config()
         classifier = DeterministicClassifier()
