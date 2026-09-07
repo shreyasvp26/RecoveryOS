@@ -53,8 +53,28 @@ server) with both processes running:
 - Frontend: `npm run build` produces `frontend/dist`, which can be served by
   any static file server (e.g. `vite preview` or a CDN). In production the
   frontend must reach the backend: either serve both behind one origin with a
-  reverse proxy, or set `VITE_API_BASE` to the backend's public base URL
-  (with CORS enabled on the backend for that origin).
+  reverse proxy, or set `VITE_API_BASE` to the backend's public base URL and
+  set `RECOVERYOS_CORS_ORIGINS` on the backend to that frontend's origin. The
+  backend's cross-origin allow-list is fail-closed: it is empty by default
+  (same-origin proxying only), and browser cross-origin requests are allowed
+  only for origins explicitly listed in `RECOVERYOS_CORS_ORIGINS` (comma
+  separated).
+
+### Operator authentication
+
+Protecting a deployment **requires** setting `RECOVERYOS_OPERATOR_API_KEY`.
+Every operator/data endpoint (`/events`, `/recovery/*`, `/dashboard/*`,
+`/incidents`, `/policy-lab`, `/recovery-intelligence`, `/estimator-evidence`)
+demands `Authorization: Bearer <key>` and fails closed:
+
+- A missing or wrong credential returns `401`.
+- A backend started **without** the key returns `503` on operator endpoints
+  (refusing to run unauthenticated) rather than serving open.
+
+The public boundaries are deliberately excluded: `GET /health`,
+`GET /health/ready`, and the signed Razorpay webhook endpoint (which carries its
+own signature verification). Never run an operator deployment without setting
+the key.
 
 ### Environment variables
 

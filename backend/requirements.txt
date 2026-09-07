@@ -1,6 +1,11 @@
-fastapi
-uvicorn[standard]
-pytest
-httpx
-python-dotenv
-razorpay
+# RecoveryOS backend dependencies — pinned exactly for reproducible builds.
+# CI (`pip install -r backend/requirements.txt`) and local setup install these
+# exact versions; an unpinned file silently changes behavior on any future
+# PyPI release. Upgrade deliberately, in a separate commit, after re-running
+# the full test suite.
+fastapi==0.136.1
+uvicorn[standard]==0.43.0
+pytest==9.1.1
+httpx==0.27.0
+python-dotenv==1.0.1
+razorpay==2.0.1
