@@ -192,3 +192,10 @@ def test_find_incident_returns_none_for_an_unknown_id(workload_conn):
     assert (
         find_incident(incidents, incidents[0].incident_id) is incidents[0]
     )
+
+
+def test_evaluate_workload_is_cached(workload_conn):
+    events = load_workload(workload_conn)
+    result_1 = evaluate_workload(events)
+    result_2 = evaluate_workload(events)
+    assert result_1 is result_2
