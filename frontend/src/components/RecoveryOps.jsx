@@ -177,6 +177,16 @@ function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, onRetryDiagnos
           <Badge tone={STATE_TONE[row.lifecycle_state] || 'neutral'}>
             {humanize(row.lifecycle_state)}
           </Badge>
+          {row.claim && (
+            <div className="ops-sub" style={{ marginTop: '4px' }}>
+              <Badge tone="warn">Claim held: {row.claim.status} ({row.claim.intervention})</Badge>
+            </div>
+          )}
+          {row.provider_outcome && (
+            <div className="ops-sub" style={{ marginTop: '4px' }}>
+              <Badge tone="info">Provider poll: {row.provider_outcome.status} ({row.provider_outcome.outcome})</Badge>
+            </div>
+          )}
         </td>
         <td>
           <RowActions
@@ -217,6 +227,23 @@ function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, onRetryDiagnos
                 <span className="kv__k">Outcome</span>
                 <span className="kv__v">{row.outcome.note}</span>
               </div>
+              {row.claim && (
+                <div className="kv">
+                  <span className="kv__k">Claim</span>
+                  <span className="kv__v">
+                    Claim held: {row.claim.status} ({row.claim.intervention})
+                  </span>
+                </div>
+              )}
+              {row.provider_outcome && (
+                <div className="kv">
+                  <span className="kv__k">Provider poll</span>
+                  <span className="kv__v">
+                    Provider poll: {row.provider_outcome.status} ({row.provider_outcome.outcome})
+                    {row.provider_outcome.observed_at ? ` · ${formatTime(row.provider_outcome.observed_at)}` : ''}
+                  </span>
+                </div>
+              )}
               <div className="kv">
                 <span className="kv__k">Payment link</span>
                 <span className="kv__v mono">{row.execution?.payment_link_id || '—'}</span>

@@ -62,7 +62,7 @@ VALID_RESULT = {
 class StubAdapter:
     """Return a fixed sequence of raw model outputs (raises when exhausted)."""
 
-    def __init__(self, *responses: str) -> None:
+    def __init__(self, *responses: Any) -> None:
         self.responses = list(responses)
         self.calls = 0
 
@@ -70,7 +70,10 @@ class StubAdapter:
         self.calls += 1
         if not self.responses:
             raise OmniRouteError("stub adapter exhausted")
-        return self.responses.pop(0)
+        resp = self.responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
 
 
 def event() -> object:
@@ -150,7 +153,14 @@ def test_model_timeout_or_error_is_explicit_llm_failure() -> None:
     adapter = StubAdapter()
     with pytest.raises(OmniRouteError):
         classify_event(event(), adapter)
-    assert adapter.calls == 1
+    assert adapter.calls == 2
+
+
+def test_transient_omniroute_error_retries_and_succeeds_on_valid_retry() -> None:
+    adapter = StubAdapter(OmniRouteError("transient error"), json.dumps(VALID_RESULT))
+    result = classify_event(event(), adapter)
+    assert result.event_id == "evt_000001"
+    assert adapter.calls == 2
 
 
 def test_event_id_mismatch_is_rejected() -> None:
