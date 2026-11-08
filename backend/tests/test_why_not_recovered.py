@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from app.classification import ClassificationResult
 from app.dashboard import build_event_trace
 from app.db import (
+    get_policy_blocked_event_amounts,
     insert_classification_result,
     insert_intervention_attempt,
     insert_payment_event,
@@ -187,3 +188,42 @@ def test_why_not_recovered_no_execution_recorded(db_conn) -> None:
     s = _summary(db_conn, "evt_w_noexec")
     assert s["final_decision"] == "no_action"
     assert s["execution_state"] == "NO_EXECUTION_RECORDED"
+
+
+def test_partial_policy_denial_with_executed_candidate_not_counted_as_policy_blocked(db_conn) -> None:
+    config = PolicyConfig(
+        daily_spend_cap_paise=1000,
+        intervention_cost_paise={"retry_delayed": 200, "payment_link": 1500},
+    )
+    _seed(
+        db_conn,
+        _event("evt_partial_deny"),
+        _classification("evt_partial_deny", candidates=["retry_delayed", "payment_link"]),
+    )
+    res = _run(db_conn, "evt_partial_deny", config)
+    assert res.status == "execution_success"
+    assert res.selected_intervention == "retry_delayed"
+
+    decisions = db_conn.execute(
+        "SELECT proposed_intervention, allowed FROM policy_decisions WHERE event_id = 'evt_partial_deny'"
+    ).fetchall()
+    decision_map = {row["proposed_intervention"]: row["allowed"] for row in decisions}
+    assert decision_map["payment_link"] == 0
+    assert decision_map["retry_delayed"] == 1
+
+    blocked = get_policy_blocked_event_amounts(db_conn)
+    assert blocked["count"] == 0
+    assert blocked["amount_paise"] == 0
+
+    # Also verify that a genuinely fully blocked event IS counted.
+    _seed(
+        db_conn,
+        _event("evt_fully_blocked", customer_id="cust_other"),
+        _classification("evt_fully_blocked", candidates=["retry_delayed", "payment_link"]),
+    )
+    _attempt(db_conn, "evt_other_attempt", "cust_other", when=NOW - timedelta(hours=1), cost_paise=950)
+    res_blocked = _run(db_conn, "evt_fully_blocked", config)
+    assert res_blocked.status == "no_action"
+    blocked_after = get_policy_blocked_event_amounts(db_conn)
+    assert blocked_after["count"] == 1
+    assert blocked_after["amount_paise"] == 10000

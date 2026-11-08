@@ -102,6 +102,22 @@ def test_invalid_intervention_is_rejected() -> None:
     assert adapter.calls == 2
 
 
+def test_duplicate_interventions_triggers_retry_and_succeeds_on_valid_retry() -> None:
+    bad = dict(VALID_RESULT, candidate_interventions=["retry_delayed", "retry_delayed"])
+    adapter = StubAdapter(json.dumps(bad), json.dumps(VALID_RESULT))
+    result = classify_event(event(), adapter)
+    assert result.event_id == "evt_000001"
+    assert adapter.calls == 2
+
+
+def test_repeated_duplicate_interventions_raises_validation_error() -> None:
+    bad = dict(VALID_RESULT, candidate_interventions=["retry_delayed", "retry_delayed"])
+    adapter = StubAdapter(json.dumps(bad), json.dumps(bad))
+    with pytest.raises(ClassificationValidationError):
+        classify_event(event(), adapter)
+    assert adapter.calls == 2
+
+
 def test_invalid_confidence_is_rejected() -> None:
     bad = dict(VALID_RESULT, confidence=1.7)
     adapter = StubAdapter(json.dumps(bad), json.dumps(bad))

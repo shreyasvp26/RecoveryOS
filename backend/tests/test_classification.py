@@ -9,6 +9,7 @@ from app.classification import (
     CLASSIFICATION_KEYS,
     ROOT_CAUSE_CATEGORIES,
     ClassificationResult,
+    ClassificationValidationError,
 )
 
 _FORBIDDEN_BUSINESS_FIELDS = frozenset(
@@ -141,3 +142,10 @@ def test_intervention_taxonomy_is_locked() -> None:
             "no_action",
         }
     )
+
+
+def test_duplicate_candidate_interventions_raise_validation_error() -> None:
+    with pytest.raises(ClassificationValidationError, match="candidate_interventions must not contain duplicates"):
+        ClassificationResult.from_dict(
+            valid_result(candidate_interventions=["retry_delayed", "retry_delayed"])
+        )

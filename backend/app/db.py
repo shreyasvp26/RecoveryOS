@@ -1584,6 +1584,14 @@ def get_policy_blocked_event_amounts(conn: sqlite3.Connection) -> dict[str, int]
             SELECT 1 FROM policy_decisions pd
             WHERE pd.event_id = pe.event_id AND pd.allowed = 0
         )
+        AND NOT EXISTS (
+            SELECT 1 FROM policy_decisions pd_allow
+            WHERE pd_allow.event_id = pe.event_id AND pd_allow.allowed = 1
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM execution_outcomes eo
+            WHERE eo.event_id = pe.event_id
+        )
         """
     ).fetchall()
     return {

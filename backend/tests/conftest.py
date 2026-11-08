@@ -13,8 +13,6 @@ import sqlite3
 
 import pytest
 
-from app.db import connect, init_db
-
 # A single shared test credential. Tests exercise REAL fail-closed behavior via
 # explicitly unauthenticated clients in test_operator_auth.py; the rest of the
 # suite authenticates by default so its assertions stay about business logic,
@@ -22,7 +20,9 @@ from app.db import connect, init_db
 TEST_OPERATOR_API_KEY = "test-operator-api-key"
 TEST_OPERATOR_HEADERS = {"Authorization": f"Bearer {TEST_OPERATOR_API_KEY}"}
 
-os.environ.setdefault("RECOVERYOS_OPERATOR_API_KEY", TEST_OPERATOR_API_KEY)
+os.environ["RECOVERYOS_OPERATOR_API_KEY"] = TEST_OPERATOR_API_KEY
+
+from app.db import connect, init_db
 
 
 @pytest.fixture
