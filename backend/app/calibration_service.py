@@ -319,6 +319,7 @@ def _evidenced_json(result: dict[str, Any]) -> str:
     return json.dumps({
         intervention: {
             "baseline_bps": calibration.baseline_bps,
+            "posterior_bps": calibration.posterior_bps,
             "observed_total": calibration.observed_total,
             "observed_recovered": calibration.observed_recovered,
             "observed_not_recovered": calibration.observed_not_recovered,

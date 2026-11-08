@@ -64,6 +64,16 @@ from .selector import INTERVENTION_PRIORITY, NO_ACTION
 REASON_MAX_EXPECTED_VALUE = "max_expected_value"
 REASON_NO_CANDIDATES = "no_candidates"
 REASON_NO_ALLOWED_CANDIDATE = "no_allowed_candidate"
+REASON_NEGATIVE_EXPECTED_VALUE = "no_positive_expected_value"
+
+SELECTION_REASONS: frozenset[str] = frozenset(
+    {
+        REASON_MAX_EXPECTED_VALUE,
+        REASON_NO_CANDIDATES,
+        REASON_NO_ALLOWED_CANDIDATE,
+        REASON_NEGATIVE_EXPECTED_VALUE,
+    }
+)
 
 # V1 priority as a lookup, used ONLY to break exact expected-value ties.
 _PRIORITY_INDEX: dict[str, int] = {
@@ -358,11 +368,20 @@ class EconomicInterventionOptimizer:
             )
 
         ranked = tuple(sorted(evaluations, key=_ranking_key))
+        best = ranked[0]
+        if best.expected_value_paise < 0:
+            return OptimizerDecision(
+                candidates_considered=allowed_candidates.considered,
+                allowed_candidates=allowed_candidates.allowed,
+                evaluations=ranked,
+                selected_intervention=NO_ACTION,
+                selection_reason=REASON_NEGATIVE_EXPECTED_VALUE,
+            )
         return OptimizerDecision(
             candidates_considered=allowed_candidates.considered,
             allowed_candidates=allowed_candidates.allowed,
             evaluations=ranked,
-            selected_intervention=ranked[0].intervention,
+            selected_intervention=best.intervention,
             selection_reason=REASON_MAX_EXPECTED_VALUE,
         )
 

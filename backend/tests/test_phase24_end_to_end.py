@@ -541,7 +541,9 @@ def test_a_calibrated_decision_reorders_rank_but_history_is_immutable(
     assert calibrated["estimator_reason"] == "active_calibration"
 
     expected = _evaluation_probability(calibrated, "payment_link")
-    assert expected == snapshot_posterior
+    assert expected == max(
+        0, min(10_000, pl_baseline_bps + (snapshot_posterior - BASE_RECOVERY_BPS[PAYMENT_LINK]))
+    )
 
     # The uncalibrated retry intervion is untouched by the payment_link posterior.
     assert _evaluation_probability(calibrated, "retry_delayed") == _evaluation_probability(
