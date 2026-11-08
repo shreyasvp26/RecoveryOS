@@ -105,16 +105,17 @@ def _parse_to_result(text: Any, event: PaymentEvent) -> ClassificationResult:
 def classify_event(event: PaymentEvent, adapter: ClassifierAdapter) -> ClassificationResult:
     """Classify a PaymentEvent through the provided adapter.
 
-    At most ONE retry is permitted when the model's output cannot be parsed or
-    fails schema validation. Provider/transport errors are never retried and are
-    always surfaced as explicit failures.
+    At most ONE retry is permitted when the model's output cannot be parsed,
+    fails schema validation, or encounters a transient provider error (OmniRouteError).
     """
     prompt = build_prompt(build_classifier_input(event))
     try:
         return _parse_to_result(adapter.generate(prompt), event)
-    except ClassificationValidationError:
+    except (OmniRouteError, ClassificationValidationError):
         try:
             return _parse_to_result(adapter.generate(prompt), event)
+        except OmniRouteError:
+            raise
         except ClassificationValidationError as exc:
             raise ClassificationValidationError(
                 "no valid classification after the single permitted retry"

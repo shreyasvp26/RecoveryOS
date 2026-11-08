@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Tests](https://img.shields.io/badge/tests-adversarial%20%2B%20regression-informational)](https://github.com/shreyasvp26/RecoveryOS)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 > **Payments fail. Recovery shouldn't.**
 
@@ -383,14 +383,13 @@ The final hardening cycle addressed verified production-readiness findings acros
 
 ### Backend
 
-- Python
+- Python (`dataclasses`)
 - FastAPI
-- SQLAlchemy
-- Pydantic
+- `sqlite3`
 
 ### Payments & Events
 
-- Stripe payment/event flows
+- Razorpay Test Mode payment/event flows
 - Webhook-based event ingestion
 
 ### Testing
@@ -430,7 +429,6 @@ RecoveryOS/
 │
 ├── ...
 │
-├── LICENSE
 └── README.md
 ```
 
@@ -657,8 +655,6 @@ Do not include real payment credentials, customer information, API keys, webhook
 
 RecoveryOS is licensed under the **MIT License**.
 
-See the [`LICENSE`](LICENSE) file for the complete license text.
-
 ---
 
 # Disclaimer
@@ -684,10 +680,10 @@ Project: [RecoveryOS](https://github.com/shreyasvp26/RecoveryOS)
 RecoveryOS builds on the excellent open-source ecosystem around:
 
 - [FastAPI](https://fastapi.tiangolo.com/)
-- [Pydantic](https://docs.pydantic.dev/)
-- [SQLAlchemy](https://www.sqlalchemy.org/)
+- [sqlite3](https://docs.python.org/3/library/sqlite3.html)
+- [Python dataclasses](https://docs.python.org/3/library/dataclasses.html)
 - [Pytest](https://docs.pytest.org/)
-- [Stripe](https://stripe.com/)
+- [Razorpay](https://razorpay.com/)
 
 ---
 
