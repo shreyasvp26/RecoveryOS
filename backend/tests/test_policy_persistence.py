@@ -11,9 +11,14 @@ from app.db import (
     get_intervention_attempt,
     get_policy_decision,
     get_policy_history,
+    insert_execution_outcome,
     insert_intervention_attempt,
+    insert_payment_event,
     insert_policy_decision,
+    insert_provider_payment_link_outcome,
+    insert_webhook_recovery_outcome,
 )
+from app.executor import ExecutionOutcome
 from app.models import CustomerHistory, PaymentEvent
 from app.policy import (
     PolicyDecision,
@@ -236,7 +241,7 @@ def test_policy_history_reports_most_recent_event_intervention(db_conn) -> None:
 
 def test_policy_history_reports_successful_duplicate(db_conn) -> None:
     event = make_event()
-    evaluation_time = BASE_TS
+    evaluation_time = BASE_TS + timedelta(hours=1)
     insert_intervention_attempt(
         db_conn, attempt(status="successful")
     )
@@ -301,3 +306,211 @@ def test_policy_history_requires_aware_evaluation_time(db_conn) -> None:
         get_policy_history(
             db_conn, event, datetime(2026, 8, 27, 12, 0)
         )
+
+
+def test_sibling_events_sharing_order_id_share_cooldown_history(db_conn) -> None:
+    event_1 = make_event(event_id="evt_order_1")
+    event_2 = make_event(event_id="evt_order_2")
+    insert_payment_event(db_conn, event_1)
+    insert_payment_event(db_conn, event_2)
+
+    evaluation_time = BASE_TS
+    attempt_time = evaluation_time - timedelta(minutes=10)
+    insert_intervention_attempt(
+        db_conn,
+        attempt(
+            event_id="evt_order_1",
+            status="attempted",
+            attempted_at=attempt_time.isoformat(),
+        ),
+    )
+
+    history = get_policy_history(db_conn, event_2, evaluation_time)
+    assert history.most_recent_event_intervention_time == attempt_time
+
+
+def test_sibling_events_sharing_order_id_share_duplicate_history(db_conn) -> None:
+    event_1 = make_event(event_id="evt_order_1")
+    event_2 = make_event(event_id="evt_order_2")
+    insert_payment_event(db_conn, event_1)
+    insert_payment_event(db_conn, event_2)
+
+    evaluation_time = BASE_TS
+    insert_intervention_attempt(
+        db_conn,
+        attempt(
+            event_id="evt_order_1",
+            status="successful",
+            attempted_at=(evaluation_time - timedelta(minutes=45)).isoformat(),
+        ),
+    )
+
+    history = get_policy_history(db_conn, event_2, evaluation_time)
+    assert history.has_successful_intervention is True
+
+
+def test_expired_payment_link_allows_reengagement_without_duplicate_block(
+    db_conn,
+) -> None:
+    event = make_event(event_id="evt_plink_exp")
+    insert_payment_event(db_conn, event)
+
+    evaluation_time = BASE_TS
+    attempt_time = evaluation_time - timedelta(minutes=45)
+    insert_intervention_attempt(
+        db_conn,
+        attempt(
+            event_id="evt_plink_exp",
+            intervention="payment_link",
+            status="successful",
+            attempted_at=attempt_time.isoformat(),
+        ),
+    )
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_plink_exp",
+            intervention="payment_link",
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/l/expired",
+            detail=None,
+            reported_at=attempt_time.isoformat(),
+            payment_link_id="plink_exp_1",
+        ),
+    )
+    insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="plink_exp_1",
+        event_id="evt_plink_exp",
+        status="expired",
+        outcome="NOT_RECOVERED",
+        observed_at=(evaluation_time - timedelta(minutes=15)).isoformat(),
+    )
+
+    history = get_policy_history(db_conn, event, evaluation_time)
+    assert history.has_successful_intervention is False
+    assert history.most_recent_event_intervention_time == attempt_time
+
+
+def test_expired_payment_link_with_webhook_recovery_blocks_reengagement(
+    db_conn,
+) -> None:
+    event = make_event(event_id="evt_plink_recovered")
+    insert_payment_event(db_conn, event)
+
+    evaluation_time = BASE_TS
+    attempt_time = evaluation_time - timedelta(minutes=45)
+    insert_intervention_attempt(
+        db_conn,
+        attempt(
+            event_id="evt_plink_recovered",
+            intervention="payment_link",
+            status="successful",
+            attempted_at=attempt_time.isoformat(),
+        ),
+    )
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_plink_recovered",
+            intervention="payment_link",
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/l/rec",
+            detail=None,
+            reported_at=attempt_time.isoformat(),
+            payment_link_id="plink_rec_1",
+        ),
+    )
+    insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="plink_rec_1",
+        event_id="evt_plink_recovered",
+        status="expired",
+        outcome="NOT_RECOVERED",
+        observed_at=(evaluation_time - timedelta(minutes=15)).isoformat(),
+    )
+    insert_webhook_recovery_outcome(
+        db_conn,
+        delivery_id="del_rec_1",
+        payment_link_id="plink_rec_1",
+        referenced_event_id="evt_plink_recovered",
+        amount_paid_paise=75000,
+        currency="INR",
+        payment_id="pay_rec_1",
+        recovered_at=(evaluation_time - timedelta(minutes=10)).isoformat(),
+    )
+
+    history = get_policy_history(db_conn, event, evaluation_time)
+    assert history.has_successful_intervention is True
+
+
+def test_multiple_payment_links_require_all_expired_for_reengagement(
+    db_conn,
+) -> None:
+    event = make_event(event_id="evt_plink_multi")
+    insert_payment_event(db_conn, event)
+
+    evaluation_time = BASE_TS
+    attempt_time_1 = evaluation_time - timedelta(minutes=60)
+    attempt_time_2 = evaluation_time - timedelta(minutes=40)
+    insert_intervention_attempt(
+        db_conn,
+        attempt(
+            event_id="evt_plink_multi",
+            intervention="payment_link",
+            status="successful",
+            attempted_at=attempt_time_1.isoformat(),
+        ),
+    )
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_plink_multi",
+            intervention="payment_link",
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/l/multi1",
+            detail=None,
+            reported_at=attempt_time_1.isoformat(),
+            payment_link_id="plink_multi_1",
+        ),
+    )
+    insert_execution_outcome(
+        db_conn,
+        ExecutionOutcome(
+            event_id="evt_plink_multi",
+            intervention="payment_link",
+            execution_mode="REAL_RAZORPAY",
+            status="SUCCESS",
+            external_reference="https://rzp.io/l/multi2",
+            detail=None,
+            reported_at=attempt_time_2.isoformat(),
+            payment_link_id="plink_multi_2",
+        ),
+    )
+    # Only link 1 is expired; link 2 is still pending
+    insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="plink_multi_1",
+        event_id="evt_plink_multi",
+        status="expired",
+        outcome="NOT_RECOVERED",
+        observed_at=(evaluation_time - timedelta(minutes=20)).isoformat(),
+    )
+
+    history = get_policy_history(db_conn, event, evaluation_time)
+    assert history.has_successful_intervention is True
+
+    # When link 2 also expires NOT_RECOVERED, re-engagement is allowed
+    insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id="plink_multi_2",
+        event_id="evt_plink_multi",
+        status="expired",
+        outcome="NOT_RECOVERED",
+        observed_at=(evaluation_time - timedelta(minutes=10)).isoformat(),
+    )
+    history_after = get_policy_history(db_conn, event, evaluation_time)
+    assert history_after.has_successful_intervention is False

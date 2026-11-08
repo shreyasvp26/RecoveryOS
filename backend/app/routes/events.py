@@ -38,6 +38,7 @@ from ..db import (
     clear_classification_failure,
     get_classification_result,
     get_payment_event,
+    get_policy_decision,
     get_policy_history,
     init_db,
     insert_classification_result,
@@ -380,6 +381,22 @@ def evaluate_event_policy(
 
     try:
         insert_policy_decision(conn, decision)
+    except sqlite3.IntegrityError:
+        existing = get_policy_decision(
+            conn, event_id, proposed_intervention, decision.evaluated_at
+        )
+        if existing is not None:
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={"status": "policy_success", "decision": existing.to_dict()},
+            )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "policy_decision_persistence_failure",
+                "event_id": event_id,
+            },
+        )
     except sqlite3.Error:
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

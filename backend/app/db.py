@@ -912,6 +912,92 @@ def release_execution_claim(
         raise
 
 
+def _order_attempt_rows(
+    conn: sqlite3.Connection, event: PaymentEvent
+) -> list[sqlite3.Row]:
+    """Find all intervention_attempts rows for event.event_id or any sibling
+    payment_events row sharing the same order_id, deduplicated by
+    (event_id, intervention, attempted_at).
+    """
+    if event.order_id:
+        rows = conn.execute(
+            """
+            SELECT ia.event_id, ia.intervention, ia.customer_id,
+                   ia.cost_paise, ia.attempted_at, ia.status
+            FROM intervention_attempts ia
+            LEFT JOIN payment_events pe ON pe.event_id = ia.event_id
+            WHERE ia.event_id = ? OR pe.order_id = ?
+            """,
+            (event.event_id, event.order_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT ia.event_id, ia.intervention, ia.customer_id,
+                   ia.cost_paise, ia.attempted_at, ia.status
+            FROM intervention_attempts ia
+            WHERE ia.event_id = ?
+            """,
+            (event.event_id,),
+        ).fetchall()
+
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[sqlite3.Row] = []
+    for row in rows:
+        key = (row["event_id"], row["intervention"], row["attempted_at"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(row)
+    return deduped
+
+
+def _is_payment_link_expired_without_recovery(
+    conn: sqlite3.Connection, event_id: str
+) -> bool:
+    """Return True if every created payment_link for event_id has a recorded
+    provider_payment_link_outcomes row with outcome == 'NOT_RECOVERED' and no
+    webhook_recovery_outcomes row is recorded for that event or its links.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT payment_link_id FROM execution_outcomes
+        WHERE event_id = ? AND intervention = 'payment_link'
+          AND payment_link_id IS NOT NULL AND payment_link_id != ''
+        UNION
+        SELECT DISTINCT payment_link_id FROM provider_payment_link_outcomes
+        WHERE event_id = ? AND payment_link_id IS NOT NULL AND payment_link_id != ''
+        """,
+        (event_id, event_id),
+    ).fetchall()
+    link_ids = [r[0] for r in rows if r[0]]
+    if not link_ids:
+        return False
+
+    placeholders = ",".join("?" for _ in link_ids)
+    webhook_hit = conn.execute(
+        f"""
+        SELECT 1 FROM webhook_recovery_outcomes
+        WHERE referenced_event_id = ?
+           OR payment_link_id IN ({placeholders})
+        LIMIT 1
+        """,
+        [event_id, *link_ids],
+    ).fetchone()
+    if webhook_hit is not None:
+        return False
+
+    not_recovered_count = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM provider_payment_link_outcomes
+        WHERE payment_link_id IN ({placeholders})
+          AND outcome = 'NOT_RECOVERED'
+        """,
+        link_ids,
+    ).fetchone()[0]
+
+    return not_recovered_count == len(link_ids)
+
+
 def get_policy_history(
     conn: sqlite3.Connection, event: PaymentEvent, evaluation_time: datetime
 ) -> PolicyHistory:
@@ -963,19 +1049,18 @@ def get_policy_history(
 
     most_recent: datetime | None = None
     has_successful_intervention = False
-    event_rows = conn.execute(
-        """
-        SELECT attempted_at, status
-        FROM intervention_attempts
-        WHERE event_id = ?
-        """,
-        (event.event_id,),
-    ).fetchall()
-    for row in event_rows:
+    order_attempts = _order_attempt_rows(conn, event)
+    for row in order_attempts:
         attempted_at = parse_aware_datetime(row["attempted_at"])
+        if attempted_at > evaluation_time:
+            continue
         if most_recent is None or attempted_at > most_recent:
             most_recent = attempted_at
         if row["status"] == "successful":
+            if row["intervention"] == "payment_link" and _is_payment_link_expired_without_recovery(
+                conn, row["event_id"]
+            ):
+                continue
             has_successful_intervention = True
 
     return PolicyHistory(
