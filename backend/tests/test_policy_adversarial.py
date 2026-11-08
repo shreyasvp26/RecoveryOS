@@ -28,11 +28,13 @@ from datetime import datetime, timedelta, timezone
 from app.classification import ClassificationResult
 from app.db import (
     get_policy_decisions_for_event,
+    get_policy_history,
     insert_classification_result,
     insert_intervention_attempt,
     insert_payment_event,
 )
 from app.execution_service import (
+    STATUS_EXECUTION_FAILED,
     STATUS_NO_ACTION,
     execute_event,
 )
@@ -40,6 +42,8 @@ from app.models import CustomerHistory, PaymentEvent
 from app.policy import (
     InterventionAttempt,
     PolicyConfig,
+    PolicyEngine,
+    PolicyInput,
     RULE_COOLDOWN,
     RULE_CUSTOMER_LIMIT,
     RULE_DUPLICATE,
@@ -47,6 +51,10 @@ from app.policy import (
     RULE_SPEND_CAP,
     RULE_TERMINAL,
 )
+from app.policy_scenario import conservative_scenario, current_scenario
+from app.replay import ReplayEventContext, replay_scenarios
+from app.replay_metrics import compare_replays
+from app.routes.replay import compare_scenarios
 
 NOW = datetime(2026, 8, 27, 13, 0, tzinfo=timezone.utc)
 _DEFAULT_CONFIG = PolicyConfig()
@@ -301,3 +309,137 @@ def test_denied_decision_cannot_reach_executor_side_effect(db_conn) -> None:
     result = execute_event(db_conn, "evt_bypass", NOW, _DEFAULT_CONFIG, None)
     _assert_not_executed(db_conn, "evt_bypass", result)
     assert _persisted_reason(db_conn, "evt_bypass", "payment_link") == RULE_FRAUD
+
+
+def test_root_cause_fraud_suspect_denied_and_execute_event_no_action(db_conn) -> None:
+    """DEF-02: LLM diagnosis root_cause_category == 'fraud_suspect' enforces RULE_FRAUD.
+
+    PaymentEvent(risk_flag="normal") + ClassificationResult(root_cause_category="fraud_suspect")
+    must be denied by PolicyEngine.evaluate with fraud_protection, and execute_event
+    must result in STATUS_NO_ACTION with 0 executions.
+    """
+    event = _event("evt_llm_fraud", risk_flag="normal")
+    classification = _classification(
+        "evt_llm_fraud",
+        root="fraud_suspect",
+        candidates=["payment_link", "retry_delayed"],
+    )
+    engine = PolicyEngine()
+    history = get_policy_history(db_conn, event, NOW)
+    for proposed in ("payment_link", "retry_delayed"):
+        decision = engine.evaluate(
+            PolicyInput(
+                event=event,
+                classification=classification,
+                proposed_intervention=proposed,
+                history=history,
+                evaluation_time=NOW,
+            ),
+            _DEFAULT_CONFIG,
+        )
+        assert decision.allowed is False
+        assert decision.denial_reason == RULE_FRAUD
+
+    _seed(db_conn, event, classification)
+    result = execute_event(db_conn, "evt_llm_fraud", NOW, _DEFAULT_CONFIG, None)
+    _assert_not_executed(db_conn, "evt_llm_fraud", result)
+    assert _persisted_reason(db_conn, "evt_llm_fraud", "payment_link") == RULE_FRAUD
+    assert _persisted_reason(db_conn, "evt_llm_fraud", "retry_delayed") == RULE_FRAUD
+
+
+def test_compare_scenarios_succeeds_with_fraud_suspect_event(monkeypatch) -> None:
+    """DEF-02: Policy Lab comparison succeeds without ValueError when risk_flag='normal'
+    and root_cause_category='fraud_suspect'."""
+    event = _event("evt_replay_fraud", risk_flag="normal")
+    classification = ClassificationResult(
+        event_id="evt_replay_fraud",
+        root_cause_category="fraud_suspect",
+        confidence=0.9,
+        reasoning="llm fraud suspect",
+        candidate_interventions=["payment_link", "retry_delayed"],
+    )
+
+    class StubClassifier:
+        def classify(self, ev):
+            return classification
+
+    scenarios = [current_scenario(), conservative_scenario()]
+    results = replay_scenarios(scenarios, events=[event], classifier=StubClassifier())
+    comparison = compare_replays(results, reference_scenario_id="current")
+    assert comparison["fairness"]["immutable_protections_held"] is True
+    assert comparison["scenarios"][0]["metrics"]["safety"]["fraud_interventions"] == 0
+    assert comparison["scenarios"][1]["metrics"]["safety"]["fraud_interventions"] == 0
+
+    orig_replay = replay_scenarios
+    monkeypatch.setattr(
+        "app.routes.replay.replay_scenarios",
+        lambda scens: orig_replay(scens, events=[event], classifier=StubClassifier()),
+    )
+    resp = compare_scenarios(
+        {
+            "scenarios": [
+                {"scenario_id": "current"},
+                {"scenario_id": "conservative"},
+            ],
+            "reference_scenario_id": "current",
+        }
+    )
+    assert resp.status_code == 200
+
+
+def test_failed_execution_configuration_missing_charges_zero_spend(db_conn) -> None:
+    """DEF-04: Pre-provider configuration error charges 0 paise and does not poison history."""
+    event_id = "evt_cfg_missing"
+    event = _event(event_id, customer_id="cust_cfg")
+    classification = _classification(
+        event_id,
+        root="customer_action_needed",
+        candidates=["payment_link"],
+    )
+    _seed(db_conn, event, classification)
+    config = PolicyConfig(
+        daily_spend_cap_paise=500_000,
+        intervention_cost_paise={"payment_link": 100},
+    )
+    result = execute_event(db_conn, event_id, NOW, config, razorpay_client=None)
+    assert result.status == STATUS_EXECUTION_FAILED
+    assert result.outcome is not None
+    assert result.outcome.status == "FAILED"
+    assert result.outcome.detail.startswith("configuration_missing")
+
+    history = get_policy_history(db_conn, event, NOW + timedelta(minutes=1))
+    assert history.existing_daily_spend_paise == 0
+    assert history.customer_intervention_count_24h == 0
+    assert history.most_recent_event_intervention_time is None
+
+
+def test_definitive_failed_attempt_charges_zero_spend(db_conn) -> None:
+    """DEF-04: Definitive provider failure records an attempt with cost_paise=0."""
+    from app.razorpay_client import RazorpayExecutionError
+    from tests.test_execution_api import StubPaymentLinkClient
+
+    event_id = "evt_def_fail"
+    event = _event(event_id, customer_id="cust_def")
+    classification = _classification(
+        event_id,
+        root="customer_action_needed",
+        candidates=["payment_link"],
+    )
+    _seed(db_conn, event, classification)
+    config = PolicyConfig(
+        daily_spend_cap_paise=500_000,
+        intervention_cost_paise={"payment_link": 100},
+    )
+    client_stub = StubPaymentLinkClient(
+        error=RazorpayExecutionError("razorpay_api_error: rejected by provider")
+    )
+    result = execute_event(db_conn, event_id, NOW, config, razorpay_client=client_stub)
+    assert result.status == STATUS_EXECUTION_FAILED
+    assert result.outcome is not None
+    assert result.outcome.status == "FAILED"
+    assert "razorpay_api_error" in result.outcome.detail
+
+    history = get_policy_history(db_conn, event, NOW + timedelta(minutes=1))
+    assert history.existing_daily_spend_paise == 0
+    assert history.customer_intervention_count_24h == 1
+    assert history.most_recent_event_intervention_time is not None

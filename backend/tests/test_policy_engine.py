@@ -111,6 +111,21 @@ def test_fraud_suspect_is_denied() -> None:
     assert decision.policy_rules_applied == ("fraud_protection",)
 
 
+def test_root_cause_fraud_suspect_is_denied_when_risk_flag_normal() -> None:
+    for proposed in ("payment_link", "retry_delayed"):
+        decision = ENGINE.evaluate(
+            make_input(
+                risk_flag="normal",
+                root_cause="fraud_suspect",
+                proposed=proposed,
+            ),
+            PolicyConfig(),
+        )
+        assert decision.allowed is False
+        assert decision.denial_reason == "fraud_protection"
+        assert decision.policy_rules_applied == ("fraud_protection",)
+
+
 def test_terminal_failure_is_denied() -> None:
     decision = ENGINE.evaluate(
         make_input(root_cause="terminal"), PolicyConfig()

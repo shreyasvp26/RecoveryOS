@@ -76,7 +76,11 @@ def _performed(records: Sequence[ReplayEventRecord]) -> list[ReplayEventRecord]:
     realization: the action was taken, so the intervention count must not lose
     it merely because the world subsequently failed to report the result.
     """
-    return [record for record in records if record.attempted]
+    return [
+        record
+        for record in records
+        if getattr(record, "executed", getattr(record, "attempted", False))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +241,7 @@ def unauthorized_attempts(records: Sequence[ReplayEventRecord]) -> int:
     return sum(1 for record in _performed(records) if not record.authorized)
 
 
-def fraud_interventions(records: Sequence[ReplayEventRecord]) -> int:
+def fraud_interventions(records: Sequence[Any]) -> int:
     """Interventions performed on an event the classifier flagged as fraud.
 
     Must be 0 under every scenario. Measured from the records rather than
@@ -245,8 +249,14 @@ def fraud_interventions(records: Sequence[ReplayEventRecord]) -> int:
     """
     return sum(
         1
-        for record in _performed(records)
-        if record.root_cause_category == "fraud_suspect"
+        for record in records
+        if (
+            getattr(record, "risk_flag", None) == "fraud_suspect"
+            or getattr(record, "root_cause_category", None) == "fraud_suspect"
+        )
+        and bool(
+            getattr(record, "executed", getattr(record, "attempted", False))
+        )
     )
 
 
