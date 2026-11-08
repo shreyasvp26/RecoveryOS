@@ -38,6 +38,7 @@ from .config import (
     DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE,
     DEFAULT_POLICY_EVENT_COOLDOWN_MINUTES,
     DEFAULT_POLICY_MAX_INTERVENTIONS_PER_CUSTOMER_24H,
+    default_intervention_cost_paise,
 )
 from .economics import DEFAULT_ECONOMIC_MODEL, EconomicModel
 from .generator import (
@@ -66,7 +67,19 @@ def frozen_policy_config() -> PolicyConfig:
         ),
         event_cooldown_minutes=DEFAULT_POLICY_EVENT_COOLDOWN_MINUTES,
         daily_spend_cap_paise=DEFAULT_POLICY_DAILY_SPEND_CAP_PAISE,
+        intervention_cost_paise=default_intervention_cost_paise(),
     )
+
+
+def frozen_policy_dict(config: PolicyConfig | None = None) -> dict[str, Any]:
+    """Serialize the frozen policy configuration for audit and reproduction."""
+    cfg = config or frozen_policy_config()
+    return {
+        "max_interventions_per_customer_24h": cfg.max_interventions_per_customer_24h,
+        "event_cooldown_minutes": cfg.event_cooldown_minutes,
+        "daily_spend_cap_paise": cfg.daily_spend_cap_paise,
+        "intervention_cost_paise": dict(sorted(cfg.intervention_cost_paise.items())),
+    }
 
 METHODOLOGY_PHASE9_V1_COMPAT = "phase9_v1_compat"
 METHODOLOGY_PHASE17 = "phase17_signal_bearing_v1"
@@ -230,16 +243,7 @@ class Phase17BenchmarkConfig:
                 EVENT_GENERATOR_METHODOLOGY_VERSION
             ),
             "event_generator_fingerprint": event_generator_fingerprint(),
-            "policy_config": {
-                "max_interventions_per_customer_24h": (
-                    self.policy_config.max_interventions_per_customer_24h
-                ),
-                "event_cooldown_minutes": self.policy_config.event_cooldown_minutes,
-                "daily_spend_cap_paise": self.policy_config.daily_spend_cap_paise,
-                "intervention_cost_paise": dict(
-                    sorted(self.policy_config.intervention_cost_paise.items())
-                ),
-            },
+            "policy_config": frozen_policy_dict(self.policy_config),
             "economic_model": {
                 intervention: {
                     "cost_paise": economics.cost_paise,

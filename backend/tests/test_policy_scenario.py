@@ -103,6 +103,7 @@ def test_current_scenario_agrees_with_the_benchmark_policy_when_unconfigured(
     )
     assert current.event_cooldown_minutes == benchmark.event_cooldown_minutes
     assert current.daily_spend_cap_paise == benchmark.daily_spend_cap_paise
+    assert current.intervention_cost_paise == benchmark.intervention_cost_paise
 
 
 # ---------------------------------------------------------------------------

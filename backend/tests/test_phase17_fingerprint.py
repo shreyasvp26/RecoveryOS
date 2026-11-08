@@ -160,7 +160,7 @@ def test_the_production_coefficients_survive_the_sensitivity_tests() -> None:
         ("_SUBSCRIPTION_RATE", 0.36),
         ("_EVENTS_PER_CUSTOMER", 4),
         ("_CURRENCY", "USD"),
-        ("EVENT_GENERATOR_METHODOLOGY_VERSION", "phase4-seeded-uniform-v2"),
+        ("EVENT_GENERATOR_METHODOLOGY_VERSION", "phase4-seeded-method-aware-v3"),
     ],
 )
 def test_changing_any_generation_parameter_changes_its_fingerprint(

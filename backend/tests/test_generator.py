@@ -157,3 +157,16 @@ def test_count_controls_dataset_size() -> None:
 def test_invalid_count_is_rejected(count) -> None:
     with pytest.raises(ValueError):
         generate_events(seed=DEFAULT_SEED, count=count)
+
+
+def test_non_card_payment_methods_never_have_expired_card_failure_reason() -> None:
+    events = generate_events(seed=42, count=500)
+    non_card_events = [
+        event for event in events if event.payment_method in ("upi", "netbanking", "wallet")
+    ]
+    card_events = [event for event in events if event.payment_method == "card"]
+
+    assert len(non_card_events) > 0
+    assert len(card_events) > 0
+    assert all(event.failure_reason != "expired_card" for event in non_card_events)
+    assert any(event.failure_reason == "expired_card" for event in card_events)
