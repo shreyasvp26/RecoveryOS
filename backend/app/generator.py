@@ -53,6 +53,10 @@ _FAILURE_REASONS: tuple[str, ...] = (
     "network_issue",
 )
 
+_NON_CARD_FAILURE_REASONS: tuple[str, ...] = tuple(
+    r for r in _FAILURE_REASONS if r != "expired_card"
+)
+
 # Fixed reference window so timestamps are deterministic and never use
 # nondeterministic wall-clock time.
 _WINDOW_START = datetime(2026, 7, 1, tzinfo=timezone.utc)
@@ -74,7 +78,7 @@ _EVENTS_PER_CUSTOMER = 3
 # the order of draws, the identifier scheme, the customer-pool rule. A change
 # to a distribution or range is caught by the fingerprint without a bump; a
 # restructured algorithm is not, because a hash cannot see a reordered draw.
-EVENT_GENERATOR_METHODOLOGY_VERSION = "phase4-seeded-uniform-v1"
+EVENT_GENERATOR_METHODOLOGY_VERSION = "phase4-seeded-method-aware-v2"
 
 
 def event_generator_fingerprint() -> str:
@@ -160,16 +164,21 @@ def generate_events(
     events: list[PaymentEvent] = []
     for index in range(count):
         customer_id, history = customers[rng.randrange(len(customers))]
+        amount_paise = _generate_amount_paise(rng)
+        payment_method = rng.choice(_PAYMENT_METHODS)
+        failure_reasons = (
+            _FAILURE_REASONS if payment_method == "card" else _NON_CARD_FAILURE_REASONS
+        )
         events.append(
             PaymentEvent(
                 event_id=f"evt_{index + 1:06d}",
                 order_id=f"order_{index + 1:06d}",
                 payment_id=f"pay_{index + 1:06d}",
                 customer_id=customer_id,
-                amount_paise=_generate_amount_paise(rng),
+                amount_paise=amount_paise,
                 currency=_CURRENCY,
-                payment_method=rng.choice(_PAYMENT_METHODS),
-                failure_reason=rng.choice(_FAILURE_REASONS),
+                payment_method=payment_method,
+                failure_reason=rng.choice(failure_reasons),
                 bank=rng.choice(_BANKS),
                 risk_flag=rng.choice(_RISK_FLAGS),
                 customer_history=history,
