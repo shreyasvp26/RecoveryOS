@@ -25,8 +25,13 @@ from app.adaptive_estimation import (
     REASON_NO_CALIBRATION,
     REASON_THRESHOLD_NOT_MET,
 )
+from app.classification import ClassificationResult
 from app.economics import PROBABILITY_SCALE, RecoveryProbability
-from app.estimator import BASE_RECOVERY_BPS, RecoveryProbabilityEstimator
+from app.estimator import (
+    BASE_RECOVERY_BPS,
+    EstimationError,
+    RecoveryProbabilityEstimator,
+)
 from app.models import CustomerHistory, PaymentEvent
 
 
@@ -229,3 +234,47 @@ def test_decision_provenance_baseline_reason_unavailable():
 def test_legacy_baseline_constant_is_distinct():
     assert PROVENANCE_LEGACY_BASELINE != PROVENANCE_BASELINE
     assert REASON_LEGACY == "legacy_decision"
+
+
+def test_calibrated_estimator_validates_event_classification_event_id_match():
+    """DEF-05: Calibrated estimator validates event.event_id == classification.event_id."""
+    est = CalibratedRecoveryProbabilityEstimator(
+        baseline=RecoveryProbabilityEstimator(),
+        snapshot=_snapshot(active_bps={"payment_link": 4400}),
+    )
+    event = _stub_event()
+    mismatched_cls = ClassificationResult(
+        event_id="evt_different",
+        root_cause_category="transient",
+        confidence=0.9,
+        reasoning="advisory",
+        candidate_interventions=["payment_link"],
+    )
+    with pytest.raises(EstimationError):
+        est.estimate(event, mismatched_cls, "payment_link")
+
+
+def test_calibrated_estimator_preserves_event_feature_adjustments():
+    """DEF-05: Calibrated estimator preserves feature adjustments with empirical delta."""
+    baseline = RecoveryProbabilityEstimator()
+    est = CalibratedRecoveryProbabilityEstimator(
+        baseline=baseline,
+        snapshot=_snapshot(active_bps={"payment_link": 4400}),
+    )
+    event = _stub_event()
+    cls = ClassificationResult(
+        event_id=event.event_id,
+        root_cause_category="transient",
+        confidence=0.9,
+        reasoning="advisory",
+        candidate_interventions=["payment_link"],
+    )
+    base_prob = baseline.estimate(event, cls, "payment_link")
+    cal_prob = est.estimate(event, cls, "payment_link")
+    delta_bps = 4400 - BASE_RECOVERY_BPS["payment_link"]
+    expected_bps = max(0, min(PROBABILITY_SCALE, base_prob.basis_points + delta_bps))
+    assert cal_prob.basis_points == expected_bps
+    # Feature adjustments mean base_prob != BASE_RECOVERY_BPS["payment_link"],
+    # and cal_prob != 4400 (it is shifted by delta_bps relative to base_prob).
+    assert base_prob.basis_points != BASE_RECOVERY_BPS["payment_link"]
+    assert cal_prob.basis_points != 4400

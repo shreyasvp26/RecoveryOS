@@ -32,7 +32,7 @@ function formatBps(bps) {
   return `${(Number(bps) / 100).toFixed(1)}%`
 }
 
-function InterventionRow({ intervention, row, active, version }) {
+function InterventionRow({ intervention, row, active, version, latest }) {
   return (
     <tr>
       <td>{humanize(intervention)}</td>
@@ -44,7 +44,7 @@ function InterventionRow({ intervention, row, active, version }) {
         )}
       </td>
       <td>{formatBps(row.baseline_bps)}</td>
-      <td>{formatBps(active ? row.posterior_bps : row.baseline_bps)}</td>
+      <td>{formatBps(active ? (row.posterior_bps ?? latest?.active_bps?.[intervention]) : row.baseline_bps)}</td>
       <td>{row.observed_total}</td>
       <td>{row.observed_recovered}</td>
       <td>{row.observed_not_recovered}</td>
@@ -175,6 +175,7 @@ export default function EstimatorEvidence() {
                       row={row}
                       version={latest.version}
                       active={intervention in activeBps}
+                      latest={latest}
                     />
                   ))}
                 </tbody>

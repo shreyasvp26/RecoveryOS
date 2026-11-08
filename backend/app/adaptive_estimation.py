@@ -32,7 +32,7 @@ from typing import Any, Mapping
 from .calibration import STATUS_BASELINE, STATUS_CALIBRATED
 from .classification import ClassificationResult
 from .economics import PROBABILITY_SCALE, RecoveryProbability
-from .estimator import RecoveryProbabilityEstimator
+from .estimator import BASE_RECOVERY_BPS, RecoveryProbabilityEstimator
 from .models import PaymentEvent
 
 # Decision-level estimator provenance modes persisted on optimizer decisions.
@@ -148,14 +148,14 @@ class CalibratedRecoveryProbabilityEstimator:
         intervention: str,
     ) -> RecoveryProbability:
         """Return the calibrated probability, or the frozen baseline estimate."""
-        posterior = (
-            self._snapshot.posterior_for(intervention)
-            if self._snapshot is not None
-            else None
-        )
-        if posterior is not None:
-            return RecoveryProbability(basis_points=posterior)
-        return self._baseline.estimate(event, classification, intervention)
+        baseline_prob = self._baseline.estimate(event, classification, intervention)
+        if self._snapshot is not None:
+            posterior = self._snapshot.posterior_for(intervention)
+            if posterior is not None:
+                delta_bps = posterior - BASE_RECOVERY_BPS[intervention]
+                calibrated_bps = max(0, min(PROBABILITY_SCALE, baseline_prob.basis_points + delta_bps))
+                return RecoveryProbability(basis_points=calibrated_bps)
+        return baseline_prob
 
     def provenance(self, intervention: str) -> dict[str, Any]:
         """Explain which probability source produced an estimate (read-only).

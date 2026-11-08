@@ -28,6 +28,7 @@ from app.economics import (
 from app.estimator import RecoveryProbabilityEstimator
 from app.optimizer import (
     REASON_MAX_EXPECTED_VALUE,
+    REASON_NEGATIVE_EXPECTED_VALUE,
     REASON_NO_ALLOWED_CANDIDATE,
     REASON_NO_CANDIDATES,
     AllowedCandidates,
@@ -807,3 +808,25 @@ def test_a_live_optimizer_decision_survives_every_mutation_attempt() -> None:
         )
         decision = optimizer.select(_event(), _classification(permutation), permuted)
         assert decision.selected_intervention == before.selected_intervention
+
+
+def test_all_negative_expected_value_candidates_selects_no_action() -> None:
+    """DEF-08: When all allowed candidates have expected_value_paise < 0,
+    select() returns NO_ACTION with REASON_NEGATIVE_EXPECTED_VALUE and records evaluations."""
+    candidates = ("payment_link",)
+    allowed = AllowedCandidates.from_policy_decisions(
+        candidates, {"payment_link": _allow("payment_link")}
+    )
+    estimator = StubEstimator({"payment_link": 100})
+    optimizer = EconomicInterventionOptimizer(
+        estimator=estimator, model=DEFAULT_ECONOMIC_MODEL
+    )
+    event = _event(amount_paise=1000)
+    decision = optimizer.select(event, _classification(candidates), allowed)
+
+    assert decision.selected_intervention == NO_ACTION
+    assert decision.selection_reason == REASON_NEGATIVE_EXPECTED_VALUE
+    assert decision.is_actionable is False
+    assert len(decision.evaluations) == 1
+    assert decision.evaluations[0].intervention == "payment_link"
+    assert decision.evaluations[0].expected_value_paise == -91
