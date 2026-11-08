@@ -240,12 +240,18 @@ def test_policy_spend_cap_uses_configured_value(monkeypatch, tmp_path) -> None:
 def test_policy_duplicate_decision_is_rejected_consistently(
     monkeypatch, tmp_path
 ) -> None:
-    _seed_event_and_classification(monkeypatch, tmp_path)
+    db_path = _seed_event_and_classification(monkeypatch, tmp_path)
     first = client.post("/events/evt_policy_1/policy", json=_policy_body())
     assert first.status_code == 200
     second = client.post("/events/evt_policy_1/policy", json=_policy_body())
-    assert second.status_code == 500
-    assert second.json()["status"] == "policy_decision_persistence_failure"
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    conn = connect(db_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM policy_decisions").fetchone()[0]
+        assert count == 1
+    finally:
+        conn.close()
 
 
 def test_policy_defaults_evaluation_time_when_absent(monkeypatch, tmp_path) -> None:
