@@ -446,17 +446,21 @@ def execute_event(
 
     try:
         insert_execution_outcome(conn, outcome)
-        insert_intervention_attempt(
-            conn,
-            InterventionAttempt(
-                event_id=event.event_id,
-                intervention=selected,
-                customer_id=event.customer_id,
-                cost_paise=config.intervention_cost(selected),
-                attempted_at=outcome.reported_at,
-                status="successful" if outcome.status == "SUCCESS" else "failed",
-            ),
-        )
+        if not (outcome.detail and outcome.detail.startswith("configuration_missing")):
+            cost_paise = config.intervention_cost(selected)
+            if outcome.status != "SUCCESS" and not marks_provider_result_unknown(outcome.detail):
+                cost_paise = 0
+            insert_intervention_attempt(
+                conn,
+                InterventionAttempt(
+                    event_id=event.event_id,
+                    intervention=selected,
+                    customer_id=event.customer_id,
+                    cost_paise=cost_paise,
+                    attempted_at=outcome.reported_at,
+                    status="successful" if outcome.status == "SUCCESS" else "failed",
+                ),
+            )
     except BaseException:
         _park_claim_as_unknown(conn, event.event_id, selected, claimed_at)
         raise

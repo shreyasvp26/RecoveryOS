@@ -456,6 +456,8 @@ class PolicyEngine:
 
         if event.risk_flag == "fraud_suspect":
             return denied(RULE_FRAUD)
+        if classification.root_cause_category == "fraud_suspect":
+            return denied(RULE_FRAUD)
         passed.append(CHECK_FRAUD)
 
         if classification.root_cause_category == "terminal":
