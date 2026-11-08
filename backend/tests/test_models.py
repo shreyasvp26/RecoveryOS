@@ -91,7 +91,15 @@ def test_valid_risk_flags_accepted() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["not-a-date", "2026-13-99", "", None, "2026-08-27T25:00:00", "2026-08-27"],
+    [
+        "not-a-date",
+        "2026-13-99",
+        "",
+        None,
+        "2026-08-27T25:00:00",
+        "2026-08-27",
+        "2026-08-27T12:00:00",
+    ],
 )
 def test_timestamp_must_be_valid_iso8601_date_time(value) -> None:
     with pytest.raises(ValueError):

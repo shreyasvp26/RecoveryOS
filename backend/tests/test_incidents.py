@@ -292,9 +292,13 @@ def test_events_outside_both_windows_are_ignored():
 
 
 def test_a_naive_timestamp_is_refused_rather_than_assumed_utc():
-    naive = PaymentEvent.from_dict(
-        {**anchor_event().to_dict(), "timestamp": "2026-08-27T12:00:00"}
-    )
+    with pytest.raises(ValueError, match="timestamp must include a timezone offset"):
+        PaymentEvent.from_dict(
+            {**anchor_event().to_dict(), "timestamp": "2026-08-27T12:00:00"}
+        )
+
+    naive = anchor_event()
+    object.__setattr__(naive, "timestamp", "2026-08-27T12:00:00")
     with pytest.raises(IncidentError):
         observation_windows([naive])
 

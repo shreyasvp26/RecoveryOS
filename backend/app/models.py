@@ -120,6 +120,8 @@ class PaymentEvent:
             raise ValueError(
                 "timestamp must include a time component (ISO8601 date-time)"
             )
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timestamp must include a timezone offset")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict, preserving the locked contract exactly."""

@@ -38,6 +38,14 @@ CLASSIFICATION_KEYS: frozenset[str] = frozenset(
 )
 
 
+class ClassificationError(Exception):
+    """Base class for all explicit classification failures."""
+
+
+class ClassificationValidationError(ClassificationError, ValueError):
+    """Model output or classification data failed schema validation."""
+
+
 @dataclass(frozen=True)
 class ClassificationResult:
     """The structured output of an AI classification (advisory only).
@@ -75,9 +83,14 @@ class ClassificationResult:
 
         if not isinstance(self.candidate_interventions, (list, tuple)):
             raise ValueError("candidate_interventions must be a list")
+        normalized_interventions = tuple(self.candidate_interventions)
         object.__setattr__(
-            self, "candidate_interventions", tuple(self.candidate_interventions)
+            self, "candidate_interventions", normalized_interventions
         )
+        if len(set(normalized_interventions)) != len(normalized_interventions):
+            raise ClassificationValidationError(
+                "candidate_interventions must not contain duplicates"
+            )
         for intervention in self.candidate_interventions:
             if intervention not in CANDIDATE_INTERVENTIONS:
                 raise ValueError(

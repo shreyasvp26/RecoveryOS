@@ -18,7 +18,9 @@ import httpx
 from .classification import (
     CANDIDATE_INTERVENTIONS,
     ROOT_CAUSE_CATEGORIES,
+    ClassificationError,
     ClassificationResult,
+    ClassificationValidationError,
 )
 from .config import (
     get_omniroute_api_key,
@@ -35,14 +37,6 @@ SYSTEM_INSTRUCTION = (
     "authorize or select an action, and you must not assume or invent information "
     "about any future outcome."
 )
-
-
-class ClassificationError(Exception):
-    """Base class for all explicit classification failures."""
-
-
-class ClassificationValidationError(ClassificationError):
-    """Model output was malformed or failed schema validation."""
 
 
 class OmniRouteError(ClassificationError):

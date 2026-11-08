@@ -4,6 +4,20 @@ import { useEffect, useState } from 'react'
 export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
 /**
+ * Operator bearer authorization header.
+ * Reads VITE_OPERATOR_API_KEY from environment, with runtime localStorage fallback.
+ */
+export function getOperatorHeaders() {
+  const token =
+    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_OPERATOR_API_KEY) ||
+    (typeof window !== 'undefined' && window.localStorage?.getItem('recoveryos_operator_api_key'))
+  if (token && typeof token === 'string' && token.trim()) {
+    return { Authorization: `Bearer ${token.trim()}` }
+  }
+  return {}
+}
+
+/**
  * Thin read wrapper. Throws an Error carrying the server's detail message on
  * non-2xx so callers can render real error states (never mask failures).
  */
@@ -13,7 +27,11 @@ export async function get(path, params) {
     : ''
   let res
   try {
-    res = await fetch(`${API_BASE}${path}${qs}`)
+    res = await fetch(`${API_BASE}${path}${qs}`, {
+      headers: {
+        ...getOperatorHeaders(),
+      },
+    })
   } catch {
     throw new Error(`Network error reaching the RecoveryOS API at ${API_BASE}${path}`)
   }
@@ -41,7 +59,10 @@ export async function post(path, body) {
   try {
     res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...getOperatorHeaders(),
+      },
       body: JSON.stringify(body),
     })
   } catch {
@@ -59,6 +80,9 @@ export async function post(path, body) {
   }
   return res.json()
 }
+
+export const getJson = get
+export const postJson = post
 
 /**
  * Generic data-fetching hook exposing the three states every view needs:
