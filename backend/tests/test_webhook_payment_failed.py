@@ -458,3 +458,118 @@ def test_ingestion_survives_classifier_failure(monkeypatch, tmp_path) -> None:
         assert get_classification_result(conn, event_id) is None
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 33: Risk flag and failure reason decline mapping
+# ---------------------------------------------------------------------------
+
+
+def test_payment_failed_suspected_fraud_maps_to_fraud_suspect(
+    monkeypatch, tmp_path
+) -> None:
+    _set_env(monkeypatch, tmp_path)
+    payload = {
+        **FAILED_EVENT,
+        "payload": {
+            "payment": {
+                "entity": {
+                    **FAILED_EVENT["payload"]["payment"]["entity"],
+                    "id": "pay_fraud_001",
+                    "error_code": "BAD_REQUEST_ERROR",
+                    "error_description": "Transaction blocked due to suspected fraud",
+                }
+            }
+        },
+    }
+    body = _raw(payload)
+    delivery_id = "delivery_fraud_1"
+    response = client.post(
+        "/webhook/razorpay",
+        content=body,
+        headers={SIGNATURE_HEADER: _sign(body), DELIVERY_ID_HEADER: delivery_id},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingested"
+
+    conn = _conn(tmp_path)
+    try:
+        failed = parse_payment_failed_payload(body, delivery_id)
+        event = get_payment_event(conn, map_failed_payment_to_event(conn, failed).event_id)
+        assert event is not None
+        assert event.risk_flag == "fraud_suspect"
+    finally:
+        conn.close()
+
+
+def test_payment_failed_insufficient_balance_maps_to_insufficient_funds(
+    monkeypatch, tmp_path
+) -> None:
+    _set_env(monkeypatch, tmp_path)
+    payload = {
+        **FAILED_EVENT,
+        "payload": {
+            "payment": {
+                "entity": {
+                    **FAILED_EVENT["payload"]["payment"]["entity"],
+                    "id": "pay_low_bal_001",
+                    "error_code": "BAD_REQUEST_ERROR",
+                    "error_description": "Insufficient balance in customer account",
+                }
+            }
+        },
+    }
+    body = _raw(payload)
+    delivery_id = "delivery_low_bal_1"
+    response = client.post(
+        "/webhook/razorpay",
+        content=body,
+        headers={SIGNATURE_HEADER: _sign(body), DELIVERY_ID_HEADER: delivery_id},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingested"
+
+    conn = _conn(tmp_path)
+    try:
+        failed = parse_payment_failed_payload(body, delivery_id)
+        event = get_payment_event(conn, map_failed_payment_to_event(conn, failed).event_id)
+        assert event is not None
+        assert event.failure_reason == "insufficient_funds"
+        assert event.risk_flag == "normal"
+    finally:
+        conn.close()
+
+
+def test_map_failure_reason_covers_common_decline_phrases(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    try:
+        test_cases = [
+            ("low balance", "insufficient_funds"),
+            ("UPI PIN entered is incorrect", "authentication_failed"),
+            ("issuer down for maintenance", "issuer_unavailable"),
+            ("Collect request expired", "bank_timeout"),
+            ("Do not honor", "declined_by_bank"),
+            ("limit exceeded", "declined_by_bank"),
+            ("GATEWAY_ERROR", "bank_timeout"),
+            ("SERVER_ERROR", "issuer_unavailable"),
+        ]
+        for idx, (desc, expected_reason) in enumerate(test_cases):
+            failed = FailedPaymentEvent(
+                delivery_id=f"del_case_{idx}",
+                event_type="payment.failed",
+                payment_id=f"pay_case_{idx}",
+                order_id=f"order_case_{idx}",
+                customer_id=f"cust_case_{idx}",
+                amount_paise=1000,
+                currency="INR",
+                payment_method="card",
+                failure_reason=desc,
+                bank=None,
+                failed_at="2026-08-01T12:00:00+00:00",
+                error_code="BAD_REQUEST_ERROR",
+                error_description=desc,
+            )
+            event = map_failed_payment_to_event(conn, failed)
+            assert event.failure_reason == expected_reason
+    finally:
+        conn.close()

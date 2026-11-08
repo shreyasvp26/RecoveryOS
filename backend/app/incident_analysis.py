@@ -34,6 +34,7 @@ payment event, and no stored incident state that could drift from the data.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import sqlite3
@@ -96,6 +97,36 @@ def evaluation_config(events: Sequence[PaymentEvent]) -> Phase17BenchmarkConfig:
     return Phase17BenchmarkConfig(event_count=max(1, len(events)))
 
 
+class _HashableScenario:
+    def __init__(self, scenario: PolicyScenario) -> None:
+        self.scenario = scenario
+        self._fingerprint = scenario.fingerprint()
+        self._scenario_id = scenario.scenario_id
+
+    def __hash__(self) -> int:
+        return hash((self._scenario_id, self._fingerprint))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _HashableScenario):
+            return False
+        return (
+            self._scenario_id == other._scenario_id
+            and self._fingerprint == other._fingerprint
+        )
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_workload_replay(
+    events: tuple[PaymentEvent, ...],
+    scenario_holder: _HashableScenario,
+) -> ReplayResult:
+    return replay_scenario(
+        scenario_holder.scenario,
+        config=evaluation_config(events),
+        events=events,
+    )
+
+
 def evaluate_workload(
     events: Sequence[PaymentEvent],
     *,
@@ -106,9 +137,11 @@ def evaluate_workload(
     Uses the existing Phase 19 engine unchanged, on the explicit event subset it
     already supports. Nothing is persisted and nothing is executed.
     """
-    scenario = scenario or current_scenario()
-    return replay_scenario(
-        scenario, config=evaluation_config(events), events=events
+    resolved_scenario = scenario or current_scenario()
+    event_tuple = tuple(events) if not isinstance(events, tuple) else events
+    return _cached_workload_replay(
+        event_tuple,
+        _HashableScenario(resolved_scenario),
     )
 
 

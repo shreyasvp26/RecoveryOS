@@ -271,6 +271,8 @@ class FailedPaymentEvent:
     failure_reason: str | None
     bank: str | None
     failed_at: str | None
+    error_code: str | None = None
+    error_description: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.delivery_id, str) or not self.delivery_id.strip():
@@ -285,7 +287,16 @@ class FailedPaymentEvent:
             raise WebhookPayloadError(
                 "payment.failed event must carry an order id"
             )
-        for name in ("customer_id", "currency", "payment_method", "failure_reason", "bank", "failed_at"):
+        for name in (
+            "customer_id",
+            "currency",
+            "payment_method",
+            "failure_reason",
+            "bank",
+            "failed_at",
+            "error_code",
+            "error_description",
+        ):
             value = getattr(self, name)
             if value is not None and (
                 not isinstance(value, str) or not value.strip()
@@ -393,4 +404,6 @@ def parse_payment_failed_payload(raw_body: bytes, delivery_id: str) -> FailedPay
         failure_reason=failure_reason,
         bank=None,
         failed_at=failed_at,
+        error_code=error_code.strip() if isinstance(error_code, str) and error_code.strip() else None,
+        error_description=error_desc.strip() if isinstance(error_desc, str) and error_desc.strip() else None,
     )

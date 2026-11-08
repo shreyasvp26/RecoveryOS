@@ -49,6 +49,81 @@ _METHOD_TO_PAYMENT_METHOD: dict[str, str] = {
 _DEFAULT_CURRENCY: str = "INR"
 
 
+def _map_risk_flag(failed: FailedPaymentEvent) -> str:
+    """Map provider risk and decline indicators to PaymentEvent risk_flag."""
+    tokens = (
+        "fraud",
+        "suspected_fraud",
+        "risk_check",
+        "high_risk",
+        "stolen_card",
+        "lost_card",
+        "pickup_card",
+    )
+    combined = " ".join(
+        filter(
+            None,
+            [
+                getattr(failed, "error_code", None),
+                getattr(failed, "error_description", None),
+                failed.failure_reason,
+            ],
+        )
+    ).lower()
+    if any(token in combined for token in tokens):
+        return "fraud_suspect"
+    return "normal"
+
+
+def _map_failure_reason(failed: FailedPaymentEvent) -> str:
+    """Map provider error codes and descriptions to canonical failure reasons."""
+    combined = " ".join(
+        filter(
+            None,
+            [
+                getattr(failed, "error_code", None),
+                getattr(failed, "error_description", None),
+                failed.failure_reason,
+            ],
+        )
+    ).lower()
+
+    if any(
+        phrase in combined
+        for phrase in ("insufficient balance", "low balance", "exceeds_balance")
+    ):
+        return "insufficient_funds"
+    if any(
+        phrase in combined
+        for phrase in (
+            "upi pin",
+            "wrong pin",
+            "invalid pin",
+            "otp",
+            "3ds",
+            "authentication",
+        )
+    ):
+        return "authentication_failed"
+    if any(
+        phrase in combined
+        for phrase in ("issuer down", "bank unavailable", "cbs", "switch", "server_error")
+    ):
+        return "issuer_unavailable"
+    if any(
+        phrase in combined
+        for phrase in ("collect request expired", "timed out", "gateway_error")
+    ):
+        return "bank_timeout"
+    if any(
+        phrase in combined
+        for phrase in ("do not honor", "limit exceeded")
+    ):
+        return "declined_by_bank"
+
+    return failed.failure_reason or "payment_failed"
+
+
 def derive_customer_history(
     conn: sqlite3.Connection, customer_id: str | None
 ) -> CustomerHistory:
@@ -124,9 +199,9 @@ def map_failed_payment_to_event(
         payment_method=_METHOD_TO_PAYMENT_METHOD.get(
             failed.payment_method, "card"
         ),
-        failure_reason=failed.failure_reason or "payment_failed",
+        failure_reason=_map_failure_reason(failed),
         bank=failed.bank or _NEUTRAL_BANK,
-        risk_flag="normal",
+        risk_flag=_map_risk_flag(failed),
         customer_history=history,
         timestamp=event_timestamp,
     )
