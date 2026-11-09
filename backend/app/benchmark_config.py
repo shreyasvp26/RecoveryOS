@@ -156,6 +156,15 @@ def _estimator_fingerprint() -> str:
             estimator_module.UNRELIABLE_CUSTOMER_BPS,
             estimator_module.STRUGGLING_CUSTOMER_BPS,
         ],
+        "rbi_emandate_afa_threshold_paise": (
+            estimator_module.RBI_EMANDATE_AFA_THRESHOLD_PAISE
+        ),
+        "rbi_emandate_afa_adjustment": dict(
+            estimator_module.RBI_EMANDATE_AFA_ADJUSTMENT_BPS
+        ),
+        "one_time_rail_retry_penalty_bps": (
+            estimator_module.ONE_TIME_RAIL_RETRY_PENALTY_BPS
+        ),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()

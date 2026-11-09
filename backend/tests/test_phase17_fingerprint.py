@@ -106,6 +106,8 @@ def test_separate_interpreters_agree_despite_hash_randomization() -> None:
         ("WORLD_RELIABLE_BPS", 501),
         ("WORLD_UNRELIABLE_MIN_FAILURES", 5),
         ("HIGH_VALUE_THRESHOLD_PAISE", 1_000_001),
+        ("WORLD_RBI_EMANDATE_AFA_THRESHOLD_PAISE", 1_500_001),
+        ("WORLD_ONE_TIME_RAIL_RETRY_TRUE_BPS", -2201),
         ("HIDDEN_WORLD_METHODOLOGY_VERSION", "phase17-signal-bearing-world-v2"),
         ("RANDOMIZATION_VERSION", "phase17-blake2b-uniform-v2"),
     ],

@@ -357,7 +357,7 @@ def test_a_denied_high_value_candidate_cannot_beat_an_allowed_low_value_one(
     event_id = "evt_int_denied_high_value"
     _seed(
         db_conn,
-        _event(event_id, failure_reason="expired_card", amount_paise=2_000_000),
+        _event(event_id, failure_reason="insufficient_funds", amount_paise=2_000_000),
         _classification(event_id, root="customer_action_needed"),
     )
     config = PolicyConfig(

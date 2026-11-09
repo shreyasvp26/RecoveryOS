@@ -15,6 +15,8 @@ from app.estimator import (
     BASE_RECOVERY_BPS,
     FAILURE_REASON_ADJUSTMENT_BPS,
     PAYMENT_METHOD_ADJUSTMENT_BPS,
+    RBI_EMANDATE_AFA_ADJUSTMENT_BPS,
+    RBI_EMANDATE_AFA_THRESHOLD_PAISE,
     ROOT_CAUSE_ADJUSTMENT_BPS,
     SUBSCRIPTION_ADJUSTMENT_BPS,
     EstimationError,
@@ -122,13 +124,13 @@ def test_estimate_does_not_depend_on_event_identity() -> None:
 
 
 def test_estimate_does_not_depend_on_amount() -> None:
-    """Amount enters the decision through EV, never twice through probability."""
+    """Amount enters the decision through EV, never twice through probability (below mandate threshold)."""
     classification = _classification()
     for intervention in sorted(EXECUTABLE_INTERVENTIONS):
         assert _estimate(
             _event(amount_paise=500), classification, intervention
         ) == _estimate(
-            _event(amount_paise=50_000_000), classification, intervention
+            _event(amount_paise=1_000_000), classification, intervention
         )
 
 
@@ -248,6 +250,74 @@ def test_expired_card_suppresses_retries_and_favours_a_different_instrument() ->
     )
     assert _estimate(event, classification, "retry_immediate") < _estimate(
         event, classification, "payment_link"
+    )
+
+
+def test_expired_card_drives_server_side_retries_to_zero_bps() -> None:
+    """Expired card instrument failure deterministically yields 0 bps for server-side retries."""
+    event = _event(failure_reason="expired_card", payment_method="card")
+    classification = _classification("customer_action_needed")
+    assert _estimate(event, classification, "retry_immediate") == 0
+    assert _estimate(event, classification, "retry_delayed") == 0
+    assert _estimate(event, classification, "payment_link") > 0
+    assert _estimate(event, classification, "alternate_method_prompt") > 0
+
+
+def test_one_time_upi_netbanking_wallet_penalizes_silent_retries() -> None:
+    """Customer-present rails without active mandate penalize silent server-side retries."""
+    classification = _classification("transient")
+    for rail in ("upi", "netbanking", "wallet"):
+        one_time_event = _event(
+            payment_method=rail,
+            failure_reason="bank_timeout",
+            subscription=False,
+        )
+        subscription_event = _event(
+            payment_method=rail,
+            failure_reason="bank_timeout",
+            subscription=True,
+        )
+        for retry in ("retry_immediate", "retry_delayed"):
+            assert _estimate(one_time_event, classification, retry) < _estimate(
+                subscription_event, classification, retry
+            )
+        action_classification = _classification("customer_action_needed")
+        action_event = _event(
+            payment_method=rail,
+            failure_reason="authentication_failed",
+            subscription=False,
+        )
+        assert _estimate(action_event, action_classification, "payment_link") > _estimate(
+            action_event, action_classification, "retry_delayed"
+        )
+        assert _estimate(action_event, action_classification, "alternate_method_prompt") > _estimate(
+            action_event, action_classification, "retry_immediate"
+        )
+
+
+def test_rbi_emandate_afa_threshold_penalizes_immediate_retry_above_15000_inr() -> None:
+    """Recurring mandate transactions above ₹15,000 trigger RBI AFA physics."""
+    classification = _classification("transient")
+    sub_threshold_event = _event(
+        subscription=True,
+        amount_paise=500_000,
+        payment_method="card",
+        failure_reason="bank_timeout",
+    )
+    above_threshold_event = _event(
+        subscription=True,
+        amount_paise=2_000_000,
+        payment_method="card",
+        failure_reason="bank_timeout",
+    )
+    assert _estimate(above_threshold_event, classification, "retry_immediate") < _estimate(
+        sub_threshold_event, classification, "retry_immediate"
+    )
+    assert _estimate(above_threshold_event, classification, "payment_link") > _estimate(
+        sub_threshold_event, classification, "payment_link"
+    )
+    assert _estimate(above_threshold_event, classification, "retry_delayed") > _estimate(
+        sub_threshold_event, classification, "retry_delayed"
     )
 
 
@@ -379,6 +449,7 @@ def test_mismatched_event_and_classification_are_rejected() -> None:
     [
         (BASE_RECOVERY_BPS, "retry_delayed"),
         (SUBSCRIPTION_ADJUSTMENT_BPS, "retry_delayed"),
+        (RBI_EMANDATE_AFA_ADJUSTMENT_BPS, "retry_delayed"),
         (ROOT_CAUSE_ADJUSTMENT_BPS, "transient"),
         (FAILURE_REASON_ADJUSTMENT_BPS, "bank_timeout"),
         (PAYMENT_METHOD_ADJUSTMENT_BPS, "upi"),
