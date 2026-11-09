@@ -8,7 +8,7 @@ possible). The result is the persisted decision chain the operator dashboard
 renders. This reuses the frozen modules unchanged and never fabricates records.
 
 Usage (from backend/, then start the API):
-    python -m app.populate --seed 42 --count 100
+    python -m app.populate --seed 42 --count 500
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ REFERENCE_AT = datetime(2026, 8, 27, 13, 0, tzinfo=timezone.utc)
 def populate(
     *,
     seed: int = 42,
-    count: int = 100,
+    count: int = 500,
     conn: sqlite3.Connection | None = None,
 ) -> dict[str, int]:
     """Populate the durable pipeline DB and return counts of what happened.
@@ -94,7 +94,7 @@ def _main(argv=None) -> None:
         description="Populate the durable pipeline DB for the operator dashboard."
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--count", type=int, default=100)
+    parser.add_argument("--count", type=int, default=500)
     args = parser.parse_args(argv)
     print(populate(seed=args.seed, count=args.count))
 
