@@ -47,6 +47,7 @@ from app.recovery_operations import (
     build_queue_row,
     build_queue_row_for_event,
     build_recovery_queue,
+    match_active_outage,
 )
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
@@ -566,3 +567,115 @@ def test_the_queue_never_exposes_hidden_world_or_benchmark_state(db_conn) -> Non
     payload = json.dumps(build_recovery_queue(db_conn))
     for forbidden in ("hidden", "oracle", "true_probability", "regret", "recovery_draw"):
         assert forbidden not in payload.lower()
+
+
+def _make_incident(
+    incident_id: str = "inc_test_1",
+    severity: str = "HIGH",
+    status: str = "OPEN",
+    bank: str = "HDFC",
+    payment_method: str = "upi",
+    degradation_bps: int = 3500,
+    current_recovered: int = 2,
+    baseline_recovered: int = 8,
+    affected_event_ids: tuple[str, ...] = ("evt_1",),
+):
+    from app.incidents import Incident, ObservationWindows, Segment, WindowMetrics
+
+    windows = ObservationWindows(anchor=NOW, window_days=28)
+    baseline = WindowMetrics(
+        events=10,
+        scored=10,
+        recovered=baseline_recovered,
+        amount_paise=1_000_000,
+        recovered_amount_paise=baseline_recovered * 100_000,
+        failure_reason_counts={"bank_timeout": 10},
+    )
+    current = WindowMetrics(
+        events=10,
+        scored=10,
+        recovered=current_recovered,
+        amount_paise=1_000_000,
+        recovered_amount_paise=current_recovered * 100_000,
+        failure_reason_counts={"bank_timeout": 10},
+    )
+    return Incident(
+        incident_id=incident_id,
+        detected_at=NOW.isoformat(),
+        status=status,
+        segment=Segment(
+            dimensions=("bank", "payment_method"),
+            values=(bank, payment_method),
+        ),
+        windows=windows,
+        baseline=baseline,
+        current=current,
+        degradation_bps=degradation_bps,
+        unrecovered_rate_delta_bps=degradation_bps,
+        simulated_revenue_at_risk_paise=500_000,
+        severity=severity,
+        contributor=None,
+        affected_event_ids=affected_event_ids,
+    )
+
+
+def test_queue_row_surfaces_active_high_or_critical_rail_outage(db_conn) -> None:
+    inc = _make_incident(
+        incident_id="inc_hdfc_upi",
+        severity="HIGH",
+        status="OPEN",
+        bank="HDFC",
+        payment_method="upi",
+        degradation_bps=3500,
+        affected_event_ids=("evt_match",),
+    )
+    insert_payment_event(
+        db_conn,
+        _event("evt_match", bank="HDFC", payment_method="upi", failure_reason="bank_timeout"),
+    )
+    insert_classification_result(db_conn, _classification("evt_match", candidates=("payment_link",)))
+    insert_policy_decision(db_conn, _decision("evt_match", "payment_link", allowed=True))
+    insert_optimizer_decision(db_conn, _optimizer_record("evt_match", "payment_link", 20_000))
+
+    insert_payment_event(
+        db_conn,
+        _event("evt_other", bank="ICICI", payment_method="card", failure_reason="network_error"),
+    )
+    insert_classification_result(db_conn, _classification("evt_other", candidates=("payment_link",)))
+    insert_policy_decision(db_conn, _decision("evt_other", "payment_link", allowed=True))
+    insert_optimizer_decision(db_conn, _optimizer_record("evt_other", "payment_link", 20_000))
+
+    queue = build_recovery_queue(db_conn, incidents=(inc,))
+    by_id = {row["event_id"]: row for row in queue["rows"]}
+
+    match_row = by_id["evt_match"]
+    assert match_row["active_outage"] is not None
+    assert match_row["active_outage"]["severity"] == "HIGH"
+    assert match_row["active_outage"]["segment_label"] == "HDFC + upi"
+    assert match_row["active_outage"]["rail_switch_recommended"] is True
+    assert "Active HIGH degradation on HDFC + upi" in match_row["active_outage"]["routing_guidance"]
+    assert match_row["active_outage"]["degradation_bps"] == 3500
+
+    other_row = by_id["evt_other"]
+    assert other_row["active_outage"] is None
+
+    single_row = build_queue_row_for_event(db_conn, "evt_match", incidents=(inc,))
+    assert single_row is not None
+    assert single_row["active_outage"] is not None
+    assert single_row["active_outage"]["incident_id"] == "inc_hdfc_upi"
+
+    single_other = build_queue_row_for_event(db_conn, "evt_other", incidents=(inc,))
+    assert single_other is not None
+    assert single_other["active_outage"] is None
+
+
+def test_low_and_medium_incidents_do_not_trigger_outage_alert() -> None:
+    low_inc = _make_incident(severity="LOW", degradation_bps=1500)
+    med_inc = _make_incident(severity="MEDIUM", degradation_bps=2200)
+    ev = {"bank": "HDFC", "payment_method": "upi"}
+
+    assert match_active_outage(ev, (low_inc,)) is None
+    assert match_active_outage(ev, (med_inc,)) is None
+
+    high_inc = _make_incident(severity="HIGH", degradation_bps=3200)
+    assert match_active_outage(ev, (high_inc,)) is not None

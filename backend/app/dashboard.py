@@ -10,7 +10,7 @@ cannot substantiate is reported as explicitly unavailable rather than invented.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from . import db
 from .benchmark_metrics import (
@@ -298,7 +298,12 @@ def build_dashboard_summary(conn) -> dict[str, Any]:
     }
 
 
-def build_event_trace(conn, event_id: str) -> dict[str, Any] | None:
+def build_event_trace(
+    conn,
+    event_id: str,
+    *,
+    active_outage: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Assemble the historical decision chain for one event, or None if absent."""
     from .db import get_classification_result, get_payment_event
 
@@ -327,6 +332,7 @@ def build_event_trace(conn, event_id: str) -> dict[str, Any] | None:
         "attempts": attempts,
         "phase12": _summarize_phase12(conn, executions),
         "summary": _summarize_trace(classification, decisions, executions),
+        "active_outage": dict(active_outage) if active_outage is not None else None,
     }
 
 
