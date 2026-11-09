@@ -436,7 +436,18 @@ def execute_event(
         return _claim_conflict_result(conn, event_id, selected, optimizer_decision)
 
     try:
-        outcome = BoundedExecutor().execute(event, selected, decision, razorpay_client)
+        if classification.customer_message:
+            outcome = BoundedExecutor().execute(
+                event,
+                selected,
+                decision,
+                razorpay_client,
+                customer_message=classification.customer_message,
+            )
+        else:
+            outcome = BoundedExecutor().execute(
+                event, selected, decision, razorpay_client
+            )
     except BaseException:
         # The executor maps controlled provider failures to an explicit FAILED
         # outcome, so reaching here means something escaped it entirely and the

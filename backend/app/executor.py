@@ -152,6 +152,8 @@ class BoundedExecutor:
         intervention: str,
         decision: PolicyDecision,
         razorpay_client: Any = None,
+        *,
+        customer_message: str | None = None,
     ) -> ExecutionOutcome:
         """Execute the requested intervention under authoritative authorization."""
         if not isinstance(event, PaymentEvent):
@@ -176,7 +178,12 @@ class BoundedExecutor:
             )
 
         if intervention == PAYMENT_LINK:
-            return self._execute_payment_link(event, decision, razorpay_client)
+            return self._execute_payment_link(
+                event,
+                decision,
+                razorpay_client,
+                customer_message=customer_message,
+            )
 
         raise ExecutionRejectedError(
             f"intervention {intervention!r} has no execution path"
@@ -187,6 +194,8 @@ class BoundedExecutor:
         event: PaymentEvent,
         decision: PolicyDecision,
         razorpay_client: Any,
+        *,
+        customer_message: str | None = None,
     ) -> ExecutionOutcome:
         """Create a Razorpay Test Mode Payment Link for the selected event.
 
@@ -217,12 +226,18 @@ class BoundedExecutor:
                 reported_at=decision.evaluated_at,
             )
 
+        description = f"RecoveryOS payment link for order {event.order_id}"
+        if isinstance(customer_message, str) and customer_message.strip():
+            description = (
+                f"RecoveryOS payment link for order {event.order_id} — {customer_message.strip()}"
+            )[:255]
+
         try:
             result = razorpay_client.create_payment_link(
                 amount_paise=event.amount_paise,
                 currency=event.currency,
                 reference_id=reference_id,
-                description=f"RecoveryOS payment link for order {event.order_id}",
+                description=description,
             )
         except RazorpayError as exc:
             return ExecutionOutcome(

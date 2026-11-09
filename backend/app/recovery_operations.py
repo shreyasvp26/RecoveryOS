@@ -448,6 +448,8 @@ def build_queue_row(
                 classification.get("candidate_interventions") or ()
             ),
         }
+        if classification.get("customer_message") is not None:
+            diagnosis["customer_message"] = classification.get("customer_message")
     diagnosis_error = None
     if diagnosis is None and classification_failures:
         failure = classification_failures.get(event["event_id"])

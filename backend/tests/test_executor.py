@@ -274,3 +274,68 @@ def test_outcome_rejects_naive_timestamp() -> None:
             status="SUCCESS",
             reported_at="2026-08-27T13:00:00",
         )
+
+
+def test_payment_link_passes_customer_message_in_description() -> None:
+    event = _event()
+    decision = _decision("payment_link")
+    client = StubPaymentLinkClient(
+        result=PaymentLinkResult(id="plink_msg", short_url="https://rzp.io/l/msg123")
+    )
+    msg = "HDFC UPI is experiencing delays; complete your order via this link."
+    outcome = BoundedExecutor().execute(
+        event,
+        "payment_link",
+        decision,
+        razorpay_client=client,
+        customer_message=msg,
+    )
+    assert outcome.status == "SUCCESS"
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert "order_exec" in call["description"]
+    assert msg in call["description"]
+
+    # End-to-end via execute_event
+    from app.db import (
+        connect,
+        init_db,
+        insert_classification_result,
+        insert_payment_event,
+    )
+    from app.classification import ClassificationResult
+    from app.execution_service import execute_event
+    from app.policy import PolicyConfig, parse_aware_datetime
+
+    conn = connect(":memory:")
+    init_db(conn)
+    insert_payment_event(conn, event)
+    insert_classification_result(
+        conn,
+        ClassificationResult(
+            event_id=event.event_id,
+            root_cause_category="transient",
+            confidence=0.9,
+            reasoning="timeout",
+            candidate_interventions=("payment_link",),
+            customer_message=msg,
+        ),
+    )
+    client_e2e = StubPaymentLinkClient(
+        result=PaymentLinkResult(id="plink_e2e", short_url="https://rzp.io/l/e2e")
+    )
+    eval_time = parse_aware_datetime(VALID_EVALUATED_AT)
+    cfg = PolicyConfig()
+    svc_result = execute_event(
+        conn,
+        event.event_id,
+        eval_time,
+        cfg,
+        client_e2e,
+        selection_strategy="v1_fixed_priority",
+    )
+    assert svc_result.status == "execution_success"
+    assert len(client_e2e.calls) == 1
+    assert "order_exec" in client_e2e.calls[0]["description"]
+    assert msg in client_e2e.calls[0]["description"]
+    conn.close()

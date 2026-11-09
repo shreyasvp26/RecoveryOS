@@ -67,3 +67,15 @@ def test_multiple_classifications_persist_independently(db_conn) -> None:
     insert_classification_result(db_conn, second)
     assert get_classification_result(db_conn, "evt_000001") == first
     assert get_classification_result(db_conn, "evt_000002") == second
+
+
+def test_classification_with_customer_message_persists_and_loads(db_conn) -> None:
+    msg = "HDFC UPI is experiencing delays; complete your order via this link."
+    data = valid_result(event_id="evt_with_msg", customer_message=msg)
+    result = ClassificationResult.from_dict(data)
+    insert_classification_result(db_conn, result)
+    loaded = get_classification_result(db_conn, "evt_with_msg")
+    assert loaded is not None
+    assert loaded.customer_message == msg
+    assert loaded == result
+    assert loaded.to_dict() == data

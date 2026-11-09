@@ -75,7 +75,9 @@ def build_prompt(payload: dict[str, Any]) -> str:
         "these keys: \"event_id\", \"root_cause_category\" (one of: "
         f"{categories}), \"confidence\" (a number from 0 to 1), \"reasoning\" "
         "(a concise explanation), \"candidate_interventions\" (a list drawn "
-        f"from: {interventions}).\n"
+        f"from: {interventions}), and optionally \"customer_message\" "
+        "(a concise, bank-and-reason-specific customer recovery note under 140 "
+        "characters suitable for a payment link description).\n"
         "Event:\n"
         + json.dumps(payload, indent=2)
     )

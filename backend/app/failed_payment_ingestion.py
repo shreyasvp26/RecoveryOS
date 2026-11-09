@@ -25,6 +25,7 @@ gaps it fills:
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from typing import Any
 
@@ -47,6 +48,26 @@ _METHOD_TO_PAYMENT_METHOD: dict[str, str] = {
 # Razorpay currency codes are uppercase 3-letter codes; the contract accepts
 # any non-empty string, so the value is passed through unchanged.
 _DEFAULT_CURRENCY: str = "INR"
+
+NPCI_DECLINE_CODE_MAP: dict[str, str] = {
+    "u30": "bank_timeout",          # NPCI U30: Debit failed / bank switch timeout
+    "bt": "bank_timeout",           # NPCI BT: Issuer bank CBS / switch timeout
+    "z9": "insufficient_funds",     # NPCI Z9: Insufficient funds in customer account
+    "zm": "authentication_failed",  # NPCI ZM: Invalid UPI PIN / MPIN
+    "za": "authentication_failed",  # NPCI ZA: Transaction declined / cancelled by customer
+    "u16": "declined_by_bank",      # NPCI U16: Risk threshold exceeded
+}
+NPCI_FRAUD_RISK_CODES: frozenset[str] = frozenset({"u16"})
+
+
+def _extract_code_tokens(text: str) -> set[str]:
+    """Extract word tokens and underscore-delimited parts in lowercase."""
+    return {
+        part
+        for token in re.findall(r"[a-z0-9_]+", text.lower())
+        for part in (token, *token.split("_"))
+        if part
+    }
 
 
 def _map_risk_flag(failed: FailedPaymentEvent) -> str:
@@ -72,6 +93,8 @@ def _map_risk_flag(failed: FailedPaymentEvent) -> str:
     ).lower()
     if any(token in combined for token in tokens):
         return "fraud_suspect"
+    if _extract_code_tokens(combined) & NPCI_FRAUD_RISK_CODES:
+        return "fraud_suspect"
     return "normal"
 
 
@@ -87,6 +110,11 @@ def _map_failure_reason(failed: FailedPaymentEvent) -> str:
             ],
         )
     ).lower()
+
+    code_tokens = _extract_code_tokens(combined)
+    for code in ("u30", "bt", "z9", "zm", "za", "u16"):
+        if code in code_tokens:
+            return NPCI_DECLINE_CODE_MAP[code]
 
     if any(
         phrase in combined

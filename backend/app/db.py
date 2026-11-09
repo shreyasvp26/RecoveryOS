@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS classification_results (
     root_cause_category     TEXT NOT NULL,
     confidence              REAL NOT NULL,
     reasoning               TEXT NOT NULL,
-    candidate_interventions TEXT NOT NULL
+    candidate_interventions TEXT NOT NULL,
+    customer_message        TEXT
 )
 """
 
@@ -307,6 +308,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(_ESTIMATOR_CALIBRATION_SNAPSHOTS_DDL)
         _migrate_execution_outcomes_payment_link_id(conn)
         _migrate_optimizer_decisions_estimator_provenance(conn)
+        _migrate_classification_results_customer_message(conn)
         _ensure_webhook_recovery_outcome_uniqueness(conn)
         _ensure_policy_history_index(conn)
         conn.commit()
@@ -374,6 +376,22 @@ def _migrate_optimizer_decisions_estimator_provenance(
             continue
         conn.execute(
             f"ALTER TABLE optimizer_decisions ADD COLUMN {column} {column_type}"
+        )
+
+
+def _migrate_classification_results_customer_message(
+    conn: sqlite3.Connection,
+) -> None:
+    """Idempotently add the nullable customer_message column to existing DBs."""
+    cols = {
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(classification_results)"
+        ).fetchall()
+    }
+    if "customer_message" not in cols:
+        conn.execute(
+            "ALTER TABLE classification_results ADD COLUMN customer_message TEXT"
         )
 
 
@@ -558,8 +576,8 @@ def insert_classification_result(
             """
             INSERT INTO classification_results (
                 event_id, root_cause_category, confidence, reasoning,
-                candidate_interventions
-            ) VALUES (?, ?, ?, ?, ?)
+                candidate_interventions, customer_message
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 result.event_id,
@@ -567,6 +585,7 @@ def insert_classification_result(
                 result.confidence,
                 result.reasoning,
                 json.dumps(list(result.candidate_interventions)),
+                result.customer_message,
             ),
         )
         conn.commit()
@@ -586,6 +605,8 @@ def get_classification_result(
         return None
     data: dict[str, Any] = dict(row)
     data["candidate_interventions"] = json.loads(data["candidate_interventions"])
+    if data.get("customer_message") is None:
+        data.pop("customer_message", None)
     return ClassificationResult.from_dict(data)
 
 
@@ -1404,6 +1425,8 @@ def get_classification_results_for_events(
     for row in rows:
         data = dict(row)
         data["candidate_interventions"] = json.loads(data["candidate_interventions"])
+        if data.get("customer_message") is None:
+            data.pop("customer_message", None)
         out[data["event_id"]] = data
     return out
 

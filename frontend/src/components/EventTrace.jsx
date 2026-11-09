@@ -400,6 +400,11 @@ function TraceTimeline({ trace }) {
                 <span className="meta-line">confidence {classification.confidence}</span>
               </div>
               <p className="stage__text">{classification.reasoning}</p>
+              {classification.customer_message && (
+                <div className="kv-grid">
+                  <KeyVal k="Contextual recovery copy" v={classification.customer_message} />
+                </div>
+              )}
               <div className="candidates">
                 {(classification.candidate_interventions || []).map((c) => (
                   <span key={c} className="chip">
