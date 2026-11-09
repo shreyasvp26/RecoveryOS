@@ -17,6 +17,7 @@ from app.generator import generate_events
 from app.hidden_world import (
     HiddenWorld,
     HiddenWorldError,
+    WORLD_RBI_EMANDATE_AFA_THRESHOLD_PAISE,
     deterministic_draw_bps,
     true_expected_value_paise,
     true_probability_bps,
@@ -183,6 +184,64 @@ def test_a_dead_card_rewards_a_new_instrument_over_any_retry() -> None:
         assert true_probability_bps(event, "payment_link") > (
             true_probability_bps(event, retry)
         )
+
+
+def test_expired_card_has_zero_true_recovery_probability_for_retries() -> None:
+    event = make_event(failure_reason="expired_card")
+    assert true_probability_bps(event, "retry_immediate") == 0
+    assert true_probability_bps(event, "retry_delayed") == 0
+
+
+def test_one_time_customer_present_rails_penalize_silent_retries() -> None:
+    for rail in ("upi", "netbanking", "wallet"):
+        one_time = make_event(
+            payment_method=rail,
+            customer_history=CustomerHistory(
+                prior_successful_payments=6,
+                prior_failed_payments=1,
+                has_active_subscription=False,
+            ),
+        )
+        with_subscription = make_event(
+            payment_method=rail,
+            customer_history=CustomerHistory(
+                prior_successful_payments=6,
+                prior_failed_payments=1,
+                has_active_subscription=True,
+            ),
+        )
+        for retry in ("retry_immediate", "retry_delayed"):
+            assert true_probability_bps(one_time, retry) < true_probability_bps(
+                with_subscription, retry
+            )
+
+
+def test_rbi_emandate_afa_threshold_penalizes_immediate_retry_above_threshold() -> None:
+    sub_threshold = make_event(
+        amount_paise=500_000,
+        customer_history=CustomerHistory(
+            prior_successful_payments=6,
+            prior_failed_payments=1,
+            has_active_subscription=True,
+        ),
+    )
+    above_threshold = make_event(
+        amount_paise=WORLD_RBI_EMANDATE_AFA_THRESHOLD_PAISE + 500_000,
+        customer_history=CustomerHistory(
+            prior_successful_payments=6,
+            prior_failed_payments=1,
+            has_active_subscription=True,
+        ),
+    )
+    assert true_probability_bps(above_threshold, "retry_immediate") < true_probability_bps(
+        sub_threshold, "retry_immediate"
+    )
+    assert true_probability_bps(above_threshold, "payment_link") > true_probability_bps(
+        sub_threshold, "payment_link"
+    )
+    assert true_probability_bps(above_threshold, "retry_delayed") > true_probability_bps(
+        sub_threshold, "retry_delayed"
+    )
 
 
 def test_an_empty_account_rewards_a_nudge_over_an_immediate_retry() -> None:

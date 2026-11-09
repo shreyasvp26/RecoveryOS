@@ -170,8 +170,8 @@ FAILURE_REASON_TRUE_BPS: Mapping[str, Mapping[str, int]] = _frozen(
         # The instrument itself is dead: only a different instrument recovers.
         "expired_card": {
             NO_ACTION: -300,
-            "retry_immediate": -1400,
-            "retry_delayed": -1300,
+            "retry_immediate": -5000,
+            "retry_delayed": -5000,
             "payment_link": 1800,
             "reminder": -200,
             "alternate_method_prompt": 2000,
@@ -277,6 +277,18 @@ HIGH_VALUE_TRUE_BPS: Mapping[str, int] = _frozen(
     }
 )
 
+# Indian payment rail, instrument & RBI recurring mandate ground-truth physics.
+WORLD_RBI_EMANDATE_AFA_THRESHOLD_PAISE: int = 1_500_000
+WORLD_RBI_EMANDATE_AFA_TRUE_BPS: Mapping[str, int] = _frozen(
+    {
+        "retry_immediate": -3000,
+        "retry_delayed": 400,
+        "payment_link": 700,
+        "alternate_method_prompt": 500,
+    }
+)
+WORLD_ONE_TIME_RAIL_RETRY_TRUE_BPS: int = -2200
+
 
 # Bumping this identifies a deliberate change of the hidden model's STRUCTURE
 # (which terms exist and how they combine). A coefficient change is caught by
@@ -325,6 +337,9 @@ def hidden_world_fingerprint() -> str:
             "unreliable_bps": WORLD_UNRELIABLE_BPS,
             "struggling_bps": WORLD_STRUGGLING_BPS,
         },
+        "rbi_emandate_afa_threshold_paise": WORLD_RBI_EMANDATE_AFA_THRESHOLD_PAISE,
+        "rbi_emandate_afa": dict(WORLD_RBI_EMANDATE_AFA_TRUE_BPS),
+        "one_time_rail_retry_bps": WORLD_ONE_TIME_RAIL_RETRY_TRUE_BPS,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()
@@ -399,6 +414,17 @@ def true_probability_bps(event: PaymentEvent, intervention: str) -> int:
         score += SUBSCRIPTION_TRUE_BPS.get(intervention, 0)
     if event.amount_paise >= HIGH_VALUE_THRESHOLD_PAISE:
         score += HIGH_VALUE_TRUE_BPS.get(intervention, 0)
+    if (
+        not event.customer_history.has_active_subscription
+        and event.payment_method in ("upi", "netbanking", "wallet")
+        and intervention in ("retry_immediate", "retry_delayed")
+    ):
+        score += WORLD_ONE_TIME_RAIL_RETRY_TRUE_BPS
+    if (
+        event.customer_history.has_active_subscription
+        and event.amount_paise > WORLD_RBI_EMANDATE_AFA_THRESHOLD_PAISE
+    ):
+        score += WORLD_RBI_EMANDATE_AFA_TRUE_BPS.get(intervention, 0)
     return _saturate_bps(score)
 
 

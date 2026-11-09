@@ -153,8 +153,8 @@ FAILURE_REASON_ADJUSTMENT_BPS: Mapping[str, Mapping[str, int]] = _frozen({
     },
     # The instrument itself is unusable; only a different instrument helps.
     "expired_card": {
-        "retry_immediate": -1600,
-        "retry_delayed": -1400,
+        "retry_immediate": -5000,
+        "retry_delayed": -5000,
         "payment_link": 800,
         "alternate_method_prompt": 1200,
     },
@@ -211,6 +211,24 @@ SUBSCRIPTION_ADJUSTMENT_BPS: Mapping[str, int] = _frozen(
         "reminder": 100,
     }
 )
+
+# Indian payment rail, instrument & RBI mandate physics constants.
+SERVER_SIDE_RETRY_INTERVENTIONS: frozenset[str] = frozenset(
+    {"retry_immediate", "retry_delayed"}
+)
+CUSTOMER_PRESENT_RAILS: frozenset[str] = frozenset(
+    {"upi", "netbanking", "wallet"}
+)
+RBI_EMANDATE_AFA_THRESHOLD_PAISE: int = 1_500_000
+RBI_EMANDATE_AFA_ADJUSTMENT_BPS: Mapping[str, int] = _frozen(
+    {
+        "retry_immediate": -2500,
+        "retry_delayed": 300,
+        "payment_link": 600,
+        "alternate_method_prompt": 400,
+    }
+)
+ONE_TIME_RAIL_RETRY_PENALTY_BPS: int = -1800
 
 
 class EstimationError(Exception):
@@ -272,6 +290,7 @@ class RecoveryProbabilityEstimator:
             PAYMENT_METHOD_ADJUSTMENT_BPS, event.payment_method, intervention
         )
         score += self._customer_history_adjustment(event, intervention)
+        score += self._indian_rail_and_mandate_adjustment(event, intervention)
         return RecoveryProbability(basis_points=_saturate(score))
 
     @staticmethod
@@ -285,6 +304,25 @@ class RecoveryProbabilityEstimator:
         rather than inventing a coefficient.
         """
         return table.get(feature, {}).get(intervention, 0)
+
+    @staticmethod
+    def _indian_rail_and_mandate_adjustment(
+        event: PaymentEvent, intervention: str
+    ) -> int:
+        """Score Indian rail characteristics and RBI e-mandate AFA thresholds."""
+        adjustment = 0
+        if (
+            not event.customer_history.has_active_subscription
+            and event.payment_method in CUSTOMER_PRESENT_RAILS
+            and intervention in SERVER_SIDE_RETRY_INTERVENTIONS
+        ):
+            adjustment += ONE_TIME_RAIL_RETRY_PENALTY_BPS
+        if (
+            event.customer_history.has_active_subscription
+            and event.amount_paise > RBI_EMANDATE_AFA_THRESHOLD_PAISE
+        ):
+            adjustment += RBI_EMANDATE_AFA_ADJUSTMENT_BPS.get(intervention, 0)
+        return adjustment
 
     @staticmethod
     def _customer_history_adjustment(event: PaymentEvent, intervention: str) -> int:
