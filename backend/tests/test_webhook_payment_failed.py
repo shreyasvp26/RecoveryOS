@@ -573,3 +573,56 @@ def test_map_failure_reason_covers_common_decline_phrases(tmp_path) -> None:
             assert event.failure_reason == expected_reason
     finally:
         conn.close()
+
+
+def test_npci_upi_error_codes_map_to_canonical_reasons_and_risk_flags(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    try:
+        cases = [
+            ("U30", "Debit failed at bank switch", "bank_timeout", "normal"),
+            ("NPCI_BT", "Issuer bank CBS timeout", "bank_timeout", "normal"),
+            ("Z9", "Insufficient funds in customer account", "insufficient_funds", "normal"),
+            ("UPI_ZM", "Invalid UPI PIN entered", "authentication_failed", "normal"),
+            ("ZA", "Transaction declined by customer", "authentication_failed", "normal"),
+            ("U16", "Risk threshold exceeded", "declined_by_bank", "fraud_suspect"),
+        ]
+        for idx, (code, desc, expected_reason, expected_risk) in enumerate(cases):
+            failed = FailedPaymentEvent(
+                delivery_id=f"del_npci_{idx}",
+                event_type="payment.failed",
+                payment_id=f"pay_npci_{idx}",
+                order_id=f"order_npci_{idx}",
+                customer_id=f"cust_npci_{idx}",
+                amount_paise=50000,
+                currency="INR",
+                payment_method="upi",
+                failure_reason=desc,
+                bank="HDFC",
+                failed_at="2026-08-01T12:00:00+00:00",
+                error_code=code,
+                error_description=desc,
+            )
+            event = map_failed_payment_to_event(conn, failed)
+            assert event.failure_reason == expected_reason, f"Failed for code {code}: got {event.failure_reason}"
+            assert event.risk_flag == expected_risk, f"Risk flag failed for code {code}: got {event.risk_flag}"
+
+        english_failed = FailedPaymentEvent(
+            delivery_id="del_english_words",
+            event_type="payment.failed",
+            payment_id="pay_english",
+            order_id="order_english",
+            customer_id="cust_english",
+            amount_paise=50000,
+            currency="INR",
+            payment_method="upi",
+            failure_reason="Customer in doubt about pizza order",
+            bank="HDFC",
+            failed_at="2026-08-01T12:00:00+00:00",
+            error_code="GENERIC_ERROR",
+            error_description="Customer in doubt about pizza order",
+        )
+        english_event = map_failed_payment_to_event(conn, english_failed)
+        assert english_event.failure_reason not in ("bank_timeout", "authentication_failed")
+        assert english_event.risk_flag == "normal"
+    finally:
+        conn.close()

@@ -149,3 +149,27 @@ def test_duplicate_candidate_interventions_raise_validation_error() -> None:
         ClassificationResult.from_dict(
             valid_result(candidate_interventions=["retry_delayed", "retry_delayed"])
         )
+
+
+def test_classification_with_customer_message_round_trips() -> None:
+    msg = "HDFC UPI is experiencing delays; complete your order via this link."
+    data = valid_result(customer_message=msg)
+    result = ClassificationResult.from_dict(data)
+    assert result.customer_message == msg
+    assert result.to_dict() == data
+    assert "customer_message" in result.to_dict()
+
+
+def test_classification_without_customer_message_omits_it_from_dict() -> None:
+    result = ClassificationResult.from_dict(valid_result())
+    assert result.customer_message is None
+    assert "customer_message" not in result.to_dict()
+
+    result_none = ClassificationResult.from_dict(valid_result(customer_message=None))
+    assert result_none.customer_message is None
+    assert "customer_message" not in result_none.to_dict()
+
+
+def test_invalid_customer_message_rejected() -> None:
+    with pytest.raises(ValueError):
+        ClassificationResult.from_dict(valid_result(customer_message=12345))

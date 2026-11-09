@@ -37,6 +37,11 @@ CLASSIFICATION_KEYS: frozenset[str] = frozenset(
     }
 )
 
+OPTIONAL_CLASSIFICATION_KEYS: frozenset[str] = frozenset({"customer_message"})
+ALLOWED_CLASSIFICATION_KEYS: frozenset[str] = (
+    CLASSIFICATION_KEYS | OPTIONAL_CLASSIFICATION_KEYS
+)
+
 
 class ClassificationError(Exception):
     """Base class for all explicit classification failures."""
@@ -60,6 +65,7 @@ class ClassificationResult:
     confidence: float
     reasoning: str
     candidate_interventions: tuple[str, ...]
+    customer_message: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_id, str) or not self.event_id.strip():
@@ -98,22 +104,33 @@ class ClassificationResult:
                     f"{sorted(CANDIDATE_INTERVENTIONS)}"
                 )
 
+        if self.customer_message is not None:
+            if not isinstance(self.customer_message, str):
+                raise ValueError("customer_message must be None or a string")
+            stripped = self.customer_message.strip()
+            object.__setattr__(
+                self, "customer_message", stripped if stripped else None
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict, preserving the locked contract exactly."""
-        return {
+        res: dict[str, Any] = {
             "event_id": self.event_id,
             "root_cause_category": self.root_cause_category,
             "confidence": self.confidence,
             "reasoning": self.reasoning,
             "candidate_interventions": list(self.candidate_interventions),
         }
+        if self.customer_message is not None:
+            res["customer_message"] = self.customer_message
+        return res
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClassificationResult":
         """Reconstruct a ClassificationResult from a plain dict."""
         if not isinstance(data, dict):
             raise ValueError("classification data must be an object")
-        if any(key not in CLASSIFICATION_KEYS for key in data):
+        if any(key not in ALLOWED_CLASSIFICATION_KEYS for key in data):
             raise ValueError("classification data contains unexpected fields")
         if any(key not in data for key in CLASSIFICATION_KEYS):
             raise ValueError("classification data is missing required fields")
@@ -123,4 +140,5 @@ class ClassificationResult:
             confidence=data["confidence"],
             reasoning=data["reasoning"],
             candidate_interventions=data["candidate_interventions"],
+            customer_message=data.get("customer_message"),
         )
