@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.classification import ClassificationResult
-from app.classifier import OmniRouteError
+from app.classifier import GeminiClassifierError
 from app.db import connect, get_classification_result, init_db, insert_classification_result
 from app.main import app
 from app.routes.events import get_classifier
@@ -55,7 +55,7 @@ class StubClassifier:
     def generate(self, prompt: str) -> str:
         self.calls += 1
         if not self.responses:
-            raise OmniRouteError("stub classifier exhausted")
+            raise GeminiClassifierError("stub classifier exhausted")
         return self.responses.pop(0)
 
 

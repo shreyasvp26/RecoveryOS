@@ -16,7 +16,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from app.classifier import OmniRouteClassifier, OmniRouteError, _validate_base_url
+from app.classifier import GeminiClassifier, GeminiClassifierError, _validate_base_url
 from app.config import build_policy_config, default_intervention_cost_paise, get_cors_origins
 from app.db import (
     connect,
@@ -242,32 +242,32 @@ def test_like_search_is_literal_not_wildcard(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_omniroute_base_url_requires_https() -> None:
-    with pytest.raises(OmniRouteError, match="scheme"):
+def test_gemini_base_url_requires_https() -> None:
+    with pytest.raises(GeminiClassifierError, match="scheme"):
         _validate_base_url("ftp://api.example.com/v1")
-    with pytest.raises(OmniRouteError, match="scheme"):
+    with pytest.raises(GeminiClassifierError, match="scheme"):
         _validate_base_url("jdbc:sqlite://localhost/db")
 
 
-def test_omniroute_base_url_rejects_plain_http_outside_loopback() -> None:
-    with pytest.raises(OmniRouteError, match="localhost"):
+def test_gemini_base_url_rejects_plain_http_outside_loopback() -> None:
+    with pytest.raises(GeminiClassifierError, match="localhost"):
         _validate_base_url("http://api.example.com/v1")
     assert _validate_base_url("http://localhost:8080/v1") == "http://localhost:8080/v1"
     assert _validate_base_url("http://127.0.0.1:8080/v1") == "http://127.0.0.1:8080/v1"
 
 
-def test_omniroute_base_url_requires_a_host_and_normalizes() -> None:
-    with pytest.raises(OmniRouteError, match="host"):
+def test_gemini_base_url_requires_a_host_and_normalizes() -> None:
+    with pytest.raises(GeminiClassifierError, match="host"):
         _validate_base_url("https:///v1")
     assert (
-        _validate_base_url("https://api.omniroute.ai/v1/")
-        == "https://api.omniroute.ai/v1"
+        _validate_base_url("https://generativelanguage.googleapis.com/v1beta/")
+        == "https://generativelanguage.googleapis.com/v1beta"
     )
 
 
 def test_adapter_construction_validates_the_boundary() -> None:
-    with pytest.raises(OmniRouteError):
-        OmniRouteClassifier(
+    with pytest.raises(GeminiClassifierError):
+        GeminiClassifier(
             api_key="k", model="m", base_url="http://evil.example.com/v1"
         )
 

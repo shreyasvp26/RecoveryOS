@@ -9,10 +9,10 @@ import pytest
 
 from app.classifier import (
     ClassificationValidationError,
-    OmniRouteClassifier,
-    OmniRouteError,
+    GeminiClassifier,
+    GeminiClassifierError,
     build_classifier_input,
-    build_omniroute_adapter,
+    build_gemini_adapter,
     build_prompt,
     classify_event,
 )
@@ -69,7 +69,7 @@ class StubAdapter:
     def generate(self, prompt: str) -> str:
         self.calls += 1
         if not self.responses:
-            raise OmniRouteError("stub adapter exhausted")
+            raise GeminiClassifierError("stub adapter exhausted")
         resp = self.responses.pop(0)
         if isinstance(resp, Exception):
             raise resp
@@ -151,13 +151,13 @@ def test_repeated_malformed_json_is_explicit_failure() -> None:
 
 def test_model_timeout_or_error_is_explicit_llm_failure() -> None:
     adapter = StubAdapter()
-    with pytest.raises(OmniRouteError):
+    with pytest.raises(GeminiClassifierError):
         classify_event(event(), adapter)
     assert adapter.calls == 2
 
 
-def test_transient_omniroute_error_retries_and_succeeds_on_valid_retry() -> None:
-    adapter = StubAdapter(OmniRouteError("transient error"), json.dumps(VALID_RESULT))
+def test_transient_gemini_error_retries_and_succeeds_on_valid_retry() -> None:
+    adapter = StubAdapter(GeminiClassifierError("transient error"), json.dumps(VALID_RESULT))
     result = classify_event(event(), adapter)
     assert result.event_id == "evt_000001"
     assert adapter.calls == 2
@@ -208,23 +208,40 @@ def test_classifier_modules_have_no_future_layer_dependency() -> None:
 
 
 def test_build_adapter_requires_api_key(monkeypatch) -> None:
-    monkeypatch.delenv("OMNIROUTE_API_KEY", raising=False)
-    with pytest.raises(OmniRouteError):
-        build_omniroute_adapter()
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(GeminiClassifierError):
+        build_gemini_adapter()
 
 
 def test_adapter_rejects_missing_api_key() -> None:
-    with pytest.raises(OmniRouteError):
-        OmniRouteClassifier(api_key="", model="m", base_url="https://example.test/v1")
+    with pytest.raises(GeminiClassifierError):
+        GeminiClassifier(api_key="", model="m", base_url="https://example.test/v1")
 
 
 def test_adapter_extracts_content_from_provider_response() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"message": {"content": "hello"}}]})
+        assert request.url.path == "/v1beta/models/gemini-2.5-flash:generateContent"
+        assert request.headers.get("x-goog-api-key") == "test-key"
+        assert "key=" not in str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "hello"}]
+                        }
+                    }
+                ]
+            },
+        )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    adapter = OmniRouteClassifier(
-        api_key="test", model="m", base_url="https://example.test/v1", client=client
+    adapter = GeminiClassifier(
+        api_key="test-key",
+        model="gemini-2.5-flash",
+        base_url="https://example.test/v1beta",
+        client=client,
     )
     assert adapter.generate("p") == "hello"
 
@@ -234,10 +251,10 @@ def test_adapter_surfaces_provider_status_errors() -> None:
         return httpx.Response(500, text="boom")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    adapter = OmniRouteClassifier(
+    adapter = GeminiClassifier(
         api_key="test", model="m", base_url="https://example.test/v1", client=client
     )
-    with pytest.raises(OmniRouteError):
+    with pytest.raises(GeminiClassifierError):
         adapter.generate("p")
 
 
@@ -246,8 +263,8 @@ def test_adapter_surfaces_unparseable_provider_body() -> None:
         return httpx.Response(200, json={})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    adapter = OmniRouteClassifier(
+    adapter = GeminiClassifier(
         api_key="test", model="m", base_url="https://example.test/v1", client=client
     )
-    with pytest.raises(OmniRouteError):
+    with pytest.raises(GeminiClassifierError):
         adapter.generate("p")

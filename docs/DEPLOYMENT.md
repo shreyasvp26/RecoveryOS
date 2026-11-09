@@ -40,7 +40,7 @@ npm run dev                                          # http://localhost:5173 (pr
 ```
 
 Readiness: `GET /health/ready` reports database usability and whether
-Razorpay Test Mode / webhook / OmniRoute are configured, as booleans only
+Razorpay Test Mode / webhook / Google Gemini are configured, as booleans only
 (never credential values).
 
 ## Demo / public deployment
@@ -79,7 +79,7 @@ the key.
 ### Environment variables
 
 All configuration is read from the environment (the `DATABASE_URL`, the
-Razorpay Test Mode key id/secret, the webhook secret, the OmniRoute key, and
+Razorpay Test Mode key id/secret, the webhook secret, the Gemini API key, and
 the policy overrides). Document them per the README's table. Secrets are never
 hardcoded, never committed, and never stored in SQLite.
 

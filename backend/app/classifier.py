@@ -23,11 +23,19 @@ from .classification import (
     ClassificationValidationError,
 )
 from .config import (
-    get_omniroute_api_key,
-    get_omniroute_base_url,
-    get_omniroute_model,
+    get_gemini_api_key,
+    get_gemini_base_url,
+    get_gemini_model,
 )
 from .models import PaymentEvent
+
+DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_TIMEOUT_SECONDS = 15.0
+
+GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
+GEMINI_BASE_URL_ENV = "GEMINI_BASE_URL"
+GEMINI_MODEL_ENV = "GEMINI_MODEL"
 
 SYSTEM_INSTRUCTION = (
     "You are a payment-failure diagnostic for a revenue recovery system. "
@@ -39,8 +47,8 @@ SYSTEM_INSTRUCTION = (
 )
 
 
-class OmniRouteError(ClassificationError):
-    """The OmniRoute provider call failed or is not configured."""
+class GeminiClassifierError(ClassificationError):
+    """The Google Gemini API call failed or is misconfigured."""
 
 
 class ClassifierAdapter(Protocol):
@@ -106,15 +114,15 @@ def classify_event(event: PaymentEvent, adapter: ClassifierAdapter) -> Classific
     """Classify a PaymentEvent through the provided adapter.
 
     At most ONE retry is permitted when the model's output cannot be parsed,
-    fails schema validation, or encounters a transient provider error (OmniRouteError).
+    fails schema validation, or encounters a transient provider error (GeminiClassifierError).
     """
     prompt = build_prompt(build_classifier_input(event))
     try:
         return _parse_to_result(adapter.generate(prompt), event)
-    except (OmniRouteError, ClassificationValidationError):
+    except (GeminiClassifierError, ClassificationValidationError):
         try:
             return _parse_to_result(adapter.generate(prompt), event)
-        except OmniRouteError:
+        except GeminiClassifierError:
             raise
         except ClassificationValidationError as exc:
             raise ClassificationValidationError(
@@ -125,7 +133,7 @@ def classify_event(event: PaymentEvent, adapter: ClassifierAdapter) -> Classific
 def _validate_base_url(base_url: str) -> str:
     """Validate and normalize the outbound provider base URL.
 
-    ``OMNIROUTE_BASE_URL`` is operator-controlled configuration, but this is
+    ``GEMINI_BASE_URL`` is operator-controlled configuration, but this is
     the single outbound HTTP sink in the classification path, so the sink is
     validated at the boundary: HTTPS is required, ``http`` is tolerated only
     for loopback (local development against a local model gateway), the URL
@@ -134,45 +142,49 @@ def _validate_base_url(base_url: str) -> str:
     explicitly, rather than producing an unexpected outbound request.
     """
     if not isinstance(base_url, str) or not base_url.strip():
-        raise OmniRouteError("OmniRoute base URL is required")
+        raise GeminiClassifierError("Gemini base URL is required")
     url = base_url.strip().rstrip("/")
     parsed = urllib.parse.urlsplit(url)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
     if scheme not in ("https", "http"):
-        raise OmniRouteError(
-            f"OmniRoute base URL scheme must be https:// (or http:// for "
+        raise GeminiClassifierError(
+            f"Gemini base URL scheme must be https:// (or http:// for "
             f"localhost), got {parsed.scheme!r}"
         )
     if not host:
-        raise OmniRouteError("OmniRoute base URL must include a host")
+        raise GeminiClassifierError("Gemini base URL must include a host")
     if scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
-        raise OmniRouteError(
-            "OmniRoute base URL over http is only allowed for localhost"
+        raise GeminiClassifierError(
+            "Gemini base URL over http is only allowed for localhost"
         )
     return url
 
 
-class OmniRouteClassifier:
-    """Thin HTTP adapter over an OpenAI-compatible OmniRoute completions endpoint."""
+class GeminiClassifier:
+    """Thin HTTP adapter over the Google Gemini REST generateContent endpoint."""
 
     def __init__(
         self,
         *,
         api_key: str,
-        model: str,
-        base_url: str,
-        timeout_seconds: float = 30.0,
+        model: str = DEFAULT_MODEL,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: httpx.Client | None = None,
     ) -> None:
         if not api_key:
-            raise OmniRouteError("OmniRoute API key is required")
+            raise GeminiClassifierError("GEMINI_API_KEY is required")
+        self._api_key = api_key
         self._model = model
         self._base_url = _validate_base_url(base_url)
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=timeout_seconds,
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={
+                "x-goog-api-key": self._api_key,
+                "Content-Type": "application/json",
+            },
         )
 
     def close(self) -> None:
@@ -181,42 +193,52 @@ class OmniRouteClassifier:
             self._client.close()
 
     def generate(self, prompt: str) -> str:
+        url = f"{self._base_url}/models/{self._model}:generateContent"
         body = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
-                {"role": "user", "content": prompt},
+            "systemInstruction": {
+                "parts": [{"text": SYSTEM_INSTRUCTION}],
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
             ],
-            "temperature": 0.0,
-            # Required explicitly: an OpenAI-compatible gateway may otherwise
-            # default to a text/event-stream response, which this adapter's
-            # single-shot JSON parsing cannot read.
-            "stream": False,
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+            },
+        }
+        headers = {
+            "x-goog-api-key": self._api_key,
+            "Content-Type": "application/json",
         }
         try:
-            response = self._client.post(
-                f"{self._base_url}/chat/completions", json=body
-            )
+            response = self._client.post(url, json=body, headers=headers)
         except httpx.HTTPError as exc:
-            raise OmniRouteError(f"provider request failed: {exc}") from exc
+            raise GeminiClassifierError(f"provider request failed: {exc}") from exc
         if response.status_code != 200:
-            raise OmniRouteError(f"provider returned status {response.status_code}")
+            raise GeminiClassifierError(f"provider returned status {response.status_code}")
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            candidates = response.json()["candidates"]
+            content = candidates[0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise OmniRouteError("provider returned an unparseable response") from exc
+            raise GeminiClassifierError("provider returned an unparseable response") from exc
         if not isinstance(content, str) or not content.strip():
-            raise OmniRouteError("provider returned an empty response")
+            raise GeminiClassifierError("provider returned an empty response")
         return content
 
 
-def build_omniroute_adapter() -> OmniRouteClassifier:
-    """Build the configured OmniRoute adapter, failing explicitly when misconfigured."""
-    api_key = get_omniroute_api_key()
+def build_gemini_adapter(
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+) -> GeminiClassifier:
+    """Build the configured Gemini adapter, failing explicitly when misconfigured."""
+    api_key = get_gemini_api_key()
     if not api_key:
-        raise OmniRouteError("OMNIROUTE_API_KEY is not configured")
-    return OmniRouteClassifier(
+        raise GeminiClassifierError("GEMINI_API_KEY is not configured")
+    return GeminiClassifier(
         api_key=api_key,
-        model=get_omniroute_model(),
-        base_url=get_omniroute_base_url(),
+        model=get_gemini_model(),
+        base_url=get_gemini_base_url(),
+        timeout_seconds=timeout_seconds,
     )

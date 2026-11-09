@@ -27,7 +27,7 @@ from .auth import require_operator
 from .config import (
     build_policy_config,
     get_cors_origins,
-    get_omniroute_api_key,
+    get_gemini_api_key,
     get_razorpay_key_id,
     get_razorpay_key_secret,
     get_razorpay_webhook_secret,
@@ -126,7 +126,7 @@ def health_ready() -> dict:
 
     razorpay_configured = bool(get_razorpay_key_id() and get_razorpay_key_secret())
     webhook_configured = bool(get_razorpay_webhook_secret())
-    omniroute_configured = bool(get_omniroute_api_key())
+    gemini_configured = bool(get_gemini_api_key())
 
     return {
         "status": "ready" if database_usable else "degraded",
@@ -157,11 +157,11 @@ def health_ready() -> dict:
                     )
                 ),
             },
-            "omniroute": {
-                "configured": omniroute_configured,
+            "gemini": {
+                "configured": gemini_configured,
                 "note": (
                     "API key present — the advisory AI classifier is available."
-                    if omniroute_configured
+                    if gemini_configured
                     else (
                         "absent — classification fails explicitly; the advisory "
                         "classifier will not fabricate output."

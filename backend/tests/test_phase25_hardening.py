@@ -371,7 +371,7 @@ def test_auto_classify_failure_is_recorded_not_just_logged(
     def adapter_unavailable():
         raise RuntimeError("model provider timeout")
 
-    monkeypatch.setattr(webhook_service, "build_omniroute_adapter", adapter_unavailable)
+    monkeypatch.setattr(webhook_service, "build_gemini_adapter", adapter_unavailable)
     result = webhook_service.process_payment_failed(conn, failed, body, NOW)
     assert result.status == "ingested"
 
@@ -393,7 +393,7 @@ def test_successful_classification_clears_the_failure_record(
     def adapter_unavailable():
         raise RuntimeError("model provider timeout")
 
-    monkeypatch.setattr(webhook_service, "build_omniroute_adapter", adapter_unavailable)
+    monkeypatch.setattr(webhook_service, "build_gemini_adapter", adapter_unavailable)
     webhook_service.process_payment_failed(conn, failed, body, NOW)
     event_id = map_failed_payment_to_event(conn, failed).event_id
     assert get_classification_failure(conn, event_id) is not None
@@ -418,7 +418,7 @@ def test_successful_classification_clears_the_failure_record(
             self.closed = True
 
     monkeypatch.setattr(
-        webhook_service, "build_omniroute_adapter", lambda: _GoodAdapter()
+        webhook_service, "build_gemini_adapter", lambda: _GoodAdapter()
     )
     event = get_payment_event(conn, event_id)
     webhook_service._auto_classify_best_effort(conn, event)
