@@ -11,7 +11,10 @@ Only the sqlite scheme is supported; SQLite remains the sole database.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .policy import PolicyConfig
 
 from dotenv import load_dotenv
 
@@ -202,7 +205,7 @@ def default_intervention_cost_paise() -> dict[str, int]:
     }
 
 
-def build_policy_config() -> "PolicyConfig":
+def build_policy_config() -> PolicyConfig:
     """Build the deterministic policy configuration from the environment.
 
     The spend-cap rule is backed by the SAME economic cost model the optimizer
