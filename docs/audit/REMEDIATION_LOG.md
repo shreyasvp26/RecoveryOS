@@ -1,10 +1,10 @@
-# RecoveryOS — Remediation & Defect Resolution Log
+# RecoveryOS — Remediation & Upgrade Log (Phases 27–41)
 
-> **Remediation Campaign**: Phases 27 through 33  
-> **Final Status**: All 18 verified defects (`DEF-01` through `DEF-18`) resolved, verified, and merged to `main`.  
-> **Backend Test Suite**: 1,721 passed (0 failed)  
+> **Remediation & Upgrade Campaign**: Phases 27 through 41  
+> **Final Status**: All 18 verified defects (`DEF-01` through `DEF-18`) resolved and Phases 37–41 ("Razorpay-Grade" Upgrades) merged to `main`.  
+> **Backend Test Suite**: 1,749 passed (0 failed)  
 > **Frontend Lint & Build**: 0 warnings, 0 errors (`oxlint`), clean Vite production bundle  
-> **Phase 17 Benchmark**: V2 WON (+₹67,515.19 True EV vs V1, +₹153,827.00 recovered revenue, 0% safety violations, 100% fairness invariants passed)
+> **Phase 17 Benchmark**: V2 WON (+₹178,493.86 True EV vs V1 at seed 42; 5/5 wins and +₹191,732.30 mean True EV lift across seeds 42–46, 0% safety violations, 100% fairness invariants passed)
 
 ---
 
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Phase-by-Phase Remediation Summary
+## 2. Phase-by-Phase Remediation Summary (Phases 27–36)
 
 ### Phase 27: Policy Gate Integrity, Negative-EV Refusal & Failed-Attempt Accounting
 - **Branch**: `fix/phase27-policy-gate-integrity`
@@ -91,99 +91,57 @@
   - Ingestion decline & fraud mapping: mapped Razorpay fraud tokens to `risk_flag = "fraud_suspect"` and common Indian decline phrases to canonical `failure_reason`s in `failed_payment_ingestion.py`.
   - `DEF-14`: Memoized `evaluate_workload()` using `functools.lru_cache(maxsize=8)` in `incident_analysis.py`.
 
----
+### Phase 35: Native Google Gemini API Classifier Migration
+- **Branch**: `feat/phase35-native-gemini-classifier`
+- **Commit**: `e2b013b` (Merged: `7b1824f`)
+- **Key Deliverables**:
+  - `backend/app/classifier.py` & `backend/app/config.py`: Replaced OmniRoute with direct `generateContent` Google Gemini client (`GeminiClassifier`, `build_gemini_adapter`, `GeminiClassifierError`) using `x-goog-api-key` header and default model `gemini-2.5-flash`.
 
-## 3. Verification & Benchmark Execution Records
-
-### 3.1 Backend Test Suite (`pytest`)
-```bash
-$ (cd backend && ../.venv/bin/python -m pytest -q)
-.................................................................        [100%]
-1721 passed, 1 warning in 11.52s
-```
-* **Status**: 100% GREEN (1,721 passing tests, 0 failures, 0 regressions).
-
-### 3.2 Frontend Linter (`oxlint`) & Production Build (`vite`)
-```bash
-$ (cd frontend && npm run lint)
-> recoveryos-frontend@0.0.0 lint
-> oxlint
-Found 0 warnings and 0 errors.
-Finished in 34ms on 15 files with 104 rules using 8 threads.
-
-$ (cd frontend && npm run build)
-> recoveryos-frontend@0.0.0 build
-> vite build
-vite v8.2.2 building client environment for production...
-✓ 29 modules transformed.
-dist/index.html                   0.46 kB │ gzip:  0.29 kB
-dist/assets/index-Ds_O0bYm.css   33.68 kB │ gzip:  6.79 kB
-dist/assets/index-Dfzl3btv.js   290.14 kB │ gzip: 83.37 kB
-✓ built in 118ms
-```
-* **Status**: 100% CLEAN (0 lint errors, 0 lint warnings, production bundle successfully generated).
-
-### 3.3 Phase 17 Production Benchmark Run
-```bash
-$ (cd backend && ../.venv/bin/python -m app.benchmark_phase17 --seed 42 --count 500)
-PHASE 17 BENCHMARK
-==================
-Methodology:      phase17_signal_bearing_v1
-Events:           500
-Event seed:       42
-Outcome seed:     42
-Randomization:    phase17-blake2b-uniform-v1
-Config:           f94d08fffbdd7b6c72de2897f222d3cb
-Evaluation:       SIMULATED  (synthetic; not production Razorpay recovery)
-
-Strategy                 Revenue    vs No Action  Attempts         True EV          Regret  Optimal
----------------------------------------------------------------------------------------------------
-No Action          Rs 263,751.00         Rs 0.00         0   Rs 259,354.71   Rs 667,404.42     0.0%
-Naive Retry        Rs 357,842.00    Rs 94,091.00       228   Rs 303,864.05             n/a     0.0%
-RecoveryOS V1      Rs 882,587.00   Rs 618,836.00       168   Rs 808,212.18   Rs 118,546.95    56.0%
-RecoveryOS V2    Rs 1,036,414.00   Rs 772,663.00       168   Rs 875,727.37    Rs 51,031.76    63.1%
-Oracle             Rs 983,665.00   Rs 719,914.00       168   Rs 926,759.13         Rs 0.00   100.0%
-
-V2 vs V1 (revenue):        Rs 153,827.00
-V2 vs No Action (revenue): Rs 772,663.00
-V2 vs V1 (true EV):        Rs 67,515.19
-V2 optimal-selection:      63.1%  (V1 56.0%)
-V2 total regret:           Rs 51,031.76  (V1 Rs 118,546.95)
-V2 average regret:         Rs 102.06
-V2 median regret:          Rs 0.00
-V2 oracle capture (gross): 94.5%
-V2 oracle capture (incr.): 92.4%  (V1 82.2%)
-V1/V2 selection disagreements: 106
-
-Safety Invariants
-  fraud intervention rate:   V1 = 0.0%, V2 = 0.0%
-  unauthorized executions:   V1 = 0,    V2 = 0
-  false-intervention rate:   V1 = 0.0%, V2 = 0.0%
-  negative-EV rate:          V1 = 0.0%, V2 = 0.0%
-  exceptions:                0 across all arms
-
-Fairness Invariants
-  deterministic_replay:               PASS
-  event_order_invariant:              PASS
-  same_event_set_for_every_arm:       PASS
-  same_hidden_world_for_every_arm:    PASS
-  same_policy_boundary_for_every_arm: PASS
-  strategy_order_invariant:           PASS
-
-Result: V2 WON
-  criterion:   total true economic value (V2 - V1)
-  difference:  Rs 67,515.19
-  materiality: Rs 6,674.04 (100 bps of (Oracle - No Action) true EV)
-```
+### Phase 36: Vite Backend `.env` Auto-Loading, Operator Key Recovery UI & `AGENTS.md`
+- **Branch**: `fix/phase36-vite-backend-env-and-populate`
+- **Commit**: `7366255` (Merged: `c9fc45c`), `061eb59` (`AGENTS.md`)
+- **Key Deliverables**:
+  - `frontend/vite.config.js` & `frontend/src/core/api.js`: Automatically loads `../backend/.env` via `loadEnv` so `/api` proxy requests attach `Authorization: Bearer <RECOVERYOS_OPERATOR_API_KEY>`.
+  - `AGENTS.md`: Added comprehensive root operating contract documenting the 5-stage pipeline, integer-paise/basis-point conventions, all 5 AST/structural isolation test suites (`test_optimizer_isolation.py`, `test_phase17_isolation.py`, `test_incident_safety.py`, `test_feedback_integrity.py`, `test_policy_scenario_identity.py`), and the mandatory `--no-ff` Git workflow.
 
 ---
 
-## 4. Phase 35 — Native Google Gemini API Classifier Migration
-* **Target**: Remove OmniRoute abstraction completely and replace with native Google Gemini REST API client (`GeminiClassifier`, `build_gemini_adapter`, `GeminiClassifierError`) using `httpx` and `GEMINI_API_KEY`.
-* **Changes**:
-  - `backend/app/classifier.py`: Implemented direct `generateContent` Google Gemini client using `x-goog-api-key` header and default model `gemini-2.5-flash`.
-  - `backend/app/config.py`: Replaced OmniRoute configuration with `get_gemini_api_key()`, `get_gemini_model()`, `get_gemini_base_url()`, and added `check_readiness_configuration()`.
-  - `backend/app/main.py`: Updated `/health/ready` configuration dictionary to inspect `"gemini"`.
-  - `backend/app/routes/events.py` & `backend/app/webhook_service.py`: Updated to use `GeminiClassifier`, `build_gemini_adapter`, and `GeminiClassifierError`.
-  - `backend/tests/`: Updated 13 test files to verify native Gemini API contracts, payload formats, error types, and isolation invariants.
-  - Verification: 1,722 backend tests passed, frontend lint/build clean (0 warnings, 0 errors), Phase 17 benchmark confirmed.
+## 3. Phases 37–41 — "Razorpay-Grade" Domain & Statistical Upgrades
+
+### Phase 37: Indian Payment Rail, Instrument & RBI Mandate Physics
+- **Branch**: `feat/phase37-indian-rail-and-mandate-physics`
+- **Commit**: `76b8237` (Merged: `15cd055`)
+- **Key Deliverables**:
+  - `backend/app/estimator.py` & `backend/app/hidden_world.py`:
+    - Dead-card physics (`expired_card`): server-side card retries (`retry_immediate`, `retry_delayed`) saturate to `0 bps`.
+    - One-time customer-present rail physics: penalizes silent server-side retries (`ONE_TIME_RAIL_RETRY_PENALTY_BPS = -1800`, `WORLD_ONE_TIME_RAIL_RETRY_TRUE_BPS = -2200`) on `upi`, `netbanking`, and `wallet` when `has_active_subscription` is `False`.
+    - RBI e-Mandate / UPI Autopay Additional Factor of Authentication (AFA) threshold (`RBI_EMANDATE_AFA_THRESHOLD_PAISE = 1_500_000` paise = ₹15,000): penalizes silent `retry_immediate` above ₹15,000 in favor of `payment_link` (interactive checkout with AFA) and `retry_delayed` (24h pre-debit notification).
+  - `backend/app/benchmark_config.py`: Included all Phase 37 parameters in `_estimator_fingerprint()` and `hidden_world_fingerprint()`.
+
+### Phase 38: Hierarchical Contextual Empirical-Bayes Calibration
+- **Branch**: `feat/phase38-hierarchical-empirical-bayes`
+- **Commit**: `13becf5` (Merged: `68ef766`)
+- **Key Deliverables**:
+  - `backend/app/calibration.py`: Upgraded calibration to a Two-Level Hierarchical Beta-Binomial Empirical-Bayes estimator (`Level 1` global intervention posterior shrunk toward `BASE_RECOVERY_BPS` with `PRIOR_STRENGTH = 20`; `Level 2` contextual `(intervention, failure_reason, payment_method)` segment posterior `SegmentCalibration` shrunk toward the Level-1 posterior with `SEGMENT_PRIOR_STRENGTH = 10` and `SEGMENT_MIN_TOTAL_OBSERVATIONS = 5`).
+  - `backend/app/calibration_service.py` & `backend/app/adaptive_estimation.py`: Projected `failure_reason` and `payment_method` onto `CalibrationObservation`, serialized `segments` and `active_segments` into `estimator_calibration_snapshots`, and updated `CalibratedRecoveryProbabilityEstimator.estimate()` to use `effective_posterior_for(...)` (Level-2 segment posterior when gated, falling back smoothly to Level-1).
+  - `frontend/src/components/EstimatorEvidence.jsx`: Rendered the Level-2 Contextual Segment Posteriors table.
+
+### Phase 39: Outage-Aware Decisioning in Recovery Ops & Event Trace
+- **Branch**: `feat/phase39-outage-aware-decisioning`
+- **Commit**: `e6ec150` (Merged: `84eea93`)
+- **Key Deliverables**:
+  - `backend/app/recovery_operations.py`, `backend/app/dashboard.py`, & `backend/app/routes/dashboard.py`: Connected Phase 20 Revenue Health segment degradation detection (`HIGH` and `CRITICAL` open incidents) to `RecoveryOps` queue rows and `EventTrace` (`active_outage` with composite `(bank, payment_method)` prioritization, degradation basis points, and rail-switch guidance) while preserving full AST isolation in `dashboard.py` and `incidents.py`.
+  - `frontend/src/components/RecoveryOps.jsx` & `frontend/src/components/EventTrace.jsx`: Surfaced `Active Outage` badges and `<Stage title="Active Rail Outage Context">` in the operator UI.
+
+### Phase 40: Gemini Contextual Recovery Copy & NPCI Error Code Diagnosis
+- **Branch**: `feat/phase40-npci-codes-and-recovery-copy`
+- **Commit**: `018e041` (Merged: `40ea968`)
+- **Key Deliverables**:
+  - `backend/app/failed_payment_ingestion.py`: Mapped real NPCI UPI decline codes (`U30`, `BT` $\rightarrow$ `bank_timeout`; `Z9` $\rightarrow$ `insufficient_funds`; `ZM`, `ZA` $\rightarrow$ `authentication_failed`; `U16` $\rightarrow$ `declined_by_bank` + `risk_flag = "fraud_suspect"`) using boundary-safe token extraction.
+  - `backend/app/classification.py`, `backend/app/classifier.py`, `backend/app/db.py`, `backend/app/executor.py`, & `backend/app/execution_service.py`: Added optional `customer_message` to `ClassificationResult` (with idempotent SQLite migration on `classification_results`), passed it into `RazorpayPaymentLinkClient.create_payment_link(description=...)`, and displayed it in `EventTrace.jsx`.
+
+### Phase 41: Ordered Playbook Baseline & Multi-Seed Statistical Benchmark
+- **Branch**: `feat/phase41-ordered-playbook-and-multiseed-benchmark`
+- **Commit**: `6943437` (Merged: `9f0ead3`)
+- **Key Deliverables**:
+  - `backend/app/benchmark_phase17.py`, `backend/app/benchmark_phase17_metrics.py`, & `backend/app/benchmark_phase17_report.py`: Implemented `ORDERED_PLAYBOOK_BY_FAILURE_REASON`, `select_ordered_playbook`, `ordered_playbook_metrics`, `aggregate_multi_seed_metrics`, `run_multi_seed_phase17_benchmark`, and CLI `--seeds` support (`--seeds 42,43,44,45,46`), reporting `1,749 passed` in `pytest` and `5/5` wins (`100%`) across seeds.
