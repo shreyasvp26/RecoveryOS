@@ -35,7 +35,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.classification import ClassificationResult
-from app.classifier import OmniRouteError
+from app.classifier import GeminiClassifierError
 from app.db import (
     connect,
     get_classification_failure,
@@ -405,7 +405,7 @@ def test_auto_classify_persist_crash_is_a_durable_failure(
     event_id = map_failed_payment_to_event(conn, failed).event_id
 
     monkeypatch.setattr(
-        webhook_service, "build_omniroute_adapter", lambda: _GoodAdapter(event_id)
+        webhook_service, "build_gemini_adapter", lambda: _GoodAdapter(event_id)
     )
 
     def raise_persist(c, result, **kwargs):
@@ -435,7 +435,7 @@ def test_auto_classify_clear_crash_does_not_fabricate_a_failure(
     event_id = map_failed_payment_to_event(conn, failed).event_id
 
     monkeypatch.setattr(
-        webhook_service, "build_omniroute_adapter", lambda: _GoodAdapter(event_id)
+        webhook_service, "build_gemini_adapter", lambda: _GoodAdapter(event_id)
     )
 
     def raise_clear(c, event_id, **kwargs):
@@ -465,7 +465,7 @@ def test_auto_classify_crash_recording_failure_still_ingests(
     def raise_record(c, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(webhook_service, "build_omniroute_adapter", adapter_unavailable)
+    monkeypatch.setattr(webhook_service, "build_gemini_adapter", adapter_unavailable)
     monkeypatch.setattr(webhook_service.db, "record_classification_failure", raise_record)
 
     result = webhook_service.process_payment_failed(conn, failed, body, NOW)
@@ -816,7 +816,7 @@ def test_operator_endpoints_require_an_existing_event(monkeypatch, tmp_path) -> 
     from app.routes import events as events_routes
 
     # The classify endpoint resolves get_classifier BEFORE the 404 check, and a
-    # fresh CI environment has no OMNIROUTE_API_KEY. Stub the dependency so the
+    # fresh CI environment has no GEMINI_API_KEY. Stub the dependency so the
     # ghost-event 404 is what is actually asserted, not the provider setup.
     app.dependency_overrides[events_routes.get_classifier] = lambda: _GoodAdapter(
         "evt_ghost"

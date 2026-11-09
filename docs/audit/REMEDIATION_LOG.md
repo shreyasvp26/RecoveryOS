@@ -175,3 +175,15 @@ Result: V2 WON
   difference:  Rs 67,515.19
   materiality: Rs 6,674.04 (100 bps of (Oracle - No Action) true EV)
 ```
+
+---
+
+## 4. Phase 35 — Native Google Gemini API Classifier Migration
+* **Target**: Remove OmniRoute abstraction completely and replace with native Google Gemini REST API client (`GeminiClassifier`, `build_gemini_adapter`, `GeminiClassifierError`) using `httpx` and `GEMINI_API_KEY`.
+* **Changes**:
+  - `backend/app/classifier.py`: Implemented direct `generateContent` Google Gemini client using `x-goog-api-key` header and default model `gemini-2.5-flash`.
+  - `backend/app/config.py`: Replaced OmniRoute configuration with `get_gemini_api_key()`, `get_gemini_model()`, `get_gemini_base_url()`, and added `check_readiness_configuration()`.
+  - `backend/app/main.py`: Updated `/health/ready` configuration dictionary to inspect `"gemini"`.
+  - `backend/app/routes/events.py` & `backend/app/webhook_service.py`: Updated to use `GeminiClassifier`, `build_gemini_adapter`, and `GeminiClassifierError`.
+  - `backend/tests/`: Updated 13 test files to verify native Gemini API contracts, payload formats, error types, and isolation invariants.
+  - Verification: 1,722 backend tests passed, frontend lint/build clean (0 warnings, 0 errors), Phase 17 benchmark confirmed.

@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from app import calibration_service
 from app.calibration import OUTCOME_NOT_RECOVERED
-from app.classifier import OmniRouteError
+from app.classifier import GeminiClassifierError
 from app.db import (
     connect,
     get_optimizer_decisions_for_event,
@@ -64,7 +64,7 @@ class StubClassifier:
 
     def generate(self, prompt: str) -> str:
         if not self.responses:
-            raise OmniRouteError("stub classifier exhausted")
+            raise GeminiClassifierError("stub classifier exhausted")
         return self.responses.pop(0)
 
 

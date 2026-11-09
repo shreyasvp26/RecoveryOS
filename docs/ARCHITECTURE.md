@@ -115,7 +115,7 @@ All benchmark **recovery amounts are simulated evaluation results** — they are
 - The Phase 3 SQLite persistence layer (`payment_events` table).
 - Phase 4 deterministic, seedable synthetic `PaymentEvent` generation and a thin event ingestion boundary.
 - The Phase 5 advisory classification contract (`app/classification.py`) with the locked root-cause and candidate-intervention taxonomies.
-- A single configurable OmniRoute-backed classifier (`app/classifier.py`) that receives decision-time event information only, emits a structured JSON result, validates it strictly (at most one retry for malformed output), and fails explicitly on ML/provider errors.
+- A single configurable Google Gemini-backed classifier (`app/classifier.py`) that receives decision-time event information only, emits a structured JSON result, validates it strictly (at most one retry for malformed output), and fails explicitly on ML/provider errors.
 - Phase 5 classification persistence (`classification_results` table, correlated with `payment_events` by `event_id`).
 - A minimal `POST /events/{event_id}/classify` endpoint wiring load → classify → persist → return.
 - The Phase 6 deterministic policy engine (`app/policy.py`): a pure, stateless Python gate that answers one question — *is this proposed intervention permitted?* It contains zero LLM calls, selects nothing, and executes nothing.

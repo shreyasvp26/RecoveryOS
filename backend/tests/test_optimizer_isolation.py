@@ -194,7 +194,7 @@ def test_nondeterminism_and_io_are_unreachable_transitively(module: str) -> None
 def test_decision_engine_makes_no_llm_call(module: str) -> None:
     """The LLM boundary must be unreachable, not merely unused."""
     assert "classifier" not in _transitive_app_imports(module)
-    for term in ("OmniRoute", "omniroute"):
+    for term in ("GeminiClassifier", "generativelanguage"):
         assert term not in _code_only(module), (
             f"{module} references the LLM boundary: {term}"
         )

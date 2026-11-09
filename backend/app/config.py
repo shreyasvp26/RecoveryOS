@@ -24,8 +24,9 @@ load_dotenv()
 DEFAULT_DATABASE_URL = "sqlite:///./recoveryos.db"
 _DATABASE_URL_PREFIX = "sqlite:///"
 
-DEFAULT_OMNIROUTE_BASE_URL = "https://api.omniroute.ai/v1"
-DEFAULT_OMNIROUTE_MODEL = "omniroute-v1"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
 
 # Phase 6 policy defaults. The engine itself never reads environment
 # variables; configuration is resolved here once and passed in explicitly.
@@ -55,19 +56,30 @@ def get_database_path() -> str:
     return url[len(_DATABASE_URL_PREFIX):]
 
 
-def get_omniroute_api_key() -> str:
-    """Return the configured OmniRoute API key, or an empty string when unset."""
-    return os.environ.get("OMNIROUTE_API_KEY", "")
+def get_gemini_api_key() -> str:
+    """Return the configured Google Gemini API key, or an empty string when unset."""
+    return os.environ.get(GEMINI_API_KEY_ENV, "")
 
 
-def get_omniroute_model() -> str:
-    """Return the configured OmniRoute model identifier."""
-    return os.environ.get("OMNIROUTE_MODEL", DEFAULT_OMNIROUTE_MODEL)
+def get_gemini_model() -> str:
+    """Return the configured Google Gemini model identifier."""
+    return os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
 
 
-def get_omniroute_base_url() -> str:
-    """Return the configured OmniRoute base URL."""
-    return os.environ.get("OMNIROUTE_BASE_URL", DEFAULT_OMNIROUTE_BASE_URL)
+def get_gemini_base_url() -> str:
+    """Return the configured Google Gemini base URL."""
+    return os.environ.get("GEMINI_BASE_URL", DEFAULT_GEMINI_BASE_URL)
+
+
+def check_readiness_configuration() -> dict[str, Any]:
+    """Return summary configuration booleans for health/readiness checks."""
+    return {
+        "database": bool(get_database_path()),
+        "gemini": bool(get_gemini_api_key()),
+        "operator_auth": bool(get_operator_api_key()),
+        "razorpay_configured": bool(get_razorpay_key_id() and get_razorpay_key_secret()),
+        "razorpay_webhook_configured": bool(get_razorpay_webhook_secret()),
+    }
 
 
 def get_operator_api_key() -> str:

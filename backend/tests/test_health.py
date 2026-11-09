@@ -28,7 +28,7 @@ def test_health_ready_reports_ready_over_a_usable_database() -> None:
     config = body["configuration"]
     assert isinstance(config["razorpay_test_mode"]["configured"], bool)
     assert isinstance(config["razorpay_webhook"]["configured"], bool)
-    assert isinstance(config["omniroute"]["configured"], bool)
+    assert isinstance(config["gemini"]["configured"], bool)
     assert "policy" in config
 
 
@@ -40,7 +40,7 @@ def test_health_ready_never_exposes_secret_values() -> None:
         "RAZORPAY_KEY_ID",
         "RAZORPAY_KEY_SECRET",
         "RAZORPAY_WEBHOOK_SECRET",
-        "OMNIROUTE_API_KEY",
+        "GEMINI_API_KEY",
         "rzp_test_",
         "rzp_live_",
     ):

@@ -29,7 +29,7 @@ Event → Context → AI reasoning (advisory) → Deterministic policy gate → 
 
 The governing principle: **the AI recommends, the policy engine decides, the executor acts, the benchmark proves value.** The LLM never directly controls a money-moving action. Classification output is advisory input to a deterministic gate; it cannot authorize anything.
 
-Locked stack: Python 3.11, FastAPI, SQLite, React + Vite, OmniRoute (LLM), Razorpay Python SDK (Test Mode), pytest, `.env` configuration.
+Locked stack: Python 3.11, FastAPI, SQLite, React + Vite, Google Gemini API (LLM), Razorpay Python SDK (Test Mode), pytest, `.env` configuration.
 
 ## V1 fixed-priority selector
 

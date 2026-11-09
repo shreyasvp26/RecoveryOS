@@ -391,7 +391,7 @@ class _StubAdapter:
 
 def _stub_classifier(monkeypatch, *responses):
     stub = _StubAdapter(*responses)
-    monkeypatch.setattr(webhook_service, "build_omniroute_adapter", lambda: stub)
+    monkeypatch.setattr(webhook_service, "build_gemini_adapter", lambda: stub)
     return stub
 
 

@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import db
-from .classifier import build_omniroute_adapter, classify_event
+from .classifier import build_gemini_adapter, classify_event
 from .failed_payment_ingestion import map_failed_payment_to_event
 from .ingestion import IngestionStatus, ingest_event
 from .razorpay_webhook import (
@@ -413,7 +413,7 @@ def _auto_classify_best_effort(
         logger.warning("auto-classify skipped for a malformed event (no event_id)")
         return
     try:
-        adapter = build_omniroute_adapter()
+        adapter = build_gemini_adapter()
     except Exception as exc:  # noqa: BLE001 - best effort by contract
         _record_auto_classify_failure(conn, event_id, "adapter_unavailable", exc)
         return

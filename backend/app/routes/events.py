@@ -26,9 +26,9 @@ from fastapi.responses import JSONResponse
 
 from ..classifier import (
     ClassificationValidationError,
-    OmniRouteClassifier,
-    OmniRouteError,
-    build_omniroute_adapter,
+    GeminiClassifier,
+    GeminiClassifierError,
+    build_gemini_adapter,
     classify_event,
 )
 from ..config import build_policy_config, build_razorpay_client
@@ -81,14 +81,14 @@ def get_db() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def get_classifier() -> Iterator[OmniRouteClassifier]:
-    """FastAPI dependency: provide the configured OmniRoute classifier.
+def get_classifier() -> Iterator[GeminiClassifier]:
+    """FastAPI dependency: provide the configured Google Gemini classifier.
 
     The adapter is closed when the request finishes so the underlying httpx
     HTTP client is not leaked across repeated classify calls on a long-lived
     process (a resource that would otherwise accumulate file descriptors).
     """
-    classifier = build_omniroute_adapter()
+    classifier = build_gemini_adapter()
     try:
         yield classifier
     finally:
@@ -169,7 +169,7 @@ def create_event(
 def classify_event_endpoint(
     event_id: str,
     conn: sqlite3.Connection = Depends(get_db),
-    classifier: OmniRouteClassifier = Depends(get_classifier),
+    classifier: GeminiClassifier = Depends(get_classifier),
 ) -> JSONResponse:
     """Load an event, classify it, persist the classification, and return it.
 
@@ -195,7 +195,7 @@ def classify_event_endpoint(
                 "detail": str(exc) or "model output failed classification validation",
             },
         )
-    except OmniRouteError as exc:
+    except GeminiClassifierError as exc:
         _record_classify_failure(conn, event_id, exc)
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,

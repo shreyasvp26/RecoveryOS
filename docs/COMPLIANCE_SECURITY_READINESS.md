@@ -36,7 +36,7 @@ The two questions take equal weight. RecoveryOS was built as a revenue-recovery 
 | Frontend | React + Vite | Read-only operator console; Policy Lab; execution trigger | `frontend/src`, `frontend/vite.config.js` |
 | CI | GitHub Actions | Backend pytest + frontend lint/build on push/PR to `main` | `.github/workflows/ci.yml` |
 | Payment provider | Razorpay (Test Mode only) | Payment Links (execution) + webhooks (verified outcomes) | `backend/app/razorpay_client.py`, `backend/app/razorpay_webhook.py` |
-| AI provider | OmniRoute (OpenAI-compatible) | Advisory classification only; no authority | `backend/app/classifier.py` |
+| AI provider | Google Gemini API (REST) | Advisory classification only; no authority | `backend/app/classifier.py` |
 
 ### 2.2 Architectural stance
 
@@ -77,7 +77,7 @@ DDL: `backend/app/db.py:34-253`.
 ### 3.3 Data in transit
 
 - Inbound: webhook over HTTPS (TLS terminated at reverse proxy per `docs/DEPLOYMENT.md`); operator UI calls proxied through the same origin.
-- Outbound: Razorpay SDK and OmniRoute HTTP client over HTTPS/validated base URL (`backend/app/classifier.py:130-158`). The OmniRoute base URL requires `https://` (or loopback `http://`) with a host; the single outbound sink is validated at the adapter boundary.
+- Outbound: Razorpay SDK and Google Gemini HTTP client over HTTPS/validated base URL (`backend/app/classifier.py:130-158`). The Gemini base URL requires `https://` (or loopback `http://`) with a host; the single outbound sink is validated at the adapter boundary.
 
 ---
 
@@ -89,7 +89,7 @@ DDL: `backend/app/db.py:34-253`.
 Razorpay Test Mode
   → Webhook / operator API (authenticated)        [INBOUND BOUNDARY]
   → Ingestion (idempotent, contract-validated)
-  → Advisory AI classification (OmniRoute)         [NO authority]
+  → Advisory AI classification (Google Gemini)     [NO authority]
   → Deterministic six-rule policy gate             [AUTHORITATIVE]
   → Economic optimizer / selector (allowed only)   [RANKING ONLY]
   → Bounded executor (Test Mode Payment Link)      [EXECUTION]
@@ -124,13 +124,13 @@ Razorpay Test Mode
 
 | Control | Detail | Evidence |
 |---|---|---|
-| Env-only secrets | `RECOVERYOS_OPERATOR_API_KEY`, `RAZORPAY_KEY_ID/SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `OMNIROUTE_API_KEY` read from environment; `load_dotenv()` never overrides existing env | `backend/app/config.py:22, 58-81, 130-150` |
+| Env-only secrets | `RECOVERYOS_OPERATOR_API_KEY`, `RAZORPAY_KEY_ID/SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `GEMINI_API_KEY` read from environment; `load_dotenv()` never overrides existing env | `backend/app/config.py:22, 58-81, 130-150` |
 | Not committed | `.env`, `.env.*`, `*.db`, `*.sqlite*`, `.venv/`, `node_modules/` gitignored; only `.env.example` is tracked | `.gitignore:1-50`; `backend/.env.example` |
 | No live keys allowed | `rzp_live_` key ids are rejected at the client boundary before any SDK call; only `rzp_test_` accepted | `backend/app/razorpay_client.py:149-186`; `backend/tests/test_razorpay_client.py` |
 | Request-time, rotatable | Operator key read on every request (never cached); rotation takes effect immediately | `backend/app/auth.py:32`; `backend/tests/test_operator_auth.py` |
 | Never stored in DB / responses | Secrets are not written to SQLite; `/health` and `/health/ready` report configuration as **booleans only**; `test_replay_api.py` asserts no secret substrings in API payloads | `backend/app/main.py:127-186`; `backend/tests/test_health.py`; `backend/tests/test_replay_api.py::test_the_api_never_exposes_a_secret` |
 | No exception echo | Unexpected classification failures return a stable detail and log the real error server-side (`exc_info`) | `backend/app/routes/events.py`; `backend/tests/test_phase26_hardening.py::test_classify_failure_detail_is_stable_and_never_echoes_the_exception` |
-| Outbound-sink validation | `OMNIROUTE_BASE_URL` must be HTTPS (or loopback HTTP) with a host; invalid values fail at adapter construction | `backend/app/classifier.py:130-158`; `backend/tests/test_phase26_hardening.py` (4 tests) |
+| Outbound-sink validation | `GEMINI_BASE_URL` must be HTTPS (or loopback HTTP) with a host; invalid values fail at adapter construction | `backend/app/classifier.py:130-158`; `backend/tests/test_phase26_hardening.py` (4 tests) |
 
 ### 5.2 Recommended production controls (gaps)
 
@@ -185,14 +185,14 @@ Fields stored that are plausibly personal-data-adjacent:
 |---|---|
 | Purpose limitation | Data used solely for revenue-recovery diagnostics, policy evaluation, and verified-outcome measurement; no advertising/analytics use |
 | Minimization | Only decision-time event metadata; no free-form PII, no CHD |
-| Third-party processing | Event metadata is sent to OmniRoute as the classifier prompt; payment data flows via Razorpay |
+| Third-party processing | Event metadata is sent to Google Gemini as the classifier prompt; payment data flows via Razorpay |
 | Retention | No retention policy enforced in code; rows persist until the SQLite file is deleted (operational gap) |
 | Erasure | No deletion/DSAR endpoints; data removal requires operator DB maintenance (operational gap) |
 | Consent / lawful basis | Out of scope of this repo; an operator governed by GDPR/DPDPA must establish lawful basis and a DPA with each processor |
 
 ### 7.3 Recommended production controls (gaps)
 
-- **Data Protection / Privacy Policy** and **DPA(s)** with Razorpay and OmniRoute.
+- **Data Protection / Privacy Policy** and **DPA(s)** with Razorpay and Google.
 - A **retention policy** (the schema currently keeps history indefinitely) and a **deletion/DSAR workflow**.
 - A **DPIA / privacy review** before processing any data that can be linked to natural persons of customers.
 - Consider whether sending event metadata to an external model gateway requires a data-processing agreement; the model gateway is a sub-processor of event data.
@@ -355,7 +355,7 @@ The matrix below maps RecoveryOS controls to common frameworks **descriptively**
 | ISO/IEC 27001 | Annex A.9 (access), A.12 (ops) | Request-time auth, deterministic operations | No ISMS, no documented policies/incident process |
 | ISO/IEC 27001 | A.10 (crypto) | TLS at edge, validated outbound HTTPS | No encryption at rest; key management is manual env |
 | GDPR | Minimization / purpose limitation | Minimal metadata, no free-form PII, no CHD | No retention policy, no DSAR path, no DPA artifacts |
-| GDPR | Processor transparency | Event metadata goes to OmniRoute/Razorpay | No consent/legal-basis documentation, no DPIA |
+| GDPR | Processor transparency | Event metadata goes to Google Gemini/Razorpay | No consent/legal-basis documentation, no DPIA |
 | DPDPA (India, applicable domain) | Same minimization principles | As GDPR row | As GDPR row; no formal compliance review |
 
 ---
@@ -375,7 +375,7 @@ If an operator wanted to move from "readiness" toward an assessed claim, each ro
 | 7 | No secrets manager / rotation | Medium | Managed secret store; rotation schedule; least-privilege access to env |
 | 8 | Only Test Mode payment execution exists | High (for any payment claim) | No production-live mode exists by design; production claims are out of scope until a production integration is built and assessed |
 | 9 | No retention or DSAR/deletion paths | Medium | Retention policy + deletion tooling |
-| 10 | No DPA / privacy artifacts | Medium | DPAs with Razorpay and OmniRoute; AI-processing disclosure; DPIA if personal data |
+| 10 | No DPA / privacy artifacts | Medium | DPAs with Razorpay and Google; AI-processing disclosure; DPIA if personal data |
 | 11 | SQLite single-writer, single machine | Medium | If scale needed, move persistence boundary; document HA/RPO decisions |
 | 12 | Manual reconciliation only | Medium | Operator-driven; needs a documented runbook and coverage of the `scan_limit` window |
 | 13 | No formal assessment/certificate | N/A (decisive) | Engage a qualified assessor for SAQ/AOC/CAIQ (PCI/SOC 2/ISO 27001) relevant to the operator's obligations |
@@ -394,7 +394,7 @@ Required by the repository's own docs plus the gaps above — the operator execu
 6. **Store the SQLite file on persistent, encrypted storage**; configure automated backups and test a restore.
 7. **Use Razorpay Test Mode keys only**; verify `rzp_test_` / `rzp_live_` values in the runtime env (the client rejects live keys by design).
 8. **Register the webhook HTTPS URL** and set `RAZORPAY_WEBHOOK_SECRET`; note public-tunnel hostnames are ephemeral for demos (`docs/DEPLOYMENT.md`).
-9. **Keep `OMNIROUTE_BASE_URL` at the default** or an operator-owned HTTPS endpoint; loopback-HTTP is only for local dev.
+9. **Keep `GEMINI_BASE_URL` at the default** or an operator-owned HTTPS endpoint; loopback-HTTP is only for local dev.
 10. **Verify** `GET /health/ready` returns DB usable + desired configuration booleans **before** operator use.
 11. **Add monitoring/alerting** on: auth failures, webhook processing failures, `PROVIDER_RESULT_UNKNOWN` claim parking, and deployment health.
 12. **Keep dependencies pinned** (already enforced in-repo) and run CI on every change (already enforced).

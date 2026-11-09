@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from app.classifier import OmniRouteError
+from app.classifier import GeminiClassifierError
 from app.db import connect, init_db
 from app.main import app
 from app.razorpay_client import (
@@ -61,7 +61,7 @@ class StubClassifier:
 
     def generate(self, prompt: str) -> str:
         if not self.responses:
-            raise OmniRouteError("stub classifier exhausted")
+            raise GeminiClassifierError("stub classifier exhausted")
         return self.responses.pop(0)
 
 
