@@ -97,10 +97,61 @@ class CalibrationSnapshot:
                 )
         if not isinstance(self.evidenced, Mapping):
             raise ValueError("evidenced must be a mapping")
+        for intervention, row in self.evidenced.items():
+            if isinstance(row, Mapping) and "active_segments" in row:
+                active_segs = row["active_segments"]
+                if not isinstance(active_segs, Mapping):
+                    raise ValueError("active_segments must be a mapping")
+                for seg_key, bps in active_segs.items():
+                    if not isinstance(seg_key, str) or not seg_key:
+                        raise ValueError("segment key must be a non-empty string")
+                    if (
+                        isinstance(bps, bool)
+                        or not isinstance(bps, int)
+                        or not (0 <= bps <= PROBABILITY_SCALE)
+                    ):
+                        raise ValueError(
+                            f"active segment posterior for {seg_key!r} must be within "
+                            f"[0, {PROBABILITY_SCALE}]"
+                        )
 
     def posterior_for(self, intervention: str) -> int | None:
         """The active calibrated posterior for an intervention, or None."""
         return self.active_bps.get(intervention)
+
+    def segment_posterior_for(
+        self,
+        intervention: str,
+        failure_reason: str | None = None,
+        payment_method: str | None = None,
+    ) -> int | None:
+        """The active Level-2 contextual segment posterior, or None."""
+        if not isinstance(failure_reason, str) or not failure_reason:
+            return None
+        if not isinstance(payment_method, str) or not payment_method:
+            return None
+        row = self.evidenced.get(intervention)
+        if not isinstance(row, Mapping):
+            return None
+        active_segs = row.get("active_segments")
+        if not isinstance(active_segs, Mapping):
+            return None
+        bps = active_segs.get(f"{failure_reason}:{payment_method}")
+        return bps if isinstance(bps, int) and not isinstance(bps, bool) else None
+
+    def effective_posterior_for(
+        self,
+        intervention: str,
+        failure_reason: str | None = None,
+        payment_method: str | None = None,
+    ) -> int | None:
+        """Return the Level-2 segment posterior if active, else Level-1 posterior."""
+        seg_posterior = self.segment_posterior_for(
+            intervention, failure_reason, payment_method
+        )
+        if seg_posterior is not None:
+            return seg_posterior
+        return self.posterior_for(intervention)
 
 
 def _require_nonempty(value: Any, name: str) -> None:
@@ -150,14 +201,23 @@ class CalibratedRecoveryProbabilityEstimator:
         """Return the calibrated probability, or the frozen baseline estimate."""
         baseline_prob = self._baseline.estimate(event, classification, intervention)
         if self._snapshot is not None:
-            posterior = self._snapshot.posterior_for(intervention)
+            posterior = self._snapshot.effective_posterior_for(
+                intervention,
+                getattr(event, "failure_reason", None),
+                getattr(event, "payment_method", None),
+            )
             if posterior is not None:
                 delta_bps = posterior - BASE_RECOVERY_BPS[intervention]
                 calibrated_bps = max(0, min(PROBABILITY_SCALE, baseline_prob.basis_points + delta_bps))
                 return RecoveryProbability(basis_points=calibrated_bps)
         return baseline_prob
 
-    def provenance(self, intervention: str) -> dict[str, Any]:
+    def provenance(
+        self,
+        intervention: str,
+        failure_reason: str | None = None,
+        payment_method: str | None = None,
+    ) -> dict[str, Any]:
         """Explain which probability source produced an estimate (read-only).
 
         Returns the snapshot version and the evidence behind an active
@@ -165,7 +225,14 @@ class CalibratedRecoveryProbabilityEstimator:
         display/diagnostic data only and never rewrites any decision.
         """
         if self._snapshot is not None:
-            posterior = self._snapshot.posterior_for(intervention)
+            seg_posterior = self._snapshot.segment_posterior_for(
+                intervention, failure_reason, payment_method
+            )
+            posterior = (
+                seg_posterior
+                if seg_posterior is not None
+                else self._snapshot.posterior_for(intervention)
+            )
             if posterior is not None:
                 row = self._snapshot.evidenced.get(intervention, {})
                 return {
@@ -177,6 +244,10 @@ class CalibratedRecoveryProbabilityEstimator:
                     "observed_not_recovered": row.get("observed_not_recovered"),
                     "baseline_bps": row.get("baseline_bps"),
                     "reason": REASON_CALIBRATED_ACTIVE,
+                    "active_segments": row.get("active_segments", {}),
+                    "hierarchy_level": (
+                        "segment" if seg_posterior is not None else "intervention"
+                    ),
                 }
         return {
             "status": STATUS_BASELINE,
@@ -193,7 +264,12 @@ class CalibratedRecoveryProbabilityEstimator:
             return REASON_NO_CALIBRATION
         return REASON_THRESHOLD_NOT_MET
 
-    def decision_provenance(self, intervention: str) -> dict[str, Any]:
+    def decision_provenance(
+        self,
+        intervention: str,
+        failure_reason: str | None = None,
+        payment_method: str | None = None,
+    ) -> dict[str, Any]:
         """The decision-level estimator provenance (persisted on new decisions).
 
         This is the state captured AT DECISION TIME and recorded immutably with
@@ -212,7 +288,13 @@ class CalibratedRecoveryProbabilityEstimator:
         chosen candidate's probability; all candidates of one decision share the
         same immutable snapshot version.
         """
-        if self._snapshot is not None and self._snapshot.posterior_for(intervention) is not None:
+        if (
+            self._snapshot is not None
+            and self._snapshot.effective_posterior_for(
+                intervention, failure_reason, payment_method
+            )
+            is not None
+        ):
             return {
                 "estimator_mode": PROVENANCE_CALIBRATED,
                 "estimator_version": self._snapshot.version,

@@ -202,6 +202,10 @@ def build_calibration_observations(
     if not eligible:
         return []
 
+    events_by_id = db.get_payment_events_for_events(
+        conn, [str(row["event_id"]) for row in eligible]
+    )
+
     link_ids = [row["payment_link_id"] for row in eligible]
     webhook_recoveries = db.get_webhook_recovery_outcomes_for_payment_links(
         conn, link_ids
@@ -221,6 +225,10 @@ def build_calibration_observations(
     observations: list[CalibrationObservation] = []
     for link_id, execution in by_link.items():
         event_id = str(execution["event_id"])
+        event_data = events_by_id.get(event_id)
+        f_reason = event_data.get("failure_reason") if event_data else None
+        p_method = event_data.get("payment_method") if event_data else None
+
         recovery = webhook_recoveries.get(link_id)
         if recovery is not None:
             # A verified webhook recovery is authoritative positive evidence and
@@ -238,6 +246,8 @@ def build_calibration_observations(
                     observed_at=recovery.get("recovered_at"),
                     evidence_id=recovery.get("delivery_id"),
                     evidence_source=EVIDENCE_SOURCE_WEBHOOK,
+                    failure_reason=f_reason,
+                    payment_method=p_method,
                 )
             )
             continue
@@ -266,6 +276,8 @@ def build_calibration_observations(
                 observed_at=provider_outcome.get("observed_at"),
                 evidence_id=None,
                 evidence_source=EVIDENCE_SOURCE_PROVIDER_POLL,
+                failure_reason=f_reason,
+                payment_method=p_method,
             )
         )
     return observations
@@ -325,6 +337,12 @@ def _evidenced_json(result: dict[str, Any]) -> str:
             "observed_not_recovered": calibration.observed_not_recovered,
             "prior_successes": calibration.prior_successes,
             "prior_failures": calibration.prior_failures,
+            "segments": {k: v.to_dict() for k, v in calibration.segments.items()},
+            "active_segments": {
+                k: v.posterior_bps
+                for k, v in calibration.segments.items()
+                if v.active
+            },
         }
         for intervention, calibration in result.items()
     })

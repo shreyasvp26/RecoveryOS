@@ -278,3 +278,97 @@ def test_calibrated_estimator_preserves_event_feature_adjustments():
     # and cal_prob != 4400 (it is shifted by delta_bps relative to base_prob).
     assert base_prob.basis_points != BASE_RECOVERY_BPS["payment_link"]
     assert cal_prob.basis_points != 4400
+
+
+def test_hierarchical_contextual_segment_estimation_and_fallback():
+    """Phase 38: Level-2 segment posterior is used when active, falls back to Level-1."""
+    baseline = RecoveryProbabilityEstimator()
+    level1_posterior = 4400
+    segment_posterior = 5200
+
+    snapshot = _snapshot(
+        active_bps={"payment_link": level1_posterior},
+        evidenced={
+            "payment_link": {
+                "observed_total": 20,
+                "observed_recovered": 12,
+                "observed_not_recovered": 8,
+                "baseline_bps": BASE_RECOVERY_BPS["payment_link"],
+                "active_segments": {
+                    "bank_timeout:upi": segment_posterior,
+                },
+            }
+        },
+    )
+    est = CalibratedRecoveryProbabilityEstimator(
+        baseline=baseline,
+        snapshot=snapshot,
+    )
+
+    # Event matching active segment: bank_timeout + upi
+    event_seg = PaymentEvent(
+        event_id="evt_seg",
+        order_id="ord_seg",
+        payment_id="pay_seg",
+        customer_id="cust_seg",
+        amount_paise=100_000,
+        currency="INR",
+        payment_method="upi",
+        failure_reason="bank_timeout",
+        bank="HDFC",
+        risk_flag="normal",
+        customer_history=CustomerHistory(4, 1, True),
+        timestamp="2026-08-27T12:00:00+00:00",
+    )
+    cls_seg = ClassificationResult(
+        event_id="evt_seg",
+        root_cause_category="transient",
+        confidence=0.9,
+        reasoning="advisory",
+        candidate_interventions=["payment_link"],
+    )
+
+    base_prob_seg = baseline.estimate(event_seg, cls_seg, "payment_link")
+    cal_prob_seg = est.estimate(event_seg, cls_seg, "payment_link")
+    delta_seg = segment_posterior - BASE_RECOVERY_BPS["payment_link"]
+    expected_seg_bps = max(0, min(PROBABILITY_SCALE, base_prob_seg.basis_points + delta_seg))
+    assert cal_prob_seg.basis_points == expected_seg_bps
+
+    prov_seg = est.provenance("payment_link", failure_reason="bank_timeout", payment_method="upi")
+    assert prov_seg["status"] == "CALIBRATED"
+    assert prov_seg["posterior_bps"] == segment_posterior
+    assert prov_seg["hierarchy_level"] == "segment"
+
+    # Event with sparse/unmodelled segment: insufficient_funds + card
+    event_fallback = PaymentEvent(
+        event_id="evt_fb",
+        order_id="ord_fb",
+        payment_id="pay_fb",
+        customer_id="cust_fb",
+        amount_paise=100_000,
+        currency="INR",
+        payment_method="card",
+        failure_reason="insufficient_funds",
+        bank="HDFC",
+        risk_flag="normal",
+        customer_history=CustomerHistory(4, 1, True),
+        timestamp="2026-08-27T12:00:00+00:00",
+    )
+    cls_fb = ClassificationResult(
+        event_id="evt_fb",
+        root_cause_category="customer_action_needed",
+        confidence=0.9,
+        reasoning="advisory",
+        candidate_interventions=["payment_link"],
+    )
+
+    base_prob_fb = baseline.estimate(event_fallback, cls_fb, "payment_link")
+    cal_prob_fb = est.estimate(event_fallback, cls_fb, "payment_link")
+    delta_l1 = level1_posterior - BASE_RECOVERY_BPS["payment_link"]
+    expected_l1_bps = max(0, min(PROBABILITY_SCALE, base_prob_fb.basis_points + delta_l1))
+    assert cal_prob_fb.basis_points == expected_l1_bps
+
+    prov_fb = est.provenance("payment_link", failure_reason="insufficient_funds", payment_method="card")
+    assert prov_fb["status"] == "CALIBRATED"
+    assert prov_fb["posterior_bps"] == level1_posterior
+    assert prov_fb["hierarchy_level"] == "intervention"

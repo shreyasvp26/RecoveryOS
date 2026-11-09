@@ -181,6 +181,54 @@ export default function EstimatorEvidence() {
                 </tbody>
               </table>
             </div>
+
+            {rows.some(([, row]) => Object.keys(row.segments || {}).length > 0) && (
+              <div style={{ marginTop: '1.5rem' }}>
+                <h3 className="page-subtitle" style={{ fontWeight: 600, color: 'var(--text-strong)', marginBottom: '0.75rem' }}>
+                  Contextual Segment Posteriors (Level-2 Empirical-Bayes)
+                </h3>
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Intervention</th>
+                        <th>Segment</th>
+                        <th>Status</th>
+                        <th>Level-1 Parent</th>
+                        <th>Level-2 Posterior</th>
+                        <th>Samples</th>
+                        <th>Recovered</th>
+                        <th>Not recovered</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.flatMap(([intervention, row]) =>
+                        Object.values(row.segments || {}).map((seg) => (
+                          <tr key={`${intervention}:${seg.segment_key}`}>
+                            <td>{humanize(intervention)}</td>
+                            <td>
+                              <code>{seg.failure_reason}</code> · <code>{seg.payment_method}</code>
+                            </td>
+                            <td>
+                              {seg.active ? (
+                                <Badge tone="success">Active · Level 2</Badge>
+                              ) : (
+                                <Badge tone="neutral">Shrinks to Level 1</Badge>
+                              )}
+                            </td>
+                            <td>{formatBps(seg.parent_posterior_bps)}</td>
+                            <td>{formatBps(seg.posterior_bps)}</td>
+                            <td>{seg.observed_total}</td>
+                            <td>{seg.observed_recovered}</td>
+                            <td>{seg.observed_not_recovered}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </>
         )}
       </Card>

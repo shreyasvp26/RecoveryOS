@@ -23,6 +23,7 @@ from app.calibration import (
     validate_provider_outcome,
 )
 from app.executor import PAYMENT_LINK, ExecutionOutcome
+from app.models import CustomerHistory, PaymentEvent
 from app.optimizer_audit import OptimizerDecisionRecord
 
 INTERVENTION = PAYMENT_LINK
@@ -470,3 +471,141 @@ def test_provider_outcome_tied_to_other_event_is_excluded(db_conn):
     # Only evt_b may consume pl_b's outcome; evt_a's link has no evidence.
     assert [o for o in obs if o.event_id == "evt_a"] == []
     assert [o for o in obs if o.event_id == "evt_b"] == []
+
+
+def test_snapshot_build_persists_contextual_segments(db_conn):
+    """Phase 38: Level-2 segments are populated and persisted in SQLite snapshot."""
+    # Seed 5 bank_timeout + upi events (4 recovered, 1 expired)
+    for i in range(4):
+        eid = f"evt_bt_r_{i}"
+        lid = f"pl_bt_r_{i}"
+        db.insert_payment_event(
+            db_conn,
+            PaymentEvent(
+                event_id=eid,
+                order_id=f"o_{eid}",
+                payment_id=f"p_{eid}",
+                customer_id="c_1",
+                amount_paise=100_000,
+                currency="INR",
+                payment_method="upi",
+                failure_reason="bank_timeout",
+                bank="HDFC",
+                risk_flag="normal",
+                customer_history=CustomerHistory(2, 1, True),
+                timestamp="2026-01-01T12:00:00+00:00",
+            ),
+        )
+        _seed_execution(db_conn, link_id=lid, event_id=eid)
+        _seed_recovery(db_conn, link_id=lid, delivery_id=f"del_bt_{i}", event_id=eid)
+
+    eid = "evt_bt_x_0"
+    lid = "pl_bt_x_0"
+    db.insert_payment_event(
+        db_conn,
+        PaymentEvent(
+            event_id=eid,
+            order_id=f"o_{eid}",
+            payment_id=f"p_{eid}",
+            customer_id="c_1",
+            amount_paise=100_000,
+            currency="INR",
+            payment_method="upi",
+            failure_reason="bank_timeout",
+            bank="HDFC",
+            risk_flag="normal",
+            customer_history=CustomerHistory(2, 1, True),
+            timestamp="2026-01-01T12:00:00+00:00",
+        ),
+    )
+    _seed_execution(db_conn, link_id=lid, event_id=eid)
+    db.insert_provider_payment_link_outcome(
+        db_conn,
+        payment_link_id=lid,
+        event_id=eid,
+        status="expired",
+        outcome=OUTCOME_NOT_RECOVERED,
+        observed_at="2026-01-03T00:00:00+00:00",
+    )
+
+    # Seed 5 insufficient_funds + card events (2 recovered, 3 expired)
+    for i in range(2):
+        eid = f"evt_if_r_{i}"
+        lid = f"pl_if_r_{i}"
+        db.insert_payment_event(
+            db_conn,
+            PaymentEvent(
+                event_id=eid,
+                order_id=f"o_{eid}",
+                payment_id=f"p_{eid}",
+                customer_id="c_2",
+                amount_paise=100_000,
+                currency="INR",
+                payment_method="card",
+                failure_reason="insufficient_funds",
+                bank="HDFC",
+                risk_flag="normal",
+                customer_history=CustomerHistory(2, 1, True),
+                timestamp="2026-01-01T12:00:00+00:00",
+            ),
+        )
+        _seed_execution(db_conn, link_id=lid, event_id=eid)
+        _seed_recovery(db_conn, link_id=lid, delivery_id=f"del_if_{i}", event_id=eid)
+
+    for i in range(3):
+        eid = f"evt_if_x_{i}"
+        lid = f"pl_if_x_{i}"
+        db.insert_payment_event(
+            db_conn,
+            PaymentEvent(
+                event_id=eid,
+                order_id=f"o_{eid}",
+                payment_id=f"p_{eid}",
+                customer_id="c_2",
+                amount_paise=100_000,
+                currency="INR",
+                payment_method="card",
+                failure_reason="insufficient_funds",
+                bank="HDFC",
+                risk_flag="normal",
+                customer_history=CustomerHistory(2, 1, True),
+                timestamp="2026-01-01T12:00:00+00:00",
+            ),
+        )
+        _seed_execution(db_conn, link_id=lid, event_id=eid)
+        db.insert_provider_payment_link_outcome(
+            db_conn,
+            payment_link_id=lid,
+            event_id=eid,
+            status="expired",
+            outcome=OUTCOME_NOT_RECOVERED,
+            observed_at="2026-01-03T00:00:00+00:00",
+        )
+
+    snap = calibration_service.build_calibration_snapshot(db_conn, FakeProvider({}))
+    assert snap["version"] == 1
+    pl_ev = snap["evidenced"]["payment_link"]
+    assert "segments" in pl_ev
+    assert "active_segments" in pl_ev
+
+    segments = pl_ev["segments"]
+    assert "bank_timeout:upi" in segments
+    assert segments["bank_timeout:upi"]["active"] is True
+    assert segments["bank_timeout:upi"]["observed_total"] == 5
+
+    assert "insufficient_funds:card" in segments
+    assert segments["insufficient_funds:card"]["active"] is True
+    assert segments["insufficient_funds:card"]["observed_total"] == 5
+
+    active_segs = pl_ev["active_segments"]
+    assert "bank_timeout:upi" in active_segs
+    assert "insufficient_funds:card" in active_segs
+    assert active_segs["bank_timeout:upi"] == segments["bank_timeout:upi"]["posterior_bps"]
+
+    # Verify SQLite persistence
+    stored = db.get_calibration_snapshot(db_conn, 1)
+    assert stored is not None
+    stored_pl = stored["evidenced"]["payment_link"]
+    assert "segments" in stored_pl
+    assert "active_segments" in stored_pl
+    assert stored_pl["active_segments"]["bank_timeout:upi"] == active_segs["bank_timeout:upi"]

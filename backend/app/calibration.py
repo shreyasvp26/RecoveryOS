@@ -61,7 +61,7 @@ matching the repo's monetary/economic rounding policy — never floating point.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -76,6 +76,12 @@ MIN_NEGATIVE: int = 1
 
 # The strength of the baseline-derived prior (an effective prior sample size).
 PRIOR_STRENGTH: int = 20
+
+# Level-2 contextual segment calibration thresholds and prior strength.
+SEGMENT_MIN_TOTAL_OBSERVATIONS: int = 5
+SEGMENT_MIN_POSITIVE: int = 1
+SEGMENT_MIN_NEGATIVE: int = 1
+SEGMENT_PRIOR_STRENGTH: int = 10
 
 # Calibration outcomes. PENDING and UNKNOWN are non-terminal: they never enter
 # a sample. UNKNOWN is explicitly never negative.
@@ -151,6 +157,8 @@ class CalibrationObservation:
     observed_at: str | None
     evidence_id: str | None
     evidence_source: str
+    failure_reason: str | None = None
+    payment_method: str | None = None
 
     def __post_init__(self) -> None:
         _require_identifier(self.event_id, "event_id")
@@ -176,6 +184,10 @@ class CalibrationObservation:
                 f"evidence_source must be one of "
                 f"{EVIDENCE_SOURCE_WEBHOOK!r}, {EVIDENCE_SOURCE_PROVIDER_POLL!r}"
             )
+        if self.failure_reason is not None:
+            _require_identifier(self.failure_reason, "failure_reason")
+        if self.payment_method is not None:
+            _require_identifier(self.payment_method, "payment_method")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -187,6 +199,8 @@ class CalibrationObservation:
             "observed_at": self.observed_at,
             "evidence_id": self.evidence_id,
             "evidence_source": self.evidence_source,
+            "failure_reason": self.failure_reason,
+            "payment_method": self.payment_method,
         }
 
 
@@ -302,6 +316,74 @@ def posterior_bps(recovered: int, total: int, baseline_bps: int) -> int:
     return max(0, min(PROBABILITY_SCALE, value))
 
 
+def segment_key(failure_reason: str, payment_method: str) -> str:
+    """Format the canonical Level-2 contextual segment key."""
+    return f"{failure_reason}:{payment_method}"
+
+
+def segment_prior_successes(parent_bps: int) -> int:
+    """The pseudo-success prior count for a Level-2 segment shrunk to its parent posterior."""
+    if not isinstance(parent_bps, int) or isinstance(parent_bps, bool):
+        raise CalibrationError("parent_bps must be an integer")
+    if not (0 <= parent_bps <= PROBABILITY_SCALE):
+        raise CalibrationError("parent_bps must satisfy 0 <= b <= 10000")
+    return parent_bps * SEGMENT_PRIOR_STRENGTH // PROBABILITY_SCALE
+
+
+def segment_prior_failures(parent_bps: int) -> int:
+    """The pseudo-failure prior count for a Level-2 segment."""
+    return SEGMENT_PRIOR_STRENGTH - segment_prior_successes(parent_bps)
+
+
+def segment_posterior_bps(recovered: int, total: int, parent_bps: int) -> int:
+    """Deterministic Level-2 Beta-binomial posterior in integer bps (floor division)."""
+    if isinstance(recovered, bool) or not isinstance(recovered, int) or recovered < 0:
+        raise CalibrationError("recovered must be a non-negative integer")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise CalibrationError("total must be a non-negative integer")
+    if recovered > total:
+        raise CalibrationError("recovered cannot exceed total")
+    prior_s = segment_prior_successes(parent_bps)
+    value = (recovered + prior_s) * PROBABILITY_SCALE // (total + SEGMENT_PRIOR_STRENGTH)
+    return max(0, min(PROBABILITY_SCALE, value))
+
+
+@dataclass(frozen=True)
+class SegmentCalibration:
+    """Level-2 Empirical-Bayes contextual segment calibration."""
+
+    segment_key: str
+    intervention: str
+    failure_reason: str
+    payment_method: str
+    parent_posterior_bps: int
+    observed_total: int
+    observed_recovered: int
+    observed_not_recovered: int
+    prior_successes: int
+    prior_failures: int
+    posterior_bps: int
+    active: bool
+    status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "segment_key": self.segment_key,
+            "intervention": self.intervention,
+            "failure_reason": self.failure_reason,
+            "payment_method": self.payment_method,
+            "parent_posterior_bps": self.parent_posterior_bps,
+            "observed_total": self.observed_total,
+            "observed_recovered": self.observed_recovered,
+            "observed_not_recovered": self.observed_not_recovered,
+            "prior_successes": self.prior_successes,
+            "prior_failures": self.prior_failures,
+            "posterior_bps": self.posterior_bps,
+            "active": self.active,
+            "status": self.status,
+        }
+
+
 def calibration_samples(
     observations: Sequence[CalibrationObservation],
 ) -> list[CalibrationObservation]:
@@ -343,6 +425,7 @@ class InterventionCalibration:
     posterior_bps: int
     active: bool
     status: str
+    segments: Mapping[str, SegmentCalibration] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -356,6 +439,7 @@ class InterventionCalibration:
             "posterior_bps": self.posterior_bps,
             "active": self.active,
             "status": self.status,
+            "segments": {k: v.to_dict() for k, v in self.segments.items()},
         }
 
 
@@ -391,6 +475,50 @@ def calibrate_intervention(
         and not_recovered >= MIN_NEGATIVE
     )
     posterior = posterior_bps(recovered, total, baseline) if meets_gate else baseline
+
+    # Level-2 contextual segment calibration
+    segment_groups: dict[tuple[str, str], list[CalibrationObservation]] = {}
+    for observation in terminal:
+        if (
+            observation.failure_reason is not None
+            and observation.payment_method is not None
+        ):
+            key = (observation.failure_reason, observation.payment_method)
+            segment_groups.setdefault(key, []).append(observation)
+
+    segments_dict: dict[str, SegmentCalibration] = {}
+    for (f_reason, p_method) in sorted(segment_groups.keys()):
+        obs_list = segment_groups[(f_reason, p_method)]
+        s_recovered = sum(1 for o in obs_list if o.outcome == OUTCOME_RECOVERED)
+        s_not_recovered = sum(1 for o in obs_list if o.outcome == OUTCOME_NOT_RECOVERED)
+        s_total = s_recovered + s_not_recovered
+        s_gate = (
+            s_total >= SEGMENT_MIN_TOTAL_OBSERVATIONS
+            and s_recovered >= SEGMENT_MIN_POSITIVE
+            and s_not_recovered >= SEGMENT_MIN_NEGATIVE
+        )
+        s_posterior = (
+            segment_posterior_bps(s_recovered, s_total, posterior)
+            if s_gate
+            else posterior
+        )
+        s_key = segment_key(f_reason, p_method)
+        segments_dict[s_key] = SegmentCalibration(
+            segment_key=s_key,
+            intervention=intervention,
+            failure_reason=f_reason,
+            payment_method=p_method,
+            parent_posterior_bps=posterior,
+            observed_total=s_total,
+            observed_recovered=s_recovered,
+            observed_not_recovered=s_not_recovered,
+            prior_successes=segment_prior_successes(posterior),
+            prior_failures=segment_prior_failures(posterior),
+            posterior_bps=s_posterior,
+            active=s_gate,
+            status=STATUS_CALIBRATED if s_gate else STATUS_BASELINE,
+        )
+
     return InterventionCalibration(
         intervention=intervention,
         baseline_bps=baseline,
@@ -402,6 +530,7 @@ def calibrate_intervention(
         posterior_bps=posterior,
         active=meets_gate,
         status=STATUS_CALIBRATED if meets_gate else STATUS_BASELINE,
+        segments=segments_dict,
     )
 
 
