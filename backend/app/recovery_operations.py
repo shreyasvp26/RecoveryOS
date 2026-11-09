@@ -43,6 +43,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import db
 from .dashboard import rule_label
+from .incidents import (
+    SEVERITY_CRITICAL,
+    SEVERITY_HIGH,
+    STATUS_OPEN,
+    Incident,
+)
+from .incident_analysis import analyse_workload
 from .razorpay_client import marks_provider_result_unknown
 from .selector import NO_ACTION
 
@@ -95,6 +102,11 @@ SORT_ORDERS: tuple[str, ...] = (
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 DEFAULT_SCAN_LIMIT = 500
+
+OUTAGE_ALERT_SEVERITIES: frozenset[str] = frozenset({SEVERITY_HIGH, SEVERITY_CRITICAL})
+RAIL_SWITCH_INTERVENTIONS: frozenset[str] = frozenset(
+    {"payment_link", "alternate_method_prompt"}
+)
 
 
 class RecoveryQueueError(Exception):
@@ -300,6 +312,104 @@ def _lifecycle_state(
     return STATE_POLICY_ALLOWED
 
 
+def match_active_outage(
+    event: Mapping[str, Any],
+    incidents: Sequence[Incident],
+    *,
+    selected_intervention: str | None = None,
+) -> dict[str, Any] | None:
+    """Match an event against active high or critical degradation incidents."""
+    matching: list[Incident] = []
+    for inc in incidents:
+        if inc.status != STATUS_OPEN or inc.severity not in OUTAGE_ALERT_SEVERITIES:
+            continue
+        if all(event.get(dim) == val for dim, val in inc.segment.key):
+            matching.append(inc)
+
+    if not matching:
+        return None
+
+    matching.sort(
+        key=lambda inc: (
+            -len(inc.segment.dimensions),
+            0 if inc.severity == SEVERITY_CRITICAL else 1,
+            -inc.degradation_bps,
+            inc.incident_id,
+        )
+    )
+    best = matching[0]
+
+    return {
+        "incident_id": best.incident_id,
+        "severity": best.severity,
+        "status": best.status,
+        "segment_label": best.segment.label,
+        "dimensions": list(best.segment.dimensions),
+        "bank": best.segment.get("bank"),
+        "payment_method": best.segment.get("payment_method"),
+        "failure_reason": best.segment.get("failure_reason"),
+        "degradation_bps": best.degradation_bps,
+        "current_rate_bps": best.current.recovery_rate_bps,
+        "baseline_rate_bps": best.baseline.recovery_rate_bps,
+        "affected_event_count": best.affected_event_count,
+        "rail_switch_recommended": (
+            selected_intervention in RAIL_SWITCH_INTERVENTIONS
+            if selected_intervention is not None
+            else True
+        ),
+        "routing_guidance": (
+            f"Active {best.severity} degradation on {best.segment.label} "
+            f"(-{best.degradation_bps // 100}pp vs baseline); "
+            "rail-switching via payment_link or alternate_method_prompt is "
+            "favored over retrying the degraded rail."
+        ),
+    }
+
+
+def load_active_outage_incidents(conn) -> tuple[Incident, ...]:
+    """Load open HIGH or CRITICAL incidents from the persisted workload.
+
+    If fewer than 10 payment events exist, returns () immediately (fast-path for
+    small unit tests since incident windows require >= 5 current + >= 5 baseline
+    observations).
+    """
+    if db.count_payment_events(conn) < 10:
+        return ()
+    analysis = analyse_workload(conn)
+    return tuple(
+        inc
+        for inc in analysis.get("incidents", ())
+        if inc.status == STATUS_OPEN and inc.severity in OUTAGE_ALERT_SEVERITIES
+    )
+
+
+def lookup_active_outage_for_event(
+    conn,
+    event_id: str,
+    *,
+    incidents: Sequence[Incident] | None = None,
+) -> dict[str, Any] | None:
+    """Find the active rail outage affecting this event, if any."""
+    event = db.get_payment_event(conn, event_id)
+    if event is None:
+        return None
+    optimizer_decisions = db.get_optimizer_decisions_for_event(conn, event_id)
+    selection = _selection_view(optimizer_decisions)
+    selected_intervention = (
+        selection.get("selected_intervention") if selection is not None else None
+    )
+    active_incidents = (
+        tuple(incidents)
+        if incidents is not None
+        else load_active_outage_incidents(conn)
+    )
+    return match_active_outage(
+        event.to_dict(),
+        active_incidents,
+        selected_intervention=selected_intervention,
+    )
+
+
 def build_queue_row(
     event: Mapping[str, Any],
     classification: Mapping[str, Any] | None,
@@ -311,6 +421,7 @@ def build_queue_row(
     classification_failures: Mapping[str, Mapping[str, Any]] | None = None,
     provider_outcomes: Mapping[str, Mapping[str, Any]] | None = None,
     claims: Mapping[str, Mapping[str, Any]] | None = None,
+    active_outage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project one payment event and its persisted evidence into a queue row.
 
@@ -367,6 +478,7 @@ def build_queue_row(
         "outcome": outcome,
         "provider_outcome": provider_outcome,
         "claim": claim,
+        "active_outage": dict(active_outage) if active_outage is not None else None,
         "lifecycle_state": lifecycle_state,
         # An operator can only act where the authoritative state leaves room to
         # act. This is a UI affordance derived from persisted evidence — it is
@@ -504,6 +616,7 @@ def build_recovery_queue(
     sort: str = SORT_NEWEST,
     limit: int = DEFAULT_LIMIT,
     scan_limit: int = DEFAULT_SCAN_LIMIT,
+    incidents: Sequence[Incident] | None = None,
 ) -> dict[str, Any]:
     """Assemble the Recovery Operations queue from persisted state.
 
@@ -547,21 +660,36 @@ def build_recovery_queue(
         conn, link_ids
     )
     claims = db.get_execution_claim_for_events(conn, event_ids)
+    active_incidents = (
+        tuple(incidents)
+        if incidents is not None
+        else load_active_outage_incidents(conn)
+    )
 
-    rows = [
-        build_queue_row(
+    rows = []
+    for event in events:
+        opt_decs = optimizer_decisions.get(event["event_id"], [])
+        sel_view = _selection_view(opt_decs)
+        sel_int = (sel_view or {}).get("selected_intervention")
+        outage = match_active_outage(
             event,
-            classifications.get(event["event_id"]),
-            policy_decisions.get(event["event_id"], []),
-            optimizer_decisions.get(event["event_id"], []),
-            executions.get(event["event_id"], []),
-            recoveries,
-            classification_failures=classification_failures,
-            provider_outcomes=provider_outcomes,
-            claims=claims,
+            active_incidents,
+            selected_intervention=sel_int,
         )
-        for event in events
-    ]
+        rows.append(
+            build_queue_row(
+                event,
+                classifications.get(event["event_id"]),
+                policy_decisions.get(event["event_id"], []),
+                opt_decs,
+                executions.get(event["event_id"], []),
+                recoveries,
+                classification_failures=classification_failures,
+                provider_outcomes=provider_outcomes,
+                claims=claims,
+                active_outage=outage,
+            )
+        )
     matched = [
         row
         for row in rows
@@ -602,7 +730,9 @@ def state_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def build_queue_row_for_event(conn, event_id: str) -> dict[str, Any] | None:
+def build_queue_row_for_event(
+    conn, event_id: str, *, incidents: Sequence[Incident] | None = None
+) -> dict[str, Any] | None:
     """Project a single event, or None when the event does not exist.
 
     Used after an operator execution so the caller sees the authoritative new
@@ -616,11 +746,24 @@ def build_queue_row_for_event(conn, event_id: str) -> dict[str, Any] | None:
         {row["payment_link_id"] for row in executions if row.get("payment_link_id")}
     )
     classification = db.get_classification_result(conn, event_id)
+    opt_decs = db.get_optimizer_decisions_for_event(conn, event_id)
+    active_incidents = (
+        tuple(incidents)
+        if incidents is not None
+        else load_active_outage_incidents(conn)
+    )
+    sel_view = _selection_view(opt_decs)
+    sel_int = (sel_view or {}).get("selected_intervention")
+    outage = match_active_outage(
+        event.to_dict(),
+        active_incidents,
+        selected_intervention=sel_int,
+    )
     return build_queue_row(
         event.to_dict(),
         classification.to_dict() if classification is not None else None,
         db.get_policy_decisions_for_event(conn, event_id),
-        db.get_optimizer_decisions_for_event(conn, event_id),
+        opt_decs,
         executions,
         db.get_webhook_recovery_outcomes_for_payment_links(conn, link_ids),
         classification_failures=db.get_classification_failures_for_events(
@@ -630,4 +773,5 @@ def build_queue_row_for_event(conn, event_id: str) -> dict[str, Any] | None:
             conn, link_ids
         ),
         claims=db.get_execution_claim_for_events(conn, [event_id]),
+        active_outage=outage,
     )

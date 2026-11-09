@@ -347,6 +347,7 @@ function TraceTimeline({ trace }) {
     executions = [],
     attempts = [],
     summary = {},
+    active_outage = null,
   } = trace || {}
   const execMeta = EXECUTION_STATE_META[summary.execution_state] || {
     tone: 'neutral',
@@ -440,6 +441,28 @@ function TraceTimeline({ trace }) {
             </div>
           ))}
         </Stage>
+
+        {active_outage && (
+          <Stage
+            title="Active Rail Outage Context"
+            tone={active_outage.severity === 'CRITICAL' ? 'danger' : 'warn'}
+          >
+            <div className="meta-row">
+              <Badge tone={active_outage.severity === 'CRITICAL' ? 'danger' : 'warn'}>
+                {`${active_outage.severity} OUTAGE · ${active_outage.segment_label}`}
+              </Badge>
+            </div>
+            <div className="kv-grid">
+              <KeyVal k="Segment" v={active_outage.segment_label} />
+              <KeyVal
+                k="Current vs baseline recovery"
+                v={`${formatBps(active_outage.current_rate_bps)} vs ${formatBps(active_outage.baseline_rate_bps)}`}
+              />
+              <KeyVal k="Incident" v={active_outage.incident_id} />
+            </div>
+            <p className="stage__text">{active_outage.routing_guidance}</p>
+          </Stage>
+        )}
 
         <EconomicOptimizationStage optimizerDecisions={optimizer_decisions} />
         <ExecutionStage executions={executions} summary={summary} />

@@ -20,6 +20,7 @@ from ..dashboard import (
     build_dashboard_summary,
     build_event_trace,
 )
+from ..recovery_operations import lookup_active_outage_for_event
 
 router = APIRouter(tags=["dashboard"])
 
@@ -63,7 +64,8 @@ def event_trace(
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     """The historical decision chain for one event."""
-    trace = build_event_trace(conn, event_id)
+    outage = lookup_active_outage_for_event(conn, event_id)
+    trace = build_event_trace(conn, event_id, active_outage=outage)
     if trace is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

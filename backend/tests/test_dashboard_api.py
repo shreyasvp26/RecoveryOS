@@ -347,3 +347,62 @@ def test_not_recovered_only_supported_categories(monkeypatch, tmp_path) -> None:
     body = client.get("/dashboard/summary").json()
     keys = {c["key"] for c in body["not_recovered"]["categories"]}
     assert keys <= {"policy_blocked", "unclassified"}
+
+
+def test_event_trace_surfaces_active_outage_when_present(monkeypatch, tmp_path) -> None:
+    db_path, _ = _seed_full_chain(monkeypatch, tmp_path)
+    sample_outage = {
+        "incident_id": "inc_active_1",
+        "severity": "CRITICAL",
+        "status": "OPEN",
+        "segment_label": "HDFC + upi",
+        "dimensions": ["bank", "payment_method"],
+        "bank": "HDFC",
+        "payment_method": "upi",
+        "failure_reason": None,
+        "degradation_bps": 4200,
+        "current_rate_bps": 1500,
+        "baseline_rate_bps": 5700,
+        "affected_event_count": 12,
+        "rail_switch_recommended": True,
+        "routing_guidance": (
+            "Active CRITICAL degradation on HDFC + upi (-42pp vs baseline); "
+            "rail-switching via payment_link or alternate_method_prompt is "
+            "favored over retrying the degraded rail."
+        ),
+    }
+
+    from app.dashboard import build_event_trace
+
+    conn = connect(str(db_path))
+    trace_direct = build_event_trace(conn, "evt_dash_1", active_outage=sample_outage)
+    assert trace_direct is not None
+    assert trace_direct["active_outage"] == sample_outage
+    conn.close()
+
+    monkeypatch.setattr(
+        "app.routes.dashboard.lookup_active_outage_for_event",
+        lambda conn, event_id: sample_outage,
+    )
+    trace = client.get("/events/evt_dash_1/trace").json()
+    assert trace["active_outage"] == sample_outage
+
+    keys = _collect_keys(trace, set())
+    for key in keys:
+        assert not key.lower().startswith("recovered"), (
+            f"trace must not expose a per-event recovered amount, found key {key!r}"
+        )
+
+    serialized = json.dumps(trace).lower()
+    for forbidden in (
+        "hidden",
+        "oracle",
+        "true_probability",
+        "true_expected_value",
+        "regret",
+        "recovery_draw",
+        "outcome_draw",
+        "realized",
+        "ground_truth",
+    ):
+        assert forbidden not in serialized, f"trace exposes forbidden term: {forbidden}"

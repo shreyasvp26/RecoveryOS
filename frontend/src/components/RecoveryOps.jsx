@@ -137,7 +137,16 @@ function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, onRetryDiagnos
           <div className="ops-sub">{row.customer_id}</div>
         </td>
         <td>{formatINR(row.amount_paise)}</td>
-        <td>{humanize(row.failure_reason)}</td>
+        <td>
+          {humanize(row.failure_reason)}
+          {row.active_outage && (
+            <div className="ops-sub" style={{ marginTop: '4px' }}>
+              <Badge tone={row.active_outage.severity === 'CRITICAL' ? 'danger' : 'warn'}>
+                Active Outage · {row.active_outage.segment_label} ({row.active_outage.severity})
+              </Badge>
+            </div>
+          )}
+        </td>
         <td>
           {row.diagnosis ? (
             <>
@@ -227,6 +236,14 @@ function QueueRow({ row, busy, onExecute, onOpenTrace, onExplain, onRetryDiagnos
                 <span className="kv__k">Outcome</span>
                 <span className="kv__v">{row.outcome.note}</span>
               </div>
+              {row.active_outage && (
+                <div className="kv">
+                  <span className="kv__k">Active rail outage</span>
+                  <span className="kv__v">
+                    {row.active_outage.routing_guidance} ({row.active_outage.incident_id})
+                  </span>
+                </div>
+              )}
               {row.claim && (
                 <div className="kv">
                   <span className="kv__k">Claim</span>
