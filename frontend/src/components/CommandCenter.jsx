@@ -9,6 +9,7 @@ const STRATEGY_META = {
   recovery_os: { label: 'RecoveryOS', tone: 'brand', desc: 'AI-guided recovery pipeline' },
   recoveryos_v1: { label: 'RecoveryOS V1', tone: 'info', desc: 'Fixed-priority selection' },
   recoveryos_v2: { label: 'RecoveryOS V2', tone: 'brand', desc: 'Economic optimizer' },
+  static_rules: { label: 'Ordered Playbook', tone: 'info', desc: 'Rule-based fallback playbook' },
   oracle: { label: 'Oracle', tone: 'warn', desc: 'Evaluation-only upper bound' },
   naive_retry: { label: 'Naive retry', tone: 'info', desc: 'Blind retry on every failure' },
   no_action: { label: 'No action', tone: 'neutral', desc: 'Do nothing baseline' },
@@ -100,6 +101,13 @@ function BenchmarkPanel({ bench }) {
                 <span className="delta-value">{formatINR(bench.v2_vs_v1_paise)}</span>
                 <span className="delta-note">incremental SIMULATED recovered revenue</span>
               </div>
+              {bench.v2_vs_playbook_paise != null && (
+                <div className="delta-card">
+                  <span className="delta-label">V2 vs Playbook</span>
+                  <span className="delta-value">{formatINR(bench.v2_vs_playbook_paise)}</span>
+                  <span className="delta-note">incremental SIMULATED recovered revenue</span>
+                </div>
+              )}
               <div className="delta-card">
                 <span className="delta-label">V2 Oracle value capture</span>
                 <span className="delta-value">{formatRate(bench.v2_oracle_value_capture)}</span>

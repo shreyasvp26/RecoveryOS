@@ -174,6 +174,10 @@ def _persist_decision(
 def _decision_estimator_provenance(
     estimator: RecoveryProbabilityEstimator | None,
     intervention: str,
+    event: PaymentEvent | None = None,
+    *,
+    failure_reason: str | None = None,
+    payment_method: str | None = None,
 ) -> dict[str, Any]:
     """Capture the estimator state that produced a decision, at decision time.
 
@@ -183,8 +187,23 @@ def _decision_estimator_provenance(
     value is recorded immutably with the decision and never recomputed later, so
     a decision made under snapshot v1 still names v1 after v2 becomes active.
     """
+    f_reason = (
+        failure_reason
+        if failure_reason is not None
+        else (event.failure_reason if event is not None else None)
+    )
+    p_method = (
+        payment_method
+        if payment_method is not None
+        else (event.payment_method if event is not None else None)
+    )
     if estimator is not None and hasattr(estimator, "decision_provenance"):
-        provenance = estimator.decision_provenance(intervention)
+        try:
+            provenance = estimator.decision_provenance(
+                intervention, failure_reason=f_reason, payment_method=p_method
+            )
+        except TypeError:
+            provenance = estimator.decision_provenance(intervention)
         if isinstance(provenance, Mapping):
             return {
                 "estimator_mode": str(provenance.get("estimator_mode", "BASELINE")),
@@ -416,7 +435,7 @@ def execute_event(
             event.event_id,
             evaluation_time.isoformat(),
             optimizer_decision,
-            _decision_estimator_provenance(estimator, selected),
+            _decision_estimator_provenance(estimator, selected, event=event),
         )
     if selected == NO_ACTION:
         return ExecutionServiceResult(

@@ -130,6 +130,42 @@ def _phase17_benchmark_payload(
     strategies = summary["strategies"]
     v1 = strategies["recoveryos_v1"]
     v2 = strategies["recoveryos_v2"]
+
+    strategy_items: list[dict[str, Any]] = []
+
+    def _strategy_entry(
+        strategy_key: str, label: str, data: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "strategy": strategy_key,
+            "label": label,
+            "recovered_amount_paise": data["recovered_revenue_paise"],
+            "incremental_vs_no_action_paise": data["incremental_vs_no_action_paise"],
+            "interventions_attempted": data["interventions_attempted"],
+            "efficiency_paise_per_intervention": data["recovery_efficiency_paise"],
+            "total_regret_paise": data["total_regret_paise"],
+            "optimal_selection_rate": data["optimal_selection_rate"],
+            "unauthorized_attempts": data["unauthorized_attempts"],
+            "fraud_intervention_rate": data["fraud_intervention_rate"],
+            "exceptions": data["exceptions"],
+        }
+
+    for strat, lbl in (("no_action", "No Action"), ("naive_retry", "Naive Retry")):
+        if strat in strategies:
+            strategy_items.append(_strategy_entry(strat, lbl, strategies[strat]))
+
+    playbook = summary.get("ordered_playbook_baseline")
+    if isinstance(playbook, Mapping):
+        strategy_items.append(_strategy_entry("static_rules", "Ordered Playbook", playbook))
+
+    for strat, lbl in (
+        ("recoveryos_v1", "RecoveryOS V1"),
+        ("recoveryos_v2", "RecoveryOS V2"),
+        ("oracle", "Oracle"),
+    ):
+        if strat in strategies:
+            strategy_items.append(_strategy_entry(strat, lbl, strategies[strat]))
+
     return {
         "available": True,
         "methodology": summary["config"]["methodology"],
@@ -138,42 +174,7 @@ def _phase17_benchmark_payload(
         "event_count": latest["event_count"],
         "evaluation_mode": latest["evaluation_mode"],
         "saved_at": latest["saved_at"],
-        "strategies": [
-            {
-                "strategy": strategy,
-                "label": label,
-                "recovered_amount_paise": strategies[strategy][
-                    "recovered_revenue_paise"
-                ],
-                "incremental_vs_no_action_paise": strategies[strategy][
-                    "incremental_vs_no_action_paise"
-                ],
-                "interventions_attempted": strategies[strategy][
-                    "interventions_attempted"
-                ],
-                "efficiency_paise_per_intervention": strategies[strategy][
-                    "recovery_efficiency_paise"
-                ],
-                "total_regret_paise": strategies[strategy]["total_regret_paise"],
-                "optimal_selection_rate": strategies[strategy][
-                    "optimal_selection_rate"
-                ],
-                "unauthorized_attempts": strategies[strategy][
-                    "unauthorized_attempts"
-                ],
-                "fraud_intervention_rate": strategies[strategy][
-                    "fraud_intervention_rate"
-                ],
-                "exceptions": strategies[strategy]["exceptions"],
-            }
-            for strategy, label in (
-                ("no_action", "No Action"),
-                ("naive_retry", "Naive Retry"),
-                ("recoveryos_v1", "RecoveryOS V1"),
-                ("recoveryos_v2", "RecoveryOS V2"),
-                ("oracle", "Oracle"),
-            )
-        ],
+        "strategies": strategy_items,
         "recovery_os_recovered_amount_paise": v2["recovered_revenue_paise"],
         # The same frozen Phase 9 recovery-rate definition (recovered events
         # over the shared event set), applied to the V2 arm.
@@ -182,6 +183,9 @@ def _phase17_benchmark_payload(
         ),
         "incremental_over_no_action_paise": v2["incremental_vs_no_action_paise"],
         "v2_vs_v1_paise": v2["incremental_vs_v1_paise"],
+        "v2_vs_playbook_paise": summary.get("result", {}).get(
+            "v2_minus_playbook_recovered_revenue_paise"
+        ),
         "v2_oracle_value_capture": v2["incremental_oracle_value_capture"],
         "v1_total_regret_paise": v1["total_regret_paise"],
         "v2_total_regret_paise": v2["total_regret_paise"],

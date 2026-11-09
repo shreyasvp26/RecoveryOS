@@ -1779,6 +1779,7 @@ def upsert_benchmark_run(
     evaluation_time: str,
     evaluation_mode: str,
     summary_json: str,
+    saved_at: str | None = None,
 ) -> None:
     """Persist (or replace) a benchmark run summary, keyed by run_id."""
     conn.execute(
@@ -1795,7 +1796,7 @@ def upsert_benchmark_run(
             int(model_seed),
             evaluation_time,
             evaluation_mode,
-            datetime.now(timezone.utc).isoformat(),
+            saved_at or datetime.now(timezone.utc).isoformat(),
             summary_json,
         ),
     )

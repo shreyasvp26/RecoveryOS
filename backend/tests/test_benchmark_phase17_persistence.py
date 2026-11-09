@@ -39,7 +39,7 @@ def test_phase17_persists_into_the_existing_benchmark_table(conn) -> None:
     assert not [name for name in tables if "phase17" in name]
 
 
-def test_the_dashboard_shows_all_five_arms(conn) -> None:
+def test_the_dashboard_shows_all_benchmark_arms(conn) -> None:
     persist_phase17_benchmark(conn, seed=42, event_count=40)
     benchmark = build_dashboard_summary(conn)["benchmark"]
     assert benchmark["available"] is True
@@ -47,10 +47,12 @@ def test_the_dashboard_shows_all_five_arms(conn) -> None:
     assert [row["strategy"] for row in benchmark["strategies"]] == [
         "no_action",
         "naive_retry",
+        "static_rules",
         "recoveryos_v1",
         "recoveryos_v2",
         "oracle",
     ]
+    assert "v2_vs_playbook_paise" in benchmark
     for row in benchmark["strategies"]:
         for field in (
             "recovered_amount_paise",

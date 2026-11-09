@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from . import db
 from .benchmark import DeterministicClassifier
+from .benchmark_store import persist_phase17_benchmark
 from .classifier import classify_event
 from .config import build_policy_config
 from .execution_service import execute_event
@@ -32,12 +33,39 @@ from .generator import generate_events
 # timestamps reproducible too.
 REFERENCE_AT = datetime(2026, 8, 27, 13, 0, tzinfo=timezone.utc)
 
+_OPERATIONAL_TABLES = (
+    "execution_claims",
+    "execution_outcomes",
+    "intervention_attempts",
+    "policy_decisions",
+    "optimizer_decisions",
+    "classification_failures",
+    "classification_results",
+    "webhook_recovery_outcomes",
+    "webhook_deliveries",
+    "provider_payment_link_outcomes",
+    "estimator_calibration_snapshots",
+    "payment_events",
+    "benchmark_runs",
+)
+
+
+def clear_operational_tables(conn: sqlite3.Connection) -> None:
+    """Clear all operational pipeline tables and benchmark runs."""
+    for table in _OPERATIONAL_TABLES:
+        try:
+            conn.execute(f"DELETE FROM {table}")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+
 
 def populate(
     *,
     seed: int = 42,
     count: int = 500,
     conn: sqlite3.Connection | None = None,
+    reset: bool = False,
 ) -> dict[str, int]:
     """Populate the durable pipeline DB and return counts of what happened.
 
@@ -51,6 +79,8 @@ def populate(
     conn = conn or db.connect_database()
     db.init_db(conn)
     db.run_migrations(conn)
+    if reset:
+        clear_operational_tables(conn)
     try:
         config = build_policy_config()
         classifier = DeterministicClassifier()
@@ -77,6 +107,12 @@ def populate(
                 executed += 1
             elif result.status == "no_action":
                 blocked += 1
+
+        if db.get_latest_benchmark_run(conn) is None:
+            persist_phase17_benchmark(
+                conn, seed=seed, event_count=count, saved_at=REFERENCE_AT.isoformat()
+            )
+
         return {
             "events_generated": len(events),
             "ingested": ingested,
@@ -95,8 +131,13 @@ def _main(argv=None) -> None:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--count", type=int, default=500)
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Clear operational tables before populating and persist benchmark run.",
+    )
     args = parser.parse_args(argv)
-    print(populate(seed=args.seed, count=args.count))
+    print(populate(seed=args.seed, count=args.count, reset=args.reset))
 
 
 if __name__ == "__main__":
