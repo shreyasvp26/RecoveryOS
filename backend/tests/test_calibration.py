@@ -25,12 +25,17 @@ from app.calibration import (
     STATUS_CALIBRATED,
     CalibrationError,
     CalibrationObservation,
+    SegmentCalibration,
     calibrate,
     calibrate_intervention,
     map_provider_status,
     posterior_bps,
     prior_failures,
     prior_successes,
+    segment_key,
+    segment_posterior_bps,
+    segment_prior_failures,
+    segment_prior_successes,
 )
 
 # payment_link baseline in bps from the frozen taxonomy (BASE_RECOVERY_BPS).
@@ -214,3 +219,170 @@ def test_simulated_world_has_no_observations_and_never_calibrates():
     row = calibrate_intervention(INTERVENTION, [])
     assert row.active is False
     assert row.status == STATUS_BASELINE
+
+
+# ---------------------------------------------------------------------------
+# Phase 38: Level-2 Contextual Segment Empirical-Bayes calibration
+# ---------------------------------------------------------------------------
+
+
+def test_segment_prior_split_is_integer_exact_and_sums_to_strength():
+    parent_bps = 4000
+    s = segment_prior_successes(parent_bps)
+    f = segment_prior_failures(parent_bps)
+    assert s + f == cal.SEGMENT_PRIOR_STRENGTH
+    assert s == 4000 * cal.SEGMENT_PRIOR_STRENGTH // 10000
+    assert s == 4
+    assert f == 6
+
+
+def test_segment_posterior_uses_integer_floor_division():
+    # 5 total, 4 recovered, parent_bps = 3000 -> prior_s = 3000 * 10 // 10000 = 3
+    # posterior = (4 + 3) * 10000 // (5 + 10) = 70000 // 15 = 4666
+    parent_bps = 3000
+    assert segment_posterior_bps(4, 5, parent_bps) == 4666
+    assert type(segment_posterior_bps(4, 5, parent_bps)) is int
+
+
+def test_segment_calibration_meets_gate_and_shrinks_to_level1_parent():
+    obs = [
+        CalibrationObservation(
+            event_id=f"e{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_RECOVERED,
+            terminal=True,
+            amount_paid_paise=1000,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="webhook",
+            failure_reason="bank_timeout",
+            payment_method="upi",
+        )
+        for i in range(4)
+    ] + [
+        CalibrationObservation(
+            event_id=f"e_other_{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_RECOVERED,
+            terminal=True,
+            amount_paid_paise=1000,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="webhook",
+            failure_reason="insufficient_funds",
+            payment_method="card",
+        )
+        for i in range(2)
+    ] + [
+        CalibrationObservation(
+            event_id=f"n{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_NOT_RECOVERED,
+            terminal=True,
+            amount_paid_paise=None,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="provider_poll",
+            failure_reason="bank_timeout",
+            payment_method="upi",
+        )
+        for i in range(2)
+    ] + [
+        CalibrationObservation(
+            event_id=f"n_other_{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_NOT_RECOVERED,
+            terminal=True,
+            amount_paid_paise=None,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="provider_poll",
+            failure_reason="insufficient_funds",
+            payment_method="card",
+        )
+        for i in range(2)
+    ]
+    row = calibrate_intervention(INTERVENTION, obs)
+    assert row.active is True
+    l1_posterior = row.posterior_bps
+    assert "bank_timeout:upi" in row.segments
+    seg = row.segments["bank_timeout:upi"]
+    assert isinstance(seg, SegmentCalibration)
+    assert seg.active is True
+    assert seg.status == STATUS_CALIBRATED
+    assert seg.observed_total == 6
+    assert seg.observed_recovered == 4
+    assert seg.observed_not_recovered == 2
+    assert seg.parent_posterior_bps == l1_posterior
+    expected_seg_posterior = (4 + segment_prior_successes(l1_posterior)) * 10000 // (
+        6 + cal.SEGMENT_PRIOR_STRENGTH
+    )
+    assert seg.posterior_bps == expected_seg_posterior
+
+
+def test_sparse_segment_below_gate_stays_inactive_and_falls_back_to_parent():
+    obs = [
+        CalibrationObservation(
+            event_id=f"e{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_RECOVERED,
+            terminal=True,
+            amount_paid_paise=1000,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="webhook",
+            failure_reason="bank_timeout",
+            payment_method="upi",
+        )
+        for i in range(2)
+    ] + [
+        CalibrationObservation(
+            event_id=f"e_other_{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_RECOVERED,
+            terminal=True,
+            amount_paid_paise=1000,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="webhook",
+            failure_reason="insufficient_funds",
+            payment_method="card",
+        )
+        for i in range(4)
+    ] + [
+        CalibrationObservation(
+            event_id=f"n{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_NOT_RECOVERED,
+            terminal=True,
+            amount_paid_paise=None,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="provider_poll",
+            failure_reason="bank_timeout",
+            payment_method="upi",
+        )
+        for i in range(1)
+    ] + [
+        CalibrationObservation(
+            event_id=f"n_other_{i}",
+            intervention=INTERVENTION,
+            outcome=OUTCOME_NOT_RECOVERED,
+            terminal=True,
+            amount_paid_paise=None,
+            observed_at=None,
+            evidence_id=None,
+            evidence_source="provider_poll",
+            failure_reason="insufficient_funds",
+            payment_method="card",
+        )
+        for i in range(3)
+    ]
+    row = calibrate_intervention(INTERVENTION, obs)
+    assert row.active is True
+    l1_posterior = row.posterior_bps
+    seg = row.segments["bank_timeout:upi"]
+    assert seg.active is False
+    assert seg.status == STATUS_BASELINE
+    assert seg.observed_total == 3
+    assert seg.posterior_bps == l1_posterior
