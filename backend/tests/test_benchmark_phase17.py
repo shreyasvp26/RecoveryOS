@@ -31,7 +31,9 @@ from app.benchmark_phase17 import (
     arm_recoveryos_v2,
     build_event_context,
     evaluate_oracle,
+    ordered_playbook_candidates,
     run_phase17_benchmark,
+    select_ordered_playbook,
 )
 from app.benchmark_phase17_metrics import (
     all_strategy_metrics,
@@ -53,6 +55,7 @@ from app.benchmark_phase17_report import (
     VERDICT_V2_LOST,
     VERDICT_V2_WON,
     canonical_json,
+    run_multi_seed_phase17_benchmark,
     summarize_report,
     verify_fairness,
 )
@@ -613,3 +616,47 @@ def test_every_declared_robustness_seed_runs_and_stays_fair(seed: int) -> None:
         assert metrics[strategy].unauthorized_attempts == 0
         assert metrics[strategy].exceptions == 0
         assert metrics[strategy].fraud_intervention_rate in (None, 0.0)
+
+
+def test_ordered_playbook_falls_back_when_first_choice_is_denied() -> None:
+    candidates = ordered_playbook_candidates("insufficient_funds")
+    assert candidates[0] == "reminder"
+
+    # When "reminder" is not in allowed_candidates, fall back to "retry_delayed"
+    selected = select_ordered_playbook(
+        "insufficient_funds", ("retry_delayed", "payment_link")
+    )
+    assert selected == "retry_delayed"
+
+
+def test_summarize_report_includes_ordered_playbook_baseline(small_report) -> None:
+    summary = summarize_report(small_report, verify=False)
+    assert "ordered_playbook_baseline" in summary
+    assert "v2_minus_playbook_true_ev_paise" in summary["result"]
+    assert "v2_minus_playbook_recovered_revenue_paise" in summary["result"]
+
+    playbook = summary["ordered_playbook_baseline"]
+    assert playbook["unauthorized_attempts"] == 0
+    assert playbook["fraud_intervention_rate"] in (None, 0.0)
+    assert playbook["policy_bounded"] is True
+
+
+def test_multi_seed_benchmark_aggregates_across_seeds() -> None:
+    multi = run_multi_seed_phase17_benchmark(
+        seeds=(42, 43, 44), event_count=80, verify=False
+    )
+    assert multi["seed_count"] == 3
+    assert multi["seeds"] == [42, 43, 44]
+    assert (
+        multi["v2_vs_v1_true_ev_paise"]["min_paise"]
+        <= multi["v2_vs_v1_true_ev_paise"]["mean_paise"]
+        <= multi["v2_vs_v1_true_ev_paise"]["max_paise"]
+    )
+    assert multi["v2_vs_v1_true_ev_paise"]["mean_paise"] > 0
+    assert (
+        multi["v2_vs_playbook_true_ev_paise"]["min_paise"]
+        <= multi["v2_vs_playbook_true_ev_paise"]["mean_paise"]
+        <= multi["v2_vs_playbook_true_ev_paise"]["max_paise"]
+    )
+    assert multi["v2_vs_playbook_true_ev_paise"]["mean_paise"] != 0
+    assert multi["safety_all_passed"] is True

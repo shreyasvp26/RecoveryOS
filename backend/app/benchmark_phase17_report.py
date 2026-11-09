@@ -26,21 +26,26 @@ are computed checks whose failure is visible in the report, not prose claims.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from .benchmark_config import Phase17BenchmarkConfig
+from .benchmark_config import Phase17BenchmarkConfig, ROBUSTNESS_SEEDS
 from .benchmark_phase17 import (
     CANONICAL_STRATEGY_ORDER,
     STRATEGY_LABELS,
     STRATEGY_NO_ACTION,
     STRATEGY_ORACLE,
+    STRATEGY_STATIC_RULES,
     STRATEGY_V1,
     STRATEGY_V2,
+    Phase17BenchmarkError,
     Phase17BenchmarkReport,
     run_phase17_benchmark,
 )
 from .benchmark_phase17_metrics import (
+    StrategyMetrics,
+    aggregate_multi_seed_metrics,
     all_strategy_metrics,
+    ordered_playbook_metrics,
     selection_disagreements,
 )
 
@@ -141,7 +146,10 @@ def _same_hidden_world(report: Phase17BenchmarkReport) -> bool:
     return True
 
 
-def _verdict(metrics: Mapping[str, Any]) -> dict[str, Any]:
+def _verdict(
+    metrics: Mapping[str, Any],
+    playbook_metrics: StrategyMetrics | None = None,
+) -> dict[str, Any]:
     """Apply the frozen verdict rule to a run's aggregate metrics."""
     v1_ev = metrics[STRATEGY_V1].total_true_ev_paise
     v2_ev = metrics[STRATEGY_V2].total_true_ev_paise
@@ -159,7 +167,7 @@ def _verdict(metrics: Mapping[str, Any]) -> dict[str, Any]:
     else:
         verdict = VERDICT_NOT_YET
 
-    return {
+    res: dict[str, Any] = {
         "verdict": verdict,
         "criterion": "total true economic value (V2 - V1)",
         "v2_minus_v1_true_ev_paise": delta,
@@ -173,6 +181,15 @@ def _verdict(metrics: Mapping[str, Any]) -> dict[str, Any]:
             - metrics[STRATEGY_V1].recovered_revenue_paise
         ),
     }
+    if playbook_metrics is not None:
+        res["v2_minus_playbook_true_ev_paise"] = (
+            v2_ev - playbook_metrics.total_true_ev_paise
+        )
+        res["v2_minus_playbook_recovered_revenue_paise"] = (
+            metrics[STRATEGY_V2].recovered_revenue_paise
+            - playbook_metrics.recovered_revenue_paise
+        )
+    return res
 
 
 def summarize_report(
@@ -180,6 +197,7 @@ def summarize_report(
 ) -> dict[str, Any]:
     """Assemble the complete machine-readable Phase 17 summary."""
     metrics = all_strategy_metrics(report)
+    playbook = ordered_playbook_metrics(report)
     disagreements = selection_disagreements(report)
     return {
         "run_id": report.run_id,
@@ -190,6 +208,7 @@ def summarize_report(
             strategy: metrics[strategy].to_dict()
             for strategy in CANONICAL_STRATEGY_ORDER
         },
+        "ordered_playbook_baseline": playbook.to_dict(),
         "v1_v2_disagreements": len(disagreements),
         "v1_v2_disagreement_sample": [
             {"event_id": event_id, "v1": v1, "v2": v2}
@@ -210,7 +229,7 @@ def summarize_report(
                 for strategy in CANONICAL_STRATEGY_ORDER
             },
         },
-        "result": _verdict(metrics),
+        "result": _verdict(metrics, playbook),
     }
 
 
@@ -248,6 +267,17 @@ def format_report(summary: Mapping[str, Any]) -> str:
             f"{rupees(metric['total_regret_paise']):>16}"
             f"{_pct(metric['optimal_selection_rate']):>9}"
         )
+    if "ordered_playbook_baseline" in summary:
+        pb = summary["ordered_playbook_baseline"]
+        lines.append(
+            f"{STRATEGY_LABELS[STRATEGY_STATIC_RULES]:<16}"
+            f"{rupees(pb['recovered_revenue_paise']):>16}"
+            f"{rupees(pb['incremental_vs_no_action_paise']):>16}"
+            f"{pb['interventions_attempted']:>10}"
+            f"{rupees(pb['total_true_ev_paise']):>16}"
+            f"{rupees(pb['total_regret_paise']):>16}"
+            f"{_pct(pb['optimal_selection_rate']):>9}"
+        )
 
     v1 = strategies[STRATEGY_V1]
     v2 = strategies[STRATEGY_V2]
@@ -255,8 +285,20 @@ def format_report(summary: Mapping[str, Any]) -> str:
         "",
         f"V2 vs V1 (revenue):        {rupees(v2['incremental_vs_v1_paise'])}",
         f"V2 vs No Action (revenue): {rupees(v2['incremental_vs_no_action_paise'])}",
+    ]
+    if "v2_minus_playbook_recovered_revenue_paise" in result:
+        lines.append(
+            f"V2 vs Playbook (revenue):  {rupees(result['v2_minus_playbook_recovered_revenue_paise'])}"
+        )
+    lines += [
         f"V2 vs V1 (true EV):        "
         f"{rupees(result['v2_minus_v1_true_ev_paise'])}",
+    ]
+    if "v2_minus_playbook_true_ev_paise" in result:
+        lines.append(
+            f"V2 vs Playbook (true EV):  {rupees(result['v2_minus_playbook_true_ev_paise'])}"
+        )
+    lines += [
         f"V2 optimal-selection:      {_pct(v2['optimal_selection_rate'])}"
         f"  (V1 {_pct(v1['optimal_selection_rate'])})",
         f"V2 total regret:           {rupees(v2['total_regret_paise'])}"
@@ -297,6 +339,62 @@ def format_report(summary: Mapping[str, Any]) -> str:
         f"  difference {rupees(result['v2_minus_v1_true_ev_paise'])}",
         f"  materiality {rupees(result['materiality_threshold_paise'])}"
         f" ({result['materiality_rule']})",
+    ]
+    return "\n".join(lines)
+
+
+def run_multi_seed_phase17_benchmark(
+    seeds: Sequence[int] = ROBUSTNESS_SEEDS,
+    *,
+    event_count: int = 500,
+    verify: bool = False,
+) -> dict[str, Any]:
+    """Run the benchmark across multiple seeds and aggregate the results."""
+    if not isinstance(seeds, Sequence) or not seeds:
+        raise Phase17BenchmarkError("seeds must be a non-empty sequence of integers")
+    for s in seeds:
+        if type(s) is not int:
+            raise Phase17BenchmarkError("seeds must be a non-empty sequence of integers")
+
+    summaries = []
+    for seed in seeds:
+        cfg = Phase17BenchmarkConfig(
+            event_count=event_count,
+            event_seed=seed,
+            outcome_seed=seed,
+        )
+        report = run_phase17_benchmark(cfg)
+        summary = summarize_report(report, verify=verify)
+        summaries.append(summary)
+
+    return aggregate_multi_seed_metrics(summaries)
+
+
+def format_multi_seed_report(multi: Mapping[str, Any]) -> str:
+    """Render a clean human-readable multi-seed statistical report."""
+    seeds_str = ", ".join(str(s) for s in multi["seeds"])
+    lines = [
+        "PHASE 17 MULTI-SEED STATISTICAL BENCHMARK",
+        "=========================================",
+        f"Seeds ({multi['seed_count']}):         {seeds_str}",
+        f"Events per seed:   {multi['event_count_per_seed']}",
+        f"V2 win rate:       {multi['v2_win_count']}/{multi['seed_count']} ({_pct(multi['v2_win_count'] / multi['seed_count'])})",
+        "",
+        "True Economic Value Comparison (Integer Paise):",
+        f"  V2 vs V1 (Mean):          {rupees(multi['v2_vs_v1_true_ev_paise']['mean_paise'])}",
+        f"  V2 vs V1 (Min/Max):       {rupees(multi['v2_vs_v1_true_ev_paise']['min_paise'])} / {rupees(multi['v2_vs_v1_true_ev_paise']['max_paise'])}",
+        f"  V2 vs V1 (Median):        {rupees(multi['v2_vs_v1_true_ev_paise']['median_paise'])}",
+        "",
+        f"  V2 vs Playbook (Mean):    {rupees(multi['v2_vs_playbook_true_ev_paise']['mean_paise'])}",
+        f"  V2 vs Playbook (Min/Max): {rupees(multi['v2_vs_playbook_true_ev_paise']['min_paise'])} / {rupees(multi['v2_vs_playbook_true_ev_paise']['max_paise'])}",
+        f"  V2 vs Playbook (Median):  {rupees(multi['v2_vs_playbook_true_ev_paise']['median_paise'])}",
+        "",
+        "Simulated Revenue Comparison (Integer Paise):",
+        f"  V2 vs V1 (Mean):          {rupees(multi['v2_vs_v1_revenue_paise']['mean_paise'])}",
+        f"  V2 vs Playbook (Mean):    {rupees(multi['v2_vs_playbook_revenue_paise']['mean_paise'])}",
+        "",
+        f"Safety Checks:       {'PASS' if multi['safety_all_passed'] else 'FAIL'}",
+        f"Fairness Checks:     {'PASS' if multi['fairness_all_passed'] else 'FAIL'}",
     ]
     return "\n".join(lines)
 
