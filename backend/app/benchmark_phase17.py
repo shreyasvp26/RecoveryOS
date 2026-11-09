@@ -105,6 +105,7 @@ STRATEGY_NAIVE_RETRY = "naive_retry"
 STRATEGY_V1 = "recoveryos_v1"
 STRATEGY_V2 = "recoveryos_v2"
 STRATEGY_ORACLE = "oracle"
+STRATEGY_STATIC_RULES = "static_rules"
 
 CANONICAL_STRATEGY_ORDER: tuple[str, ...] = (
     STRATEGY_NO_ACTION,
@@ -114,12 +115,18 @@ CANONICAL_STRATEGY_ORDER: tuple[str, ...] = (
     STRATEGY_ORACLE,
 )
 
+VALID_RECORD_STRATEGIES: tuple[str, ...] = (
+    *CANONICAL_STRATEGY_ORDER,
+    STRATEGY_STATIC_RULES,
+)
+
 STRATEGY_LABELS: Mapping[str, str] = {
     STRATEGY_NO_ACTION: "No Action",
     STRATEGY_NAIVE_RETRY: "Naive Retry",
     STRATEGY_V1: "RecoveryOS V1",
     STRATEGY_V2: "RecoveryOS V2",
     STRATEGY_ORACLE: "Oracle",
+    STRATEGY_STATIC_RULES: "Ordered Playbook",
 }
 
 # Arms that make their decision strictly inside the policy authorization
@@ -141,6 +148,54 @@ SOURCE_NAIVE_FIXED = "naive_fixed_retry"
 SOURCE_V1_PRIORITY = "v1_fixed_priority"
 SOURCE_V2_ECONOMIC = "v2_economic"
 SOURCE_ORACLE = "oracle_true_ev"
+SOURCE_ORDERED_PLAYBOOK = "ordered_playbook_fallback"
+
+ORDERED_PLAYBOOK_BY_FAILURE_REASON: Mapping[str, tuple[str, ...]] = {
+    "bank_timeout": (
+        "retry_delayed",
+        "alternate_method_prompt",
+        "payment_link",
+        "reminder",
+        "retry_immediate",
+    ),
+    "network_issue": (
+        "retry_delayed",
+        "retry_immediate",
+        "alternate_method_prompt",
+        "payment_link",
+        "reminder",
+    ),
+    "insufficient_funds": (
+        "reminder",
+        "retry_delayed",
+        "payment_link",
+        "alternate_method_prompt",
+    ),
+    "authentication_failed": (
+        "payment_link",
+        "alternate_method_prompt",
+        "reminder",
+        "retry_delayed",
+    ),
+    "expired_card": (
+        "alternate_method_prompt",
+        "payment_link",
+        "reminder",
+    ),
+    "declined_by_bank": (
+        "alternate_method_prompt",
+        "payment_link",
+        "retry_delayed",
+        "reminder",
+    ),
+    "issuer_unavailable": (
+        "retry_delayed",
+        "alternate_method_prompt",
+        "payment_link",
+    ),
+    "transaction_declined": (),
+    "payment_failed": (),
+}
 
 # Exception categories. Every failure stays visible and stays classified; a
 # failure is NEVER folded into an ordinary "did not recover" outcome.
@@ -387,9 +442,9 @@ class StrategyEventRecord:
     exception_category: str | None = None
 
     def __post_init__(self) -> None:
-        if self.strategy not in CANONICAL_STRATEGY_ORDER:
+        if self.strategy not in VALID_RECORD_STRATEGIES:
             raise Phase17BenchmarkError(
-                f"strategy must be one of {CANONICAL_STRATEGY_ORDER}, "
+                f"strategy must be one of {VALID_RECORD_STRATEGIES}, "
                 f"got {self.strategy!r}"
             )
         if (self.exception is None) != (self.exception_category is None):
@@ -861,8 +916,83 @@ def run_phase17_benchmark(
     )
 
 
+# ---------------------------------------------------------------------------
+# Ordered Playbook Baseline (Evaluation Only)
+# ---------------------------------------------------------------------------
+
+
+def ordered_playbook_candidates(failure_reason: str) -> tuple[str, ...]:
+    """Return the ordered candidate interventions for a failure reason."""
+    return ORDERED_PLAYBOOK_BY_FAILURE_REASON.get(
+        failure_reason, INTERVENTION_PRIORITY
+    )
+
+
+def select_ordered_playbook(
+    failure_reason: str, allowed_candidates: Sequence[str]
+) -> str:
+    """Select the first allowed intervention according to the ordered playbook."""
+    allowed_set = set(allowed_candidates)
+    for candidate in ordered_playbook_candidates(failure_reason):
+        if candidate != NO_ACTION and candidate in allowed_set:
+            return candidate
+    return NO_ACTION
+
+
+def evaluate_ordered_playbook_records(
+    report: Phase17BenchmarkReport,
+) -> tuple[StrategyEventRecord, ...]:
+    """Evaluate the ordered playbook baseline across the shared event contexts."""
+    world = HiddenWorld(
+        outcome_seed=report.config.outcome_seed,
+        model=report.config.economic_model,
+        replication=report.config.replication,
+    )
+    executor = SimulatedExecutor()
+
+    records: list[StrategyEventRecord] = []
+    for context in report.contexts:
+        if context.exception is not None:
+            records.append(
+                _exception_record(
+                    context,
+                    STRATEGY_STATIC_RULES,
+                    context.exception,
+                    context.exception_category or EXCEPTION_CONFIGURATION,
+                )
+            )
+            continue
+        try:
+            selected = select_ordered_playbook(
+                context.event.failure_reason, context.allowed
+            )
+            record = _finalize(
+                context,
+                STRATEGY_STATIC_RULES,
+                selected,
+                SOURCE_ORDERED_PLAYBOOK,
+                world,
+                executor,
+                require_authorization=True,
+            )
+        except Exception as exc:
+            record = _exception_record(
+                context,
+                STRATEGY_STATIC_RULES,
+                str(exc),
+                EXCEPTION_MALFORMED_RESULT,
+            )
+        records.append(record)
+    return tuple(records)
+
+
 def _main(argv: Sequence[str] | None = None) -> None:
-    from .benchmark_phase17_report import format_report, summarize_report
+    from .benchmark_phase17_report import (
+        format_multi_seed_report,
+        format_report,
+        run_multi_seed_phase17_benchmark,
+        summarize_report,
+    )
 
     parser = argparse.ArgumentParser(
         description=(
@@ -877,11 +1007,33 @@ def _main(argv: Sequence[str] | None = None) -> None:
         "--outcome-seed", type=int, default=None, help="outcome realization seed"
     )
     parser.add_argument(
+        "--seeds",
+        type=str,
+        default=None,
+        help="comma-separated seeds for multi-seed benchmark (e.g. 42,43,44,45,46)",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="print the machine-readable summary only"
     )
     args = parser.parse_args(argv)
 
     defaults = Phase17BenchmarkConfig()
+    if args.seeds is not None:
+        raw_tokens = [tok.strip() for tok in args.seeds.split(",") if tok.strip()]
+        seeds = [int(tok) for tok in raw_tokens]
+        multi = run_multi_seed_phase17_benchmark(
+            seeds=seeds,
+            event_count=defaults.event_count if args.count is None else args.count,
+            verify=True,
+        )
+        if args.json:
+            print(json.dumps(multi, indent=2, sort_keys=True))
+            return
+        print(format_multi_seed_report(multi))
+        print()
+        print(json.dumps(multi, indent=2, sort_keys=True))
+        return
+
     config = Phase17BenchmarkConfig(
         event_seed=defaults.event_seed if args.seed is None else args.seed,
         event_count=defaults.event_count if args.count is None else args.count,

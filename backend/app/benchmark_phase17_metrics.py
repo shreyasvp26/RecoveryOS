@@ -465,17 +465,19 @@ class StrategyMetrics:
         }
 
 
-def strategy_metrics(
-    report: Phase17BenchmarkReport, strategy: str
+def strategy_metrics_from_records(
+    report: Phase17BenchmarkReport,
+    records: Sequence[StrategyEventRecord],
+    *,
+    strategy: str,
+    policy_bounded: bool,
 ) -> StrategyMetrics:
-    """Compute every metric for one arm of a completed run."""
+    """Compute every metric for a sequence of records against a report's baselines."""
     from .benchmark_phase17 import STRATEGY_NO_ACTION, STRATEGY_ORACLE, STRATEGY_V1
 
-    records = report.for_strategy(strategy)
     no_action = report.for_strategy(STRATEGY_NO_ACTION)
     oracle = report.for_strategy(STRATEGY_ORACLE)
     v1 = report.for_strategy(STRATEGY_V1)
-    policy_bounded = strategy in POLICY_BOUNDED_STRATEGIES
 
     exceptions_by_category = exception_counts(records)
     exceptions = sum(exceptions_by_category.values())
@@ -531,6 +533,32 @@ def strategy_metrics(
     )
 
 
+def strategy_metrics(
+    report: Phase17BenchmarkReport, strategy: str
+) -> StrategyMetrics:
+    """Compute every metric for one arm of a completed run."""
+    records = report.for_strategy(strategy)
+    policy_bounded = strategy in POLICY_BOUNDED_STRATEGIES
+    return strategy_metrics_from_records(
+        report, records, strategy=strategy, policy_bounded=policy_bounded
+    )
+
+
+def ordered_playbook_metrics(
+    report: Phase17BenchmarkReport,
+) -> StrategyMetrics:
+    """Compute every metric for the ordered playbook baseline."""
+    from .benchmark_phase17 import (
+        STRATEGY_STATIC_RULES,
+        evaluate_ordered_playbook_records,
+    )
+
+    records = evaluate_ordered_playbook_records(report)
+    return strategy_metrics_from_records(
+        report, records, strategy=STRATEGY_STATIC_RULES, policy_bounded=True
+    )
+
+
 def all_strategy_metrics(
     report: Phase17BenchmarkReport,
 ) -> dict[str, StrategyMetrics]:
@@ -570,3 +598,78 @@ def no_action_events(report: Phase17BenchmarkReport, strategy: str) -> int:
         for record in _scored(report.for_strategy(strategy))
         if record.selected_intervention == NO_ACTION
     )
+
+
+def aggregate_multi_seed_metrics(
+    summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate benchmark metrics across multiple seeds into summary statistics."""
+    from .benchmark_phase17 import Phase17BenchmarkError
+
+    if not summaries:
+        raise Phase17BenchmarkError("summaries must be non-empty")
+
+    seeds: list[int] = []
+    v2_minus_v1_evs: list[int] = []
+    v2_minus_playbook_evs: list[int] = []
+    v2_minus_v1_revs: list[int] = []
+    v2_minus_playbook_revs: list[int] = []
+
+    for s in summaries:
+        seed = int(s["config"]["event_seed"])
+        seeds.append(seed)
+        v2_ev = int(s["strategies"]["recoveryos_v2"]["total_true_ev_paise"])
+        v1_ev = int(s["strategies"]["recoveryos_v1"]["total_true_ev_paise"])
+        playbook_ev = int(s["ordered_playbook_baseline"]["total_true_ev_paise"])
+        v2_rev = int(s["strategies"]["recoveryos_v2"]["recovered_revenue_paise"])
+        v1_rev = int(s["strategies"]["recoveryos_v1"]["recovered_revenue_paise"])
+        playbook_rev = int(s["ordered_playbook_baseline"]["recovered_revenue_paise"])
+
+        v2_minus_v1_evs.append(v2_ev - v1_ev)
+        v2_minus_playbook_evs.append(v2_ev - playbook_ev)
+        v2_minus_v1_revs.append(v2_rev - v1_rev)
+        v2_minus_playbook_revs.append(v2_rev - playbook_rev)
+
+    return {
+        "seed_count": len(summaries),
+        "seeds": seeds,
+        "event_count_per_seed": int(summaries[0]["config"]["event_count"]),
+        "v2_win_count": sum(
+            1 for s in summaries if s["result"]["verdict"] == "V2 WON"
+        ),
+        "v2_vs_v1_true_ev_paise": {
+            "mean_paise": sum(v2_minus_v1_evs) // len(summaries),
+            "min_paise": min(v2_minus_v1_evs),
+            "max_paise": max(v2_minus_v1_evs),
+            "median_paise": int(median(v2_minus_v1_evs)),
+            "per_seed": dict(zip(seeds, v2_minus_v1_evs)),
+        },
+        "v2_vs_playbook_true_ev_paise": {
+            "mean_paise": sum(v2_minus_playbook_evs) // len(summaries),
+            "min_paise": min(v2_minus_playbook_evs),
+            "max_paise": max(v2_minus_playbook_evs),
+            "median_paise": int(median(v2_minus_playbook_evs)),
+            "per_seed": dict(zip(seeds, v2_minus_playbook_evs)),
+        },
+        "v2_vs_v1_revenue_paise": {
+            "mean_paise": sum(v2_minus_v1_revs) // len(summaries),
+            "min_paise": min(v2_minus_v1_revs),
+            "max_paise": max(v2_minus_v1_revs),
+        },
+        "v2_vs_playbook_revenue_paise": {
+            "mean_paise": sum(v2_minus_playbook_revs) // len(summaries),
+            "min_paise": min(v2_minus_playbook_revs),
+            "max_paise": max(v2_minus_playbook_revs),
+        },
+        "safety_all_passed": all(
+            s["safety"]["recoveryos_unauthorized_attempts"]["recoveryos_v2"] == 0
+            and (s["safety"]["recoveryos_fraud_intervention_rate"]["recoveryos_v2"] or 0.0) == 0.0
+            and sum(s["safety"]["total_exceptions"].values()) == 0
+            for s in summaries
+        ),
+        "fairness_all_passed": all(
+            all((s.get("fairness") or {}).values())
+            for s in summaries
+            if s.get("fairness") is not None
+        ),
+    }
