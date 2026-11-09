@@ -372,3 +372,89 @@ def test_hierarchical_contextual_segment_estimation_and_fallback():
     assert prov_fb["status"] == "CALIBRATED"
     assert prov_fb["posterior_bps"] == level1_posterior
     assert prov_fb["hierarchy_level"] == "intervention"
+
+
+def test_decision_estimator_provenance_passes_segment_context():
+    """Phase 42: _decision_estimator_provenance passes event failure_reason and payment_method."""
+    from app.execution_service import _decision_estimator_provenance
+
+    # Create a snapshot where Level-1 is uncalibrated but Level-2 segment is active
+    snap = _snapshot(
+        version=3,
+        active_bps={},  # No Level-1 active
+        evidenced={
+            "payment_link": {
+                "observed_total": 2,
+                "observed_recovered": 1,
+                "observed_not_recovered": 1,
+                "baseline_bps": 3800,
+                "active_segments": {
+                    "bank_timeout:upi": 5200,
+                },
+                "evidenced_segments": {
+                    "bank_timeout:upi": {
+                        "observed_total": 6,
+                        "observed_recovered": 4,
+                        "observed_not_recovered": 2,
+                        "baseline_bps": 3800,
+                    }
+                },
+            }
+        },
+    )
+    est = CalibratedRecoveryProbabilityEstimator(
+        baseline=_StubEstimator(), snapshot=snap
+    )
+
+    # Event matching active segment: bank_timeout + upi -> CALIBRATED
+    event_seg = PaymentEvent(
+        event_id="evt_seg",
+        order_id="ord_seg",
+        payment_id="pay_seg",
+        customer_id="cust_seg",
+        amount_paise=100000,
+        currency="INR",
+        payment_method="upi",
+        failure_reason="bank_timeout",
+        bank="HDFC",
+        risk_flag="normal",
+        customer_history=CustomerHistory(4, 1, True),
+        timestamp="2026-08-27T12:00:00+00:00",
+    )
+    prov = _decision_estimator_provenance(est, "payment_link", event=event_seg)
+    assert prov["estimator_mode"] == PROVENANCE_CALIBRATED
+    assert prov["estimator_version"] == 3
+    assert prov["estimator_reason"] == REASON_CALIBRATED_ACTIVE
+
+    # Event not matching segment and no Level-1 -> BASELINE
+    event_diff = PaymentEvent(
+        event_id="evt_diff",
+        order_id="ord_diff",
+        payment_id="pay_diff",
+        customer_id="cust_diff",
+        amount_paise=100000,
+        currency="INR",
+        payment_method="card",
+        failure_reason="insufficient_funds",
+        bank="HDFC",
+        risk_flag="normal",
+        customer_history=CustomerHistory(4, 1, True),
+        timestamp="2026-08-27T12:00:00+00:00",
+    )
+    prov_diff = _decision_estimator_provenance(est, "payment_link", event=event_diff)
+    assert prov_diff["estimator_mode"] == PROVENANCE_BASELINE
+    assert prov_diff["estimator_version"] == 3
+
+    # Fallback to single-arg stub decision_provenance
+    class _SingleArgStub:
+        def decision_provenance(self, intervention):
+            return {
+                "estimator_mode": "STUB_MODE",
+                "estimator_version": 99,
+                "estimator_reason": "stub_reason",
+            }
+
+    stub_prov = _decision_estimator_provenance(_SingleArgStub(), "payment_link", event=event_seg)
+    assert stub_prov["estimator_mode"] == "STUB_MODE"
+    assert stub_prov["estimator_version"] == 99
+

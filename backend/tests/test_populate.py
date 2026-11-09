@@ -103,3 +103,45 @@ def test_populate_does_not_crash_on_rerun_without_idempotency_guard(db_conn) -> 
     populate(seed=42, count=5, conn=db_conn)
     populate(seed=42, count=5, conn=db_conn)  # must not raise
     populate(seed=42, count=5, conn=db_conn)  # must not raise
+
+
+def test_populate_seeds_benchmark_run_when_empty(db_conn) -> None:
+    """Phase 42: A clean populate run seeds benchmark_runs for the Command Center."""
+    from app import db
+    assert db.get_latest_benchmark_run(db_conn) is None
+    res = populate(seed=42, count=10, conn=db_conn)
+    assert res["events_generated"] == 10
+    bench = db.get_latest_benchmark_run(db_conn)
+    assert bench is not None
+    assert bench["seed"] == 42
+    assert bench["event_count"] == 10
+
+
+def test_populate_reset_clears_and_repopulates(db_conn) -> None:
+    """Phase 42: populate(reset=True) clears operational tables and re-populates."""
+    from app import db
+    populate(seed=42, count=10, conn=db_conn)
+    assert db.count_payment_events(db_conn) == 10
+
+    # Populating with reset=True and new count
+    res = populate(seed=42, count=5, conn=db_conn, reset=True)
+    assert res["ingested"] == 5
+    assert db.count_payment_events(db_conn) == 5
+    bench = db.get_latest_benchmark_run(db_conn)
+    assert bench is not None
+    assert bench["event_count"] == 5
+
+
+def test_populate_main_cli_parses_reset(monkeypatch) -> None:
+    """Phase 42: _main accepts --reset flag."""
+    from app.populate import _main
+    called = {}
+
+    def mock_populate(**kwargs):
+        called.update(kwargs)
+        return {"events_generated": 5, "ingested": 5, "classified": 5, "executed": 2, "blocked_no_execution": 3}
+
+    monkeypatch.setattr("app.populate.populate", mock_populate)
+    _main(["--reset", "--seed", "99", "--count", "15"])
+    assert called == {"seed": 99, "count": 15, "reset": True}
+

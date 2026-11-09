@@ -40,7 +40,7 @@ def persist_benchmark(
 
 
 def persist_phase17_benchmark(
-    conn, *, seed: int, event_count: int
+    conn, *, seed: int, event_count: int, saved_at: str | None = None
 ) -> dict[str, Any]:
     """Run the Phase 17 signal-bearing benchmark and persist its summary.
 
@@ -67,8 +67,12 @@ def persist_phase17_benchmark(
         evaluation_time=config.evaluated_at,
         evaluation_mode=config.evaluation_mode,
         summary_json=json.dumps(summary),
+        saved_at=saved_at,
     )
     return summary
+
+
+save_phase17_benchmark_run = persist_phase17_benchmark
 
 
 def _main(argv: Sequence[str] | None = None) -> None:
