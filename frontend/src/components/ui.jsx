@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 /** Shared presentational primitives for the RecoveryOS Command Center. */
 
 const TONES = {
@@ -76,18 +78,61 @@ export function LoadingBlock({ label = 'Loading…' }) {
   )
 }
 
-export function ErrorState({ message, retry }) {
+export function ErrorBanner({ message, onRetry, retry }) {
+  const [key, setKey] = useState('')
+  const handleRetry = onRetry || retry || (() => window.location.reload())
+  const msgStr = typeof message === 'string' ? message : (message?.message || '')
+  const isAuthError =
+    msgStr.toLowerCase().includes('operator credentials') ||
+    msgStr.toLowerCase().includes('operator api key')
+
+  const handleSave = (e) => {
+    e.preventDefault()
+    const trimmed = key.trim()
+    if (trimmed) {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('recoveryos_operator_api_key', trimmed)
+      }
+      if (typeof onRetry === 'function') {
+        onRetry()
+      } else if (typeof retry === 'function') {
+        retry()
+      } else if (typeof window !== 'undefined') {
+        window.location.reload()
+      }
+    }
+  }
+
   return (
     <div className="state-block state-block--error">
       <div className="state-block__title">Failed to load data</div>
-      <p>{message || 'The API could not be reached.'}</p>
-      {retry && (
-        <button className="btn" onClick={retry}>
+      <p>{msgStr || 'The API could not be reached.'}</p>
+      {isAuthError && (
+        <form onSubmit={handleSave} style={{ display: 'flex', gap: '8px', marginTop: '12px', justifyContent: 'center' }}>
+          <input
+            type="password"
+            className="input"
+            placeholder="Enter operator API key"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            style={{ maxWidth: '320px' }}
+          />
+          <button type="submit" className="btn btn--primary">
+            Save Key &amp; Retry
+          </button>
+        </form>
+      )}
+      {!isAuthError && handleRetry && (
+        <button className="btn" onClick={handleRetry}>
           Retry
         </button>
       )}
     </div>
   )
+}
+
+export function ErrorState({ message, retry, onRetry }) {
+  return <ErrorBanner message={message} retry={retry} onRetry={onRetry} />
 }
 
 export function EmptyState({ title = 'No data yet', message }) {
